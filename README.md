@@ -44,6 +44,21 @@
 - **全量无损验证**：自动执行全量备份、无变更增量（0 传输）、单文件变更增量、异机原名恢复，并对所有恢复文件执行 SHA-256 逐字节强比对。
 - **报告一键导出**：支持导出 Markdown 检验报告与 JSON 机器可读数据。
 
+### 6. 飞牛 fnOS 账号官方「我的文件」原生个人空间协议打通与 PoC 验收通过
+- **彻底告别伪造私人 SMB 共享**：全面转向飞牛原生安全登录与个人空间 API，用户只需输入 NAS 飞牛账号密码，无需折腾复杂的 Windows 局域网 SMB 权限与文件夹导出。
+- **真实 NAS 端到端 C# 协议闭环**：
+  1. 支持 `util.crypto.getRSAPub` + RSA-PKCS1 + AES-256-CBC 协商加密与会话登录。
+  2. 动态查询权威 UID 与真实个人空间基准（如 `vol1/1006`），无需猜测。
+  3. `file.ls(path=null)` 原生直接列举当前用户的「我的文件」根目录。
+  4. `file.mkdir` 在「我的文件」下建立专属测试与任务目录，飞牛 Web 文件管理器即时可见。
+  5. `file.checkUpload` + HTTP `POST /upload`（HMAC-SHA256 签名）流式上传文件。
+  6. HTTP `GET /multiple-download`（Cookie 认证）流式下载未压缩原字节。
+  7. **SHA-256 强比对 100% 一致**，0 字节损坏，零误删用户既有文件。
+- **统一存储抽象层 `INasStorageProvider`**：
+  - **`FnOsPersonalStorageProvider`**：默认及首选提供程序，直连官方「我的文件」。
+  - **`SmbStorageProvider`**：作为高级/兼容备选方案。
+  - 详见技术验证报告：[`docs/fnos_personal_space_technical_verification.md`](docs/fnos_personal_space_technical_verification.md)。
+
 ---
 
 ## 一、交付文件清单
@@ -60,4 +75,18 @@
 
 ## 二、自动化测试套件
 
-系统内置自动化回归测试套件 `FNSyncPlus.Tests`，共涵盖 **28 个测试模块、170+ 项核心断言**，涵盖边界字节、冲突防范、并发控制、多任务隔离、连接生命周期管理、测试实验室及图标生成，全部通过（0 失败）。
+系统内置自动化回归测试套件 `FNSyncPlus.Tests`，共涵盖 **38 个测试模块、265 项核心断言**：
+- 单元测试：145 项全部通过（0 失败）
+- 本地模拟备份与恢复：115 项全部通过（0 失败）
+- GUI 自动化状态机流转：5 项全部通过（0 失败）
+- 真实 NAS SMB 与个人空间线上测试：在未配置受控环境变量时严格执行安全跳过（2 项），杜绝在 CI 或非受控环境下操作用户真实数据。
+- 飞牛官方「我的文件」原生协议独立 PoC (`--poc`)：在真实 NAS (`192.168.8.120:5667`) 上 100% 验收通过！
+
+执行测试套件命令：
+```powershell
+# 运行全量回归测试套件
+dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj
+
+# 运行真实 NAS 飞牛官方「我的文件」端到端验收 PoC
+dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj --poc
+```

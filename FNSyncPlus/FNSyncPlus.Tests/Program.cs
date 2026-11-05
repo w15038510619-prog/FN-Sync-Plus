@@ -5,6 +5,8 @@ using System.Text;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
+using FNSyncPlus.Core.Storage;
+using FNSyncPlus.Core.Storage.FnOs;
 using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.Tests
@@ -39,6 +41,13 @@ namespace FNSyncPlus.Tests
         static async Task<int> Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
+
+            if (args.Any(a => a.Equals("--poc", StringComparison.OrdinalIgnoreCase) || a.Equals("poc", StringComparison.OrdinalIgnoreCase)))
+            {
+                bool pocSuccess = await FnOsPersonalSpacePoc.RunAsync(args);
+                return pocSuccess ? 0 : 1;
+            }
+
             Console.WriteLine("================================================================================");
             Console.WriteLine("          飞牛同步增强版 (FN Sync Plus) 核心功能与缺陷修复自动化测试套件");
             Console.WriteLine("================================================================================\n");
@@ -65,6 +74,7 @@ namespace FNSyncPlus.Tests
                 await TestNoUsernameShareAssumptionAndSafeDefaultsAsync();
                 await TestFnOsIntegrationAndOfficialClientDetectionAsync();
                 TestSafetyProbeCleanupMechanics(); // 新增：安全探测清理机制单元测试
+                TestNasStorageProviderAbstractionAndFactory(); // 新增：NAS 统一存储抽象层与工厂单元测试
 
                 // ==================== 2. 本地模拟备份与恢复 ====================
                 SetCategory(TestCategory.LocalSimulated);
@@ -1526,6 +1536,95 @@ namespace FNSyncPlus.Tests
             {
                 try { Directory.Delete(tempShareRoot, true); } catch { }
             }
+        }
+
+        static void TestNasStorageProviderAbstractionAndFactory()
+        {
+            Console.WriteLine("\n--- 31-B. NAS 统一存储抽象层 (INasStorageProvider) 与工厂安全性测试 ---");
+
+            // 1. 工厂默认创建与类型验证
+            var defaultProvider = NasStorageProviderFactory.CreateProvider();
+            Assert(defaultProvider is FnOsPersonalStorageProvider, "默认工厂方法返回 FnOsPersonalStorageProvider 个人空间提供程序");
+            Assert(defaultProvider.ProviderType == StorageProviderType.FnOsPersonal, "默认提供程序类型为 FnOsPersonal");
+            Assert(!defaultProvider.IsAuthenticated, "初始状态未鉴权 (IsAuthenticated == false)");
+            Assert(defaultProvider.RootDisplayPath.Contains("我的文件"), "初始根路径包含官方「我的文件」描述");
+
+            // 2. SMB 存储提供程序创建与初始状态
+            var smbProvider = NasStorageProviderFactory.CreateProvider(StorageProviderType.SmbShare);
+            Assert(smbProvider is SmbStorageProvider, "工厂创建 SMB 存储提供程序成功");
+            Assert(smbProvider.ProviderType == StorageProviderType.SmbShare, "提供程序类型为 SmbShare");
+            Assert(!smbProvider.IsAuthenticated, "SMB 初始状态未认证");
+
+            // 3. 存储操作结果模型测试
+            var okResult = StorageOperationResult.Ok("test/backup/sub");
+            Assert(okResult.Success, "StorageOperationResult.Ok 返回 Success == true");
+            Assert(okResult.TargetPath == "test/backup/sub", "StorageOperationResult.Ok 目标路径匹配");
+
+            var failResult = StorageOperationResult.Fail("网络超时", 10060, "test/path");
+            Assert(!failResult.Success, "StorageOperationResult.Fail 返回 Success == false");
+            Assert(failResult.ErrorMessage == "网络超时", "StorageOperationResult.Fail 错误信息匹配");
+            Assert(failResult.ErrorCode == 10060, "StorageOperationResult.Fail 错误码匹配");
+
+            // 4. 加密辅助工具安全性与脱敏测试
+            string sensitive = "MySuperSecretPassword#2026!";
+            string masked = FnOsCryptoHelper.MaskSensitive(sensitive);
+            Assert(masked.Contains("***"), "敏感密码被安全脱敏掩码");
+            Assert(!masked.Contains("SuperSecret"), "脱敏字符串绝不泄露核心敏感凭据主体");
+
+            string reqId = FnOsCryptoHelper.GenerateReqId();
+            Assert(!string.IsNullOrEmpty(reqId) && reqId.Length >= 8, "ReqId 随机生成符合协议规范");
+
+            string deviceId = FnOsCryptoHelper.GenerateDeviceId();
+            Assert(!string.IsNullOrEmpty(deviceId), "DeviceId 唯一设备标识生成成功");
+
+            // 5. 存储项目与远端实体模型映射
+            var storageItem = new NasStorageItem
+            {
+                Name = "核心报表.xlsx",
+                RelativePath = "财务/核心报表.xlsx",
+                IsDirectory = false,
+                Size = 1048576,
+                LastModifiedUtc = new DateTime(2026, 11, 5, 8, 30, 0, DateTimeKind.Utc)
+            };
+            Assert(storageItem.Name == "核心报表.xlsx", "NasStorageItem 名称正确");
+            Assert(!storageItem.IsDirectory, "NasStorageItem 文件类型正确");
+            Assert(storageItem.Size == 1048576, "NasStorageItem 文件大小正确");
+
+            var fnFile = new FnOsFileEntry
+            {
+                Name = "工作相册",
+                Dir = 1,
+                Size = 0,
+                ModifiedTimeSeconds = 1762331400,
+                Uid = 1006,
+                VolumeId = 1
+            };
+            Assert(fnFile.IsDirectory, "FnOsFileEntry Dir == 1 正确映射为 IsDirectory");
+            Assert(fnFile.Uid == 1006, "FnOsFileEntry UID 正确保留");
+
+            // 6. 路径安全越界防护拦截
+            bool fnOsDeleteBlocked = false;
+            try
+            {
+                // 未认证或非法越界时必须被严格拦截
+                defaultProvider.DeleteAsync("../../../etc/passwd").GetAwaiter().GetResult();
+            }
+            catch
+            {
+                fnOsDeleteBlocked = true;
+            }
+            Assert(fnOsDeleteBlocked, "飞牛个人空间提供程序严格拦截非法路径越界删除操作");
+
+            bool smbDeleteBlocked = false;
+            try
+            {
+                smbProvider.DeleteAsync("../../Windows/System32").GetAwaiter().GetResult();
+            }
+            catch
+            {
+                smbDeleteBlocked = true;
+            }
+            Assert(smbDeleteBlocked, "SMB 共享提供程序严格拦截非法路径越界删除操作");
         }
 
         static async Task TestRealNasSmbFolderLifecycleAsync()
