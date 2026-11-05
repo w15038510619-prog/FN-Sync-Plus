@@ -1226,8 +1226,21 @@ namespace FNSyncPlus.Tests
         static void BuildApplicationIcons()
         {
             Console.WriteLine("\n--- 28. 原创应用图标方案生成与多尺寸 ICO 资产校验 ---");
-            string artifactDir = @"C:\Users\S\.gemini\antigravity\brain\eacd3aa8-c774-45a0-b5d4-d23d66a0eaa6";
-            string assetsDir = @"D:\FN_AutoSync_Package\FNSyncPlus\FNSyncPlus.WinUI\Assets";
+            string currentDir = AppDomain.CurrentDomain.BaseDirectory;
+            // 向上回溯定位工程根目录
+            string repoRoot = Path.GetFullPath(Path.Combine(currentDir, "..", "..", "..", ".."));
+            string assetsDir = Path.Combine(repoRoot, "FNSyncPlus", "FNSyncPlus.WinUI", "Assets");
+            if (!Directory.Exists(assetsDir))
+            {
+                assetsDir = Path.Combine(AppContext.BaseDirectory, "Assets");
+            }
+            Directory.CreateDirectory(assetsDir);
+
+            string defaultArtifactDir = @"C:\Users\S\.gemini\antigravity\brain\eacd3aa8-c774-45a0-b5d4-d23d66a0eaa6";
+            string artifactDir = Directory.Exists(defaultArtifactDir)
+                ? defaultArtifactDir
+                : Path.Combine(repoRoot, "Artifacts");
+            Directory.CreateDirectory(artifactDir);
 
             IconBuilder.GenerateIcons(artifactDir, assetsDir);
 

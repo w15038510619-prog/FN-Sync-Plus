@@ -11,6 +11,9 @@ namespace FNSyncPlus.Tests
     {
         public static void GenerateIcons(string artifactsDir, string assetsDir)
         {
+            Directory.CreateDirectory(artifactsDir);
+            Directory.CreateDirectory(assetsDir);
+
             // 1. Generate 3-Concept Preview side-by-side
             using (var previewBmp = new Bitmap(800, 280))
             using (var g = Graphics.FromImage(previewBmp))
