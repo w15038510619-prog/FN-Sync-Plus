@@ -11,14 +11,34 @@ using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.WinUI.ViewModels
 {
-    public class PlannedTaskItem
+    public partial class PlannedTaskItem : ObservableObject
     {
-        public string SourcePath { get; set; } = string.Empty;
-        public string SourceFolderName { get; set; } = string.Empty;
-        public string TargetSubFolder { get; set; } = string.Empty;
-        public string FullTargetUnc { get; set; } = string.Empty;
-        public string StatusText { get; set; } = string.Empty;
-        public bool IsConflict { get; set; }
+        [ObservableProperty]
+        private string _sourcePath = string.Empty;
+
+        [ObservableProperty]
+        private string _sourceFolderName = string.Empty;
+
+        [ObservableProperty]
+        private string _targetSubFolder = string.Empty;
+
+        [ObservableProperty]
+        private string _fullTargetUnc = string.Empty;
+
+        [ObservableProperty]
+        private string _finalTargetUnc = string.Empty;
+
+        [ObservableProperty]
+        private string _statusText = string.Empty;
+
+        [ObservableProperty]
+        private bool _isConflict;
+
+        [ObservableProperty]
+        private bool _isFailed;
+
+        [ObservableProperty]
+        private string _errorMessage = string.Empty;
     }
 
     public partial class AddFolderWizardViewModel : ObservableObject
@@ -348,15 +368,46 @@ namespace FNSyncPlus.WinUI.ViewModels
             await Task.Yield();
             if (!CanCreate || PlannedTasks.Count == 0) return 0;
 
+            // 1. 严格校验目标根路径是否真实存在且可写，禁止向无效根目录批量创建任务
+            var rootValidation = await _smbService.ValidateDirectoryAccessStateAsync(NasDestinationRoot, _settings.NasServer);
+            if (!rootValidation.DoesShareExist || !rootValidation.IsDirectoryWritable)
+            {
+                StatusMessage = $"目标根共享无法访问或不可写: {rootValidation.DetailedMessage}";
+                foreach (var item in PlannedTasks)
+                {
+                    item.IsFailed = true;
+                    item.StatusText = "❌ 目标共享不可写";
+                    item.ErrorMessage = rootValidation.DetailedMessage;
+                }
+                return 0;
+            }
+
             int createdCount = 0;
-            _settings.PreferredBackupRoot = NasDestinationRoot;
-            _settings.Save();
+            int failedCount = 0;
 
             foreach (var item in PlannedTasks)
             {
-                // 确保在 NAS 个人空间根目录下自动建立同名备份子目录
-                var (ensureOk, ensuredPath, _) = await _fnOsService.EnsureSameNameBackupFolderAsync(NasDestinationRoot, item.SourcePath);
-                string finalTarget = ensureOk ? ensuredPath : item.FullTargetUnc;
+                // 确保在 NAS 目标空间根目录下自动建立目标备份子目录（传入 item.TargetSubFolder 尊重批次同名去重规划）
+                var (ensureOk, ensuredPath, ensureMsg) = await _fnOsService.EnsureSameNameBackupFolderAsync(
+                    NasDestinationRoot, 
+                    item.SourcePath, 
+                    item.TargetSubFolder
+                );
+
+                if (!ensureOk)
+                {
+                    // 创建失败立即停止该任务，严禁使用失败目录作为同步目标启动同步！
+                    item.IsFailed = true;
+                    item.StatusText = $"❌ 创建目标失败: {ensureMsg}";
+                    item.ErrorMessage = ensureMsg;
+                    failedCount++;
+                    continue;
+                }
+
+                // 创建成功，写入实际验证路径并更新状态
+                item.FinalTargetUnc = ensuredPath;
+                item.StatusText = "✔ 目标就绪，任务已建立";
+                item.IsFailed = false;
 
                 var task = new SyncTask
                 {
@@ -364,7 +415,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                     TaskName = item.SourceFolderName,
                     SourceFolder = item.SourcePath,
                     DestinationRoot = NasDestinationRoot,
-                    DestinationFolder = finalTarget,
+                    DestinationFolder = ensuredPath,
                     Enabled = true,
                     AutoSyncEnabled = true,
                     RealtimeWatchEnabled = true,
@@ -374,6 +425,22 @@ namespace FNSyncPlus.WinUI.ViewModels
                 _taskManager.AddTask(task);
                 _taskManager.TriggerSync(task.TaskId);
                 createdCount++;
+            }
+
+            // 只有在至少成功创建了任务时，才保存 PreferredBackupRoot，严禁提前保存无效根目录
+            if (createdCount > 0)
+            {
+                _settings.PreferredBackupRoot = NasDestinationRoot;
+                _settings.Save();
+            }
+
+            if (failedCount > 0)
+            {
+                StatusMessage = $"任务创建完毕：{createdCount} 个成功，{failedCount} 个失败。失败任务已中止未启动同步。";
+            }
+            else
+            {
+                StatusMessage = $"全部 {createdCount} 个同步任务已成功建立并启动！";
             }
 
             return createdCount;

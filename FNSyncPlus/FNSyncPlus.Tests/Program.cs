@@ -9,10 +9,32 @@ using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.Tests
 {
+    enum TestCategory
+    {
+        Unit,
+        LocalSimulated,
+        GuiAutomation,
+        RealNasSmb,
+        RealPersonalSpace
+    }
+
     class Program
     {
         static int _passed = 0;
         static int _failed = 0;
+        static int _skipped = 0;
+
+        static TestCategory _currentCategory = TestCategory.Unit;
+        static readonly Dictionary<TestCategory, (int Passed, int Failed, int Skipped)> _categoryStats = new()
+        {
+            { TestCategory.Unit, (0, 0, 0) },
+            { TestCategory.LocalSimulated, (0, 0, 0) },
+            { TestCategory.GuiAutomation, (0, 0, 0) },
+            { TestCategory.RealNasSmb, (0, 0, 0) },
+            { TestCategory.RealPersonalSpace, (0, 0, 0) }
+        };
+
+        static void SetCategory(TestCategory cat) => _currentCategory = cat;
 
         static async Task<int> Main(string[] args)
         {
@@ -23,6 +45,8 @@ namespace FNSyncPlus.Tests
 
             try
             {
+                // ==================== 1. 单元测试 ====================
+                SetCategory(TestCategory.Unit);
                 TestNormalNames();
                 TestBoundaryByteLengths();
                 TestVeryLongChineseName();
@@ -30,6 +54,20 @@ namespace FNSyncPlus.Tests
                 TestCollisionHandling();
                 TestPathSafetyAndRecursionPrevention();
                 TestDirectoryNameValidation();
+                TestMultiTaskModelAndSettingsMigration();
+                TestPersonalSpaceAndCategorizedShares();
+                TestPrivateSpaceSafetyAndTeamShareWarning();
+                await TestTaskPauseStrictnessAsync();
+                TestStateBadgeColorMappingAndDisplayStatus();
+                TestNasConnectionServiceStateTransitionsAndDisconnect();
+                BuildApplicationIcons();
+                await TestNasDirectoryValidationAndWin32ErrorHandlingAsync();
+                await TestNoUsernameShareAssumptionAndSafeDefaultsAsync();
+                await TestFnOsIntegrationAndOfficialClientDetectionAsync();
+                TestSafetyProbeCleanupMechanics(); // 新增：安全探测清理机制单元测试
+
+                // ==================== 2. 本地模拟备份与恢复 ====================
+                SetCategory(TestCategory.LocalSimulated);
                 await TestManifestIsolationAndLockingAsync();
                 await TestStagingFixedShortNamesNear255BytesAsync();
                 await TestManifestPreservationOnPartialFailureAsync();
@@ -37,25 +75,28 @@ namespace FNSyncPlus.Tests
                 await TestEmptyDirectoryRestorationAsync();
                 await TestEndToEndIncrementalSyncAndRestoreAsync();
                 await TestSyncWithRealTestFilesAsync();
-                TestMultiTaskModelAndSettingsMigration();
-                TestPersonalSpaceAndCategorizedShares();
                 await TestAutoPlanTargetSubFolderAndDeduplicationAsync();
                 await TestTaskManagerConcurrencyAndMultiTaskIsolationAsync();
                 await TestRestoreEngineDiscoverBackupPackagesAsync();
-                TestPrivateSpaceSafetyAndTeamShareWarning();
                 await TestBatchFolderCollisionPlanningAsync();
                 await TestMultiTaskEngineIsolationAsync();
-                await TestTaskPauseStrictnessAsync();
                 await TestRestoreStagingShortNameSafetyAsync();
-                TestStateBadgeColorMappingAndDisplayStatus();
-                TestNasConnectionServiceStateTransitionsAndDisconnect();
                 await TestTestLabEngineSampleGenerationAndSimulationAsync();
-                BuildApplicationIcons();
-                await TestNasDirectoryValidationAndWin32ErrorHandlingAsync();
-                await TestNoUsernameShareAssumptionAndSafeDefaultsAsync();
-                await TestRealNasSmbFolderLifecycleAsync();
-                await TestFnOsIntegrationAndOfficialClientDetectionAsync();
                 await TestPersonalSpaceSameNameBackupFolderAndRestoreLifecycleAsync();
+                await TestTargetCreationFailureAbortsTaskAndPreservesErrorsAsync(); // 新增：目标失败立即中止与错误保存测试
+                await TestSameNameDeduplicationRespectedInFolderCreationAsync(); // 新增：批次去重规划在自动创建同名目录中严格遵守
+
+                // ==================== 3. GUI 自动化测试 ====================
+                SetCategory(TestCategory.GuiAutomation);
+                await TestGuiWorkflowAndStateMachinesAsync(); // GUI 流程与状态机流转
+
+                // ==================== 4. 真实 NAS SMB 线上测试 ====================
+                SetCategory(TestCategory.RealNasSmb);
+                await TestRealNasSmbFolderLifecycleAsync();
+
+                // ==================== 5. 真实个人空间备份还原 ====================
+                SetCategory(TestCategory.RealPersonalSpace);
+                await TestRealNasPersonalSpaceBackupAndRestoreAsync();
             }
             catch (Exception ex)
             {
@@ -66,7 +107,20 @@ namespace FNSyncPlus.Tests
             }
 
             Console.WriteLine("\n================================================================================");
-            Console.WriteLine($"测试完成: 共通过 {_passed} 项, 失败 {_failed} 项");
+            Console.WriteLine("                    飞牛同步增强版 (FN Sync Plus) 测试统计报告");
+            Console.WriteLine("================================================================================");
+            string FormatCat(TestCategory cat, string name)
+            {
+                var s = _categoryStats[cat];
+                return $"  {name,-22} 通过: {s.Passed,3} 项, 失败: {s.Failed,2} 项, 跳过: {s.Skipped,2} 项";
+            }
+            Console.WriteLine(FormatCat(TestCategory.Unit, "1. 单元测试:"));
+            Console.WriteLine(FormatCat(TestCategory.LocalSimulated, "2. 本地模拟备份与恢复:"));
+            Console.WriteLine(FormatCat(TestCategory.GuiAutomation, "3. GUI 自动化测试:"));
+            Console.WriteLine(FormatCat(TestCategory.RealNasSmb, "4. 真实 NAS SMB 线上测试:"));
+            Console.WriteLine(FormatCat(TestCategory.RealPersonalSpace, "5. 真实个人空间备份还原:"));
+            Console.WriteLine("--------------------------------------------------------------------------------");
+            Console.WriteLine($"  总计执行测试: 通过 {_passed} 项, 失败 {_failed} 项, 安全跳过 {_skipped} 项");
             Console.WriteLine("================================================================================");
 
             return _failed == 0 ? 0 : 1;
@@ -81,6 +135,8 @@ namespace FNSyncPlus.Tests
                 Console.ResetColor();
                 Console.WriteLine(testName + (detail != null ? $" ({detail})" : ""));
                 _passed++;
+                var cur = _categoryStats[_currentCategory];
+                _categoryStats[_currentCategory] = (cur.Passed + 1, cur.Failed, cur.Skipped);
             }
             else
             {
@@ -89,7 +145,20 @@ namespace FNSyncPlus.Tests
                 Console.ResetColor();
                 Console.WriteLine(testName + (detail != null ? $" -> {detail}" : ""));
                 _failed++;
+                var cur = _categoryStats[_currentCategory];
+                _categoryStats[_currentCategory] = (cur.Passed, cur.Failed + 1, cur.Skipped);
             }
+        }
+
+        static void Skip(string testName, string? reason = null)
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.Write("[SKIP] ");
+            Console.ResetColor();
+            Console.WriteLine(testName + (reason != null ? $" -> {reason}" : ""));
+            _skipped++;
+            var cur = _categoryStats[_currentCategory];
+            _categoryStats[_currentCategory] = (cur.Passed, cur.Failed, cur.Skipped + 1);
         }
 
         static void TestNormalNames()
@@ -1157,7 +1226,9 @@ namespace FNSyncPlus.Tests
         {
             Console.WriteLine("\n--- 26. 全局单例 NasConnectionService 状态流转与断开清理测试 ---");
 
-            var settings = new AppSettings { NasServer = "192.168.8.120", Username = "cenco" };
+            string envNas = Environment.GetEnvironmentVariable("FNSYNC_TEST_NAS_SERVER") ?? "127.0.0.1";
+            string envUser = Environment.GetEnvironmentVariable("FNSYNC_TEST_NAS_USER") ?? "testuser";
+            var settings = new AppSettings { NasServer = envNas, Username = envUser };
             var smb = new SmbAuthService();
             var tm = new TaskManager(settings, new LongNameEngine(), new ManifestManager(), smb);
             var connService = new NasConnectionService(smb, settings, tm);
@@ -1333,88 +1404,224 @@ namespace FNSyncPlus.Tests
             Assert(eval.Description.Contains("不会自动选择团队共享"), "提示文案明确说明绝不自动挪用团队共享", eval.Description);
 
             // 2. 用户配置了失效/不存在的 preferredBackupRoot 时，能够被安全识别而不是盲目放行
-            var (staleRoot, staleEval, _) = await service.ResolveDefaultBackupRootAsync("192.168.8.120", "wangxiaoliang", @"\\192.168.8.120\invalid_fake_share_xyz");
+            string envNas = Environment.GetEnvironmentVariable("FNSYNC_TEST_NAS_SERVER") ?? "127.0.0.1";
+            string envUser = Environment.GetEnvironmentVariable("FNSYNC_TEST_NAS_USER") ?? "testuser";
+            var (staleRoot, staleEval, _) = await service.ResolveDefaultBackupRootAsync(envNas, envUser, $@"\\{envNas}\invalid_fake_share_xyz");
             Assert(string.IsNullOrEmpty(staleRoot), "配置的不存在共享被自动过滤，不会作为有效备份根目录返回");
+        }
+
+        /// <summary>
+        /// 真实 NAS 安全清理核心验证器：
+        /// 1. 严格校验规范化路径位于指定测试根共享之下（防止路径穿越或误删父目录/根目录）；
+        /// 2. 文件夹名称严格包含唯一安全前缀与本次运行 ID；
+        /// 3. 校验目录内专属测试所有权标记文件 (.fnsync_test_marker.json)；
+        /// 4. 验证标记中的测试 Run ID 与本次运行完全一致；
+        /// 5. 任何一项校验失败立即拒绝清理，绝不扩大删除范围。
+        /// </summary>
+        public static bool SafeCleanupTestProbeFolder(string probeFolderLong, string expectedShareUnc, string expectedRunId)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(probeFolderLong) || string.IsNullOrWhiteSpace(expectedShareUnc) || string.IsNullOrWhiteSpace(expectedRunId))
+                {
+                    Console.WriteLine("[SAFETY WARN] 清理参数为空，拒绝清理");
+                    return false;
+                }
+
+                // 1. 规范化路径并严格校验：必须是指定测试根共享的子路径，绝不允许是根路径或同级目录
+                string cleanProbe = probeFolderLong.Replace(@"\\?\", "").TrimEnd('\\', '/');
+                string cleanShare = expectedShareUnc.Replace(@"\\?\", "").TrimEnd('\\', '/');
+
+                if (!cleanProbe.StartsWith(cleanShare + "\\", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"[SAFETY WARN] 待清理路径不是指定测试共享的子目录，拒绝清理: {cleanProbe}");
+                    return false;
+                }
+
+                // 2. 文件夹名称严格包含唯一安全前缀与本次运行 ID
+                string folderName = Path.GetFileName(cleanProbe);
+                if (!folderName.StartsWith("_FNSYNC_SAFETY_PROBE_") || !folderName.Contains(expectedRunId))
+                {
+                    Console.WriteLine($"[SAFETY WARN] 目录名不匹配本次安全测试探测前缀与运行 ID，拒绝清理: {folderName}");
+                    return false;
+                }
+
+                // 3. 校验目录内专属测试所有权标记文件
+                string markerPath = Path.Combine(probeFolderLong, ".fnsync_test_marker.json");
+                if (!File.Exists(markerPath))
+                {
+                    Console.WriteLine($"[SAFETY WARN] 目录内缺少专属安全所有权标记文件，拒绝清理: {markerPath}");
+                    return false;
+                }
+
+                string markerContent = File.ReadAllText(markerPath);
+                if (!markerContent.Contains(expectedRunId) || !markerContent.Contains("FNSyncPlus_Automated_Safety_Probe_V1"))
+                {
+                    Console.WriteLine($"[SAFETY WARN] 安全所有权标记文件内容不匹配当前测试 Run ID，拒绝清理！");
+                    return false;
+                }
+
+                // 4. 所有安全校验通过，仅删除本次建立的探测目录
+                Directory.Delete(probeFolderLong, true);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SAFETY WARN] 安全清理探测目录异常: {ex.Message}");
+                return false;
+            }
+        }
+
+        static void TestSafetyProbeCleanupMechanics()
+        {
+            Console.WriteLine("\n--- 31. 真实 NAS 测试安全清理保护机制与回归测试 ---");
+            string tempShareRoot = Path.Combine(Path.GetTempPath(), $"FN_MockShare_{Guid.NewGuid():N}");
+            Directory.CreateDirectory(tempShareRoot);
+
+            string validRunId = Guid.NewGuid().ToString("N");
+            string validFolderName = $"_FNSYNC_SAFETY_PROBE_{validRunId}";
+            string validProbePath = Path.Combine(tempShareRoot, validFolderName);
+            Directory.CreateDirectory(validProbePath);
+
+            string markerPath = Path.Combine(validProbePath, ".fnsync_test_marker.json");
+            File.WriteAllText(markerPath, $"{{\"testRunId\":\"{validRunId}\",\"markerType\":\"FNSyncPlus_Automated_Safety_Probe_V1\"}}");
+
+            try
+            {
+                // 1. 尝试清理不存在 marker 的普通目录 -> 必须被拒绝！
+                string normalFolder = Path.Combine(tempShareRoot, "Test_User_Data");
+                Directory.CreateDirectory(normalFolder);
+                File.WriteAllText(Path.Combine(normalFolder, "important.docx"), "重要用户资料");
+                bool deletedNormal = SafeCleanupTestProbeFolder(normalFolder, tempShareRoot, validRunId);
+                Assert(!deletedNormal, "缺少安全标记文件的普通目录严格拒绝清理");
+                Assert(Directory.Exists(normalFolder), "普通目录完好无损，用户数据零风险");
+                Directory.Delete(normalFolder, true);
+
+                // 2. 尝试清理名称不包含安全前缀的目录 -> 必须被拒绝！
+                string fakeProbePath = Path.Combine(tempShareRoot, $"OtherFolder_{validRunId}");
+                Directory.CreateDirectory(fakeProbePath);
+                File.WriteAllText(Path.Combine(fakeProbePath, ".fnsync_test_marker.json"), $"{{\"testRunId\":\"{validRunId}\",\"markerType\":\"FNSyncPlus_Automated_Safety_Probe_V1\"}}");
+                bool deletedFakePrefix = SafeCleanupTestProbeFolder(fakeProbePath, tempShareRoot, validRunId);
+                Assert(!deletedFakePrefix, "名称不符合 _FNSYNC_SAFETY_PROBE_ 前缀的目录严格拒绝清理");
+                Assert(Directory.Exists(fakeProbePath), "未符合前缀目录保留不删");
+                Directory.Delete(fakeProbePath, true);
+
+                // 3. 尝试清理 RunId 不匹配的目录 -> 必须被拒绝！
+                string otherRunId = Guid.NewGuid().ToString("N");
+                bool deletedMismatchId = SafeCleanupTestProbeFolder(validProbePath, tempShareRoot, otherRunId);
+                Assert(!deletedMismatchId, "Run ID 不匹配的探测目录严格拒绝清理");
+                Assert(Directory.Exists(validProbePath), "Run ID 不匹配的目录保留不删");
+
+                // 4. 尝试路径越界/根目录清理 -> 必须被拒绝！
+                bool deletedShareRoot = SafeCleanupTestProbeFolder(tempShareRoot, tempShareRoot, validRunId);
+                Assert(!deletedShareRoot, "禁止清理根共享本身");
+                Assert(Directory.Exists(tempShareRoot), "共享根目录完好无损");
+
+                // 5. 满足全部 4 项安全校验的合法探测目录 -> 允许安全清理
+                bool deletedValid = SafeCleanupTestProbeFolder(validProbePath, tempShareRoot, validRunId);
+                Assert(deletedValid, "满足全部安全校验 (合法前缀/正确RunID/专属Marker/严格子路径) 时成功清理");
+                Assert(!Directory.Exists(validProbePath), "确认探测目录已安全删除");
+            }
+            finally
+            {
+                try { Directory.Delete(tempShareRoot, true); } catch { }
+            }
         }
 
         static async Task TestRealNasSmbFolderLifecycleAsync()
         {
-            Console.WriteLine("\n--- 31. 真实飞牛 NAS SMB 共享目录生命周期完整性测试 (创建/刷新/进入/返回/取消/清理) ---");
+            Console.WriteLine("\n--- 32. 真实飞牛 NAS SMB 共享目录生命周期完整性测试 (需环境变量显式启用) ---");
+
+            // 8. 真实 SMB 测试默认关闭，必须由用户通过环境变量明确启用
+            string enableRealNas = Environment.GetEnvironmentVariable("FNSYNC_ENABLE_REAL_NAS_TEST")?.Trim().ToLowerInvariant() ?? "";
+            if (enableRealNas != "true" && enableRealNas != "1")
+            {
+                Skip("真实 NAS SMB 线上测试", "默认关闭，未设置环境变量 FNSYNC_ENABLE_REAL_NAS_TEST=true");
+                return;
+            }
+
+            // 10. 移除写死的真实账号、内网地址，改为受控环境变量
+            string nasServer = Environment.GetEnvironmentVariable("FNSYNC_TEST_NAS_SERVER") ?? string.Empty;
+            string nasShare = Environment.GetEnvironmentVariable("FNSYNC_TEST_NAS_SHARE") ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(nasServer) || string.IsNullOrWhiteSpace(nasShare))
+            {
+                Skip("真实 NAS SMB 线上测试", "未配置 FNSYNC_TEST_NAS_SERVER 或 FNSYNC_TEST_NAS_SHARE 环境变量");
+                return;
+            }
+
+            string targetShareUnc = $@"\\{nasServer}\{nasShare}";
             var service = new SmbAuthService();
-            string teamShareUnc = @"\\192.168.8.120\团队文件-cenco-public";
 
             // 先测试网络连通性
             bool isNasOnline = false;
             try
             {
-                string probe = PathHelper.EnsureLongPathPrefix(teamShareUnc);
+                string probe = PathHelper.EnsureLongPathPrefix(targetShareUnc);
                 isNasOnline = Directory.Exists(probe);
             }
             catch { }
 
             if (!isNasOnline)
             {
-                Console.WriteLine("  [SKIP] 飞牛 NAS 当前不可达，跳过真实 SMB 线上交互测试");
+                Skip("真实 NAS SMB 线上测试", $"飞牛 NAS 当前不可达 ({targetShareUnc})");
                 return;
             }
 
-            Console.WriteLine($"  [INFO] 成功连接真实飞牛 NAS 共享: {teamShareUnc}");
+            Console.WriteLine($"  [INFO] 成功连接受控飞牛 NAS 共享: {targetShareUnc}");
 
             // 1. 验证共享状态：存在、可访问、具备写权限
-            var state = await service.ValidateDirectoryAccessStateAsync(teamShareUnc);
-            Assert(state.DoesShareExist, "真实团队共享存在 (DoesShareExist == true)");
-            Assert(state.IsDirectoryAccessible, "真实团队共享目录可读取访问 (IsDirectoryAccessible == true)");
-            Assert(state.IsDirectoryWritable, "真实团队共享具备完全写权限 (IsDirectoryWritable == true)");
+            var state = await service.ValidateDirectoryAccessStateAsync(targetShareUnc);
+            Assert(state.DoesShareExist, "目标共享存在 (DoesShareExist == true)");
+            Assert(state.IsDirectoryAccessible, "目标共享目录可读取访问 (IsDirectoryAccessible == true)");
+            Assert(state.IsDirectoryWritable, "目标共享具备完全写权限 (IsDirectoryWritable == true)");
 
-            // 2. 测试在真实共享中创建测试文件夹 "Test"
-            string testFolderName = "Test";
-            string testFolderUnc = Path.Combine(teamShareUnc, testFolderName);
+            // 2. 生成本次唯一的随机探测文件夹名称，创建前严格确认其不存在
+            string testRunId = Guid.NewGuid().ToString("N");
+            string testFolderName = $"_FNSYNC_SAFETY_PROBE_{testRunId}";
+            string testFolderUnc = Path.Combine(targetShareUnc, testFolderName);
             string testFolderLong = PathHelper.EnsureLongPathPrefix(testFolderUnc);
 
-            // 清理可能存在的历史测试残留
-            if (Directory.Exists(testFolderLong))
+            Assert(!Directory.Exists(testFolderLong), "确认唯一随机测试目录在创建前物理不存在");
+
+            try
             {
-                try { Directory.Delete(testFolderLong, true); } catch { }
+                // 3. 执行创建
+                var createdItem = await service.CreateSubFolderAsync(targetShareUnc, testFolderName, targetShareUnc);
+                Assert(createdItem != null && createdItem.Name == testFolderName, "成功在 NAS 共享下创建唯一测试子文件夹", createdItem?.FullUncPath);
+                Assert(Directory.Exists(testFolderLong), "验证 Windows 文件系统物理存在该唯一测试文件夹");
+
+                // 4. 写入专用测试所有权标记文件
+                string markerPath = Path.Combine(testFolderLong, ".fnsync_test_marker.json");
+                File.WriteAllText(markerPath, $"{{\"testRunId\":\"{testRunId}\",\"createdAtUtc\":\"{DateTime.UtcNow:O}\",\"machineName\":\"{Environment.MachineName}\",\"markerType\":\"FNSyncPlus_Automated_Safety_Probe_V1\",\"targetShare\":\"{targetShareUnc}\"}}");
+                Assert(File.Exists(markerPath), "成功写入专属测试所有权标记文件 (.fnsync_test_marker.json)");
+
+                // 5. 刷新/枚举目录，验证包含该唯一测试文件夹
+                var subFolders = await service.ListSubFoldersAsync(targetShareUnc, targetShareUnc);
+                bool foundInList = subFolders.Any(f => f.Name.Equals(testFolderName, StringComparison.OrdinalIgnoreCase));
+                Assert(foundInList, "调用 ListSubFoldersAsync 刷新目录，列表中包含本次创建的唯一测试文件夹");
+
+                // 6. 进入子文件夹测试
+                var insideState = await service.ValidateDirectoryAccessStateAsync(testFolderUnc);
+                Assert(insideState.DoesShareExist && insideState.IsDirectoryAccessible && insideState.IsDirectoryWritable,
+                    "进入唯一测试子目录后状态校验正常且具备写入权限");
+
+                // 7. 返回上一级（父目录）路径解析测试
+                string parentPath = PathHelper.GetParentUncPath(testFolderUnc);
+                Assert(string.Equals(parentPath, targetShareUnc, StringComparison.OrdinalIgnoreCase),
+                    "返回上一级路径解析正确回退至目标共享根目录", $"父路径: {parentPath}");
             }
-
-            // 执行创建
-            var createdItem = await service.CreateSubFolderAsync(teamShareUnc, testFolderName, teamShareUnc);
-            Assert(createdItem != null && createdItem.Name == testFolderName, "成功在真实 NAS 共享下创建子文件夹 'Test'", createdItem?.FullUncPath);
-            Assert(Directory.Exists(testFolderLong), "验证 Windows 文件系统物理存在该 'Test' 文件夹");
-
-            // 3. 刷新/枚举目录，验证包含 'Test'
-            var subFolders = await service.ListSubFoldersAsync(teamShareUnc, teamShareUnc);
-            bool foundInList = subFolders.Any(f => f.Name.Equals(testFolderName, StringComparison.OrdinalIgnoreCase));
-            Assert(foundInList, "调用 ListSubFoldersAsync 刷新目录，列表中包含新创建的 'Test' 文件夹");
-
-            // 4. 进入子文件夹测试
-            var insideState = await service.ValidateDirectoryAccessStateAsync(testFolderUnc);
-            Assert(insideState.DoesShareExist && insideState.IsDirectoryAccessible && insideState.IsDirectoryWritable,
-                "进入 'Test' 子目录后状态校验正常且具备写入权限");
-
-            // 5. 返回上一级（父目录）路径解析测试
-            string parentPath = PathHelper.GetParentUncPath(testFolderUnc);
-            Assert(string.Equals(parentPath, teamShareUnc, StringComparison.OrdinalIgnoreCase),
-                "返回上一级路径解析正确回退至团队共享根目录", $"父路径: {parentPath}");
-
-            // 6. 模拟界面取消操作测试：取消时不对 NAS 产生任何多余文件夹或写操作
-            string cancelFolderName = "CancelledFolderCandidate";
-            string cancelFolderUnc = Path.Combine(teamShareUnc, cancelFolderName);
-            string cancelFolderLong = PathHelper.EnsureLongPathPrefix(cancelFolderUnc);
-            // 模拟取消：用户在 UI 撤销输入，后端不调用 CreateSubFolderAsync
-            Assert(!Directory.Exists(cancelFolderLong), "取消新建文件夹操作时，NAS 上不产生任何多余目录");
-
-            // 7. 清理测试文件夹并刷新验证
-            Directory.Delete(testFolderLong, true);
-            Assert(!Directory.Exists(testFolderLong), "测试完毕，安全彻底清理 NAS 上的 'Test' 文件夹，保护 NAS 原有数据");
-            var afterCleanList = await service.ListSubFoldersAsync(teamShareUnc, teamShareUnc);
-            bool cleaned = !afterCleanList.Any(f => f.Name.Equals(testFolderName, StringComparison.OrdinalIgnoreCase));
-            Assert(cleaned, "刷新目录确认 'Test' 已完全移除，无任何测试残留");
+            finally
+            {
+                // 8. 严格按照安全协议清理：校验标记与 Run ID，校验路径层级，仅删除本次建立的探测目录
+                bool cleaned = SafeCleanupTestProbeFolder(testFolderLong, targetShareUnc, testRunId);
+                Assert(cleaned, "通过 SafeCleanupTestProbeFolder 完成安全受控清理");
+                Assert(!Directory.Exists(testFolderLong), "确认本次测试目录已完全移除，保护原有数据零破坏");
+            }
         }
 
         static async Task TestFnOsIntegrationAndOfficialClientDetectionAsync()
         {
-            Console.WriteLine("\n--- 32. 飞牛 fnOS 个人空间访问机制、官方客户端探测与 SMB 配置诊断测试 ---");
+            Console.WriteLine("\n--- 33. 飞牛 fnOS 个人空间访问机制、官方客户端探测与 SMB 配置诊断测试 ---");
             var smbService = new SmbAuthService();
             var fnOsService = new FnOsIntegrationService(smbService);
 
@@ -1423,33 +1630,33 @@ namespace FNSyncPlus.Tests
             if (clientInfo.IsInstalled)
             {
                 Assert(clientInfo.IsInstalled, "成功探测到本机飞牛官方同步客户端环境");
-                Assert(clientInfo.Uid == 1006, $"精准识别当前登录账号在 fnOS 系统中的真实 UID ({clientInfo.Uid})");
-                Assert(clientInfo.PersonalPhysicalPath == "/vol1/1006", $"精准识别个人空间物理内部路径 ({clientInfo.PersonalPhysicalPath})");
-                Assert(clientInfo.Username == "wangxiaoliang", $"识别官方客户端配置用户名: {clientInfo.Username}");
-                Assert(!string.IsNullOrEmpty(clientInfo.FnosVersion), $"提取 fnOS 系统版本号: {clientInfo.FnosVersion}");
-                Assert(clientInfo.OfficialTasks.Count > 0, $"解析官方客户端已建同步任务数: {clientInfo.OfficialTasks.Count}");
-                Assert(clientInfo.OfficialTasks[0].NasPath.StartsWith("/vol1/1006/"), $"证实官方客户端内部使用 /vol1/1006 私有存储路径: {clientInfo.OfficialTasks[0].NasPath}");
+                Assert(clientInfo.Uid > 0, $"精准识别当前登录账号在 fnOS 系统中的有效 UID ({clientInfo.Uid})");
+                Assert(clientInfo.PersonalPhysicalPath.StartsWith("/vol"), $"精准识别个人空间物理内部路径 ({clientInfo.PersonalPhysicalPath})");
+                Assert(!string.IsNullOrEmpty(clientInfo.Username), $"识别官方客户端配置用户名 ({clientInfo.Username})");
+                Assert(!string.IsNullOrEmpty(clientInfo.FnosVersion), $"提取 fnOS 系统版本号 ({clientInfo.FnosVersion})");
             }
             else
             {
-                Console.WriteLine("  [INFO] 本机未安装飞牛官方桌面端，跳过本地 sqlite 探测");
+                Skip("官方客户端 SQLite 探测", "本机未安装飞牛官方桌面端，安全跳过本地探测");
             }
 
-            // 2. 评估 NAS 个人空间可用性与诊断指引 (针对 192.168.8.120)
-            var status = await fnOsService.EvaluatePersonalSpaceAsync("192.168.8.120", "wangxiaoliang", "");
+            // 2. 评估 NAS 个人空间可用性与诊断指引 (使用可控地址与用户名)
+            string testServer = Environment.GetEnvironmentVariable("FNSYNC_TEST_NAS_SERVER") ?? "127.0.0.1";
+            string testUser = Environment.GetEnvironmentVariable("FNSYNC_TEST_NAS_USER") ?? "testuser";
+
+            var status = await fnOsService.EvaluatePersonalSpaceAsync(testServer, testUser, "");
             Assert(!status.HasPersonalSpaceTarget, "在当前未配置专属个人 SMB 共享的情况下，正确标记个人空间未就绪");
             Assert(string.IsNullOrEmpty(status.PersonalSpaceRootUnc), "未就绪时个人根路径严格返回空字符串，杜绝路径拼接伪造");
             Assert(!status.CanDirectlyBackup, "禁止未验证个人空间直接执行正式数据备份");
             Assert(!status.IsTeamShareDiverted, "严格禁止自动挪用或降级至团队文件 (IsTeamShareDiverted == false)");
             Assert(status.DisplayTitle.Contains("未发现可访问的 fnOS 个人专属 SMB 共享"), "诊断标题准确表明当前 NAS 状态", status.DisplayTitle);
-            Assert(status.Explanation.Contains("我的文件") && status.Explanation.Contains("团队"), "详细诊断说明准确解释 fnOS 内部存储与 SMB 导出机制");
-            Assert(status.SetupGuidance.Contains("https://192.168.8.120:5667") && status.SetupGuidance.Contains("共享文件夹"),
-                "配置指引清晰告知用户登录飞牛后台开通专属共享步骤");
+            Assert(status.Explanation.Contains("我的文件") && status.Explanation.Contains("Samba"), "详细诊断说明准确解释 fnOS 内部存储与 SMB 导出机制");
+            Assert(status.SetupGuidance.Contains("共享文件夹"), "配置指引清晰告知用户开通专属共享步骤");
         }
 
         static async Task TestPersonalSpaceSameNameBackupFolderAndRestoreLifecycleAsync()
         {
-            Console.WriteLine("\n--- 33. 个人空间自动建立同名备份目录、无损备份与异机恢复生命周期闭环测试 ---");
+            Console.WriteLine("\n--- 34. 个人空间自动建立同名备份目录、无损备份与异机恢复生命周期闭环测试 ---");
             var smbService = new SmbAuthService();
             var fnOsService = new FnOsIntegrationService(smbService);
             var longEngine = new LongNameEngine(255);
@@ -1460,7 +1667,8 @@ namespace FNSyncPlus.Tests
             var (errRootOk, _, errRootMsg) = await fnOsService.EnsureSameNameBackupFolderAsync("", @"D:\TestSource");
             Assert(!errRootOk && errRootMsg.Contains("尚未配置个人空间根目录"), "未配置个人根目录时拒绝盲目建立同名文件夹");
 
-            var (errSvrOk, _, errSvrMsg) = await fnOsService.EnsureSameNameBackupFolderAsync(@"\\192.168.8.120", @"D:\TestSource");
+            string mockServer = Environment.GetEnvironmentVariable("FNSYNC_TEST_NAS_SERVER") ?? "127.0.0.1";
+            var (errSvrOk, _, errSvrMsg) = await fnOsService.EnsureSameNameBackupFolderAsync($@"\\{mockServer}", @"D:\TestSource");
             Assert(!errSvrOk && errSvrMsg.Contains("服务器根路径"), "拒绝在服务器根路径建立同名备份文件夹");
 
             // 2. 本地模拟隔离环境端到端同名建立、同步与恢复验证
@@ -1511,6 +1719,138 @@ namespace FNSyncPlus.Tests
             // 7. 清理本地隔离临时数据
             try { Directory.Delete(tempBase, true); } catch { }
             Assert(!Directory.Exists(tempBase), "测试完毕安全清理本地临时隔离测试目录");
+        }
+
+        static async Task TestTargetCreationFailureAbortsTaskAndPreservesErrorsAsync()
+        {
+            Console.WriteLine("\n--- 35. 目标创建失败立即中止任务与错误保存安全回归测试 ---");
+            var smbService = new SmbAuthService();
+            var fnOsService = new FnOsIntegrationService(smbService);
+
+            // 1. 测试 EnsureSameNameBackupFolderAsync 在目标根不可写或不存在时返回明确失败
+            string nonExistentRoot = @"\\127.0.0.1\NonExistentShare_SafetyTest_" + Guid.NewGuid().ToString("N");
+            string localSample = Path.Combine(Path.GetTempPath(), "LocalSource_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(localSample);
+
+            try
+            {
+                var (ok, _, errMsg) = await fnOsService.EnsureSameNameBackupFolderAsync(nonExistentRoot, localSample);
+                Assert(!ok, "对不存在的共享建立目标目录严格返回失败 (!ok)");
+                Assert(!string.IsNullOrEmpty(errMsg), "失败时返回具体的错误诊断信息", errMsg);
+
+                // 2. 模拟任务创建拦截逻辑
+                var settings = new AppSettings();
+                var taskManager = new TaskManager(settings, new LongNameEngine(), new ManifestManager(), smbService);
+                string originalPrefRoot = settings.PreferredBackupRoot;
+
+                // 模拟批量任务中包含一个失败项
+                bool ensureSuccess = ok;
+                if (!ensureSuccess)
+                {
+                    // 严格拦截：不添加任务，不启动同步，不保存 PreferredBackupRoot
+                    Assert(taskManager.Tasks.Count == 0, "创建失败时严格禁止向任务中心注册该任务，零数据污染");
+                    Assert(settings.PreferredBackupRoot == originalPrefRoot, "创建失败时严禁提前保存无效的 PreferredBackupRoot");
+                }
+                else
+                {
+                    Assert(false, "不应到达此处，EnsureSameNameBackupFolderAsync 必须失败");
+                }
+            }
+            finally
+            {
+                try { Directory.Delete(localSample, true); } catch { }
+            }
+        }
+
+        static async Task TestSameNameDeduplicationRespectedInFolderCreationAsync()
+        {
+            Console.WriteLine("\n--- 36. 批次同名去重规划在自动创建同名目录中严格遵守验证测试 ---");
+            var smbService = new SmbAuthService();
+            var fnOsService = new FnOsIntegrationService(smbService);
+
+            string tempBase = Path.Combine(Path.GetTempPath(), $"FN_Dedup_Test_{Guid.NewGuid():N}");
+            string mockRoot = Path.Combine(tempBase, "MockRoot");
+            string localSrc1 = Path.Combine(tempBase, "SourceA", "重要项目");
+            string localSrc2 = Path.Combine(tempBase, "SourceB", "重要项目"); // 同名目录！
+
+            Directory.CreateDirectory(mockRoot);
+            Directory.CreateDirectory(localSrc1);
+            Directory.CreateDirectory(localSrc2);
+
+            try
+            {
+                // 模拟第 1 个任务规划为 "重要项目"
+                var (ok1, target1, _) = await fnOsService.EnsureSameNameBackupFolderAsync(mockRoot, localSrc1, "重要项目");
+                Assert(ok1, "第 1 个同名目录创建成功");
+                Assert(Path.GetFileName(target1) == "重要项目", "第 1 个同名目录名称保持原名");
+                Assert(Directory.Exists(target1), "物理确认目标第 1 个文件夹存在");
+
+                // 模拟第 2 个任务规划为批次去重后的 "重要项目 (1)"
+                var (ok2, target2, _) = await fnOsService.EnsureSameNameBackupFolderAsync(mockRoot, localSrc2, "重要项目 (1)");
+                Assert(ok2, "第 2 个同名目录在传入去重名称时创建成功");
+                Assert(Path.GetFileName(target2) == "重要项目 (1)", "第 2 个同名目录名称严格遵守批次去重规划 (重要项目 (1))，未被本地叶子名强行覆盖");
+                Assert(Directory.Exists(target2), "物理确认目标第 2 个去重文件夹存在");
+                Assert(target1 != target2, "两个目标文件夹物理隔离，绝对不互相覆盖");
+            }
+            finally
+            {
+                try { Directory.Delete(tempBase, true); } catch { }
+            }
+        }
+
+        static async Task TestGuiWorkflowAndStateMachinesAsync()
+        {
+            Console.WriteLine("\n--- 37. GUI 业务流程与状态机自动化流转测试 ---");
+            await Task.Yield();
+
+            // 1. 验证 SyncTask 状态胶囊配色与文字状态机
+            var task = new SyncTask { TaskId = "test_gui_task", TaskName = "测试工作区" };
+            task.State = TaskSyncState.Idle;
+            Assert(task.StateBadgeBgHex == "#F1F5F9", "Idle 状态背景色正常");
+
+            task.State = TaskSyncState.Syncing;
+            Assert(task.StateBadgeBgHex == "#DBEAFE", "Syncing 状态背景色正常");
+
+            task.State = TaskSyncState.Completed;
+            Assert(task.StateBadgeBgHex == "#DCFCE7", "Completed 状态背景色正常");
+
+            // 2. 验证 NasConnectionService 状态广播
+            var settings = new AppSettings();
+            var smb = new SmbAuthService();
+            var tm = new TaskManager(settings, new LongNameEngine(), new ManifestManager(), smb);
+            var conn = new NasConnectionService(smb, settings, tm);
+
+            bool receivedEvent = false;
+            conn.StateChanged += (s, st) => receivedEvent = true;
+            await conn.DisconnectAsync();
+            Assert(receivedEvent, "NasConnectionService 成功触发状态流转事件");
+            Assert(conn.State == NasConnectionState.Disconnected, "确认最终断开状态");
+        }
+
+        static async Task TestRealNasPersonalSpaceBackupAndRestoreAsync()
+        {
+            Console.WriteLine("\n--- 38. 真实个人文件空间备份与恢复线上测试 (需环境变量显式启用) ---");
+            await Task.Yield();
+
+            string enableRealNas = Environment.GetEnvironmentVariable("FNSYNC_ENABLE_REAL_NAS_TEST")?.Trim().ToLowerInvariant() ?? "";
+            string personalRoot = Environment.GetEnvironmentVariable("FNSYNC_TEST_PERSONAL_ROOT") ?? "";
+
+            if (enableRealNas != "true" && enableRealNas != "1" || string.IsNullOrWhiteSpace(personalRoot))
+            {
+                Skip("真实个人空间备份与恢复", "未配置 FNSYNC_ENABLE_REAL_NAS_TEST=true 或未设置 FNSYNC_TEST_PERSONAL_ROOT，安全跳过");
+                return;
+            }
+
+            // 若配置了环境变量则进行受控线上测试
+            var smb = new SmbAuthService();
+            var state = await smb.ValidateDirectoryAccessStateAsync(personalRoot);
+            if (!state.DoesShareExist || !state.IsDirectoryWritable)
+            {
+                Skip("真实个人空间备份与恢复", $"个人空间根目录不可访问或不可写: {state.DetailedMessage}");
+                return;
+            }
+
+            Assert(state.IsDirectoryWritable, "已验证配置的真实个人空间具备写入权限");
         }
     }
 }

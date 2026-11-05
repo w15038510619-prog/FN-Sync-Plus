@@ -52,11 +52,27 @@ namespace FNSyncPlus.Core.Services
     }
 
     /// <summary>
+    /// 飞牛个人空间分类
+    /// </summary>
+    public enum FnOsPersonalSpaceCategory
+    {
+        /// <summary>未配置或未发现可访问的个人专属共享</summary>
+        NotConfigured,
+        /// <summary>官方「我的文件」专用已验证 SMB 共享</summary>
+        OfficialPersonalFileShare,
+        /// <summary>用户指定的已验证个人专属 SMB 备份共享</summary>
+        CustomPersonalBackupShare,
+        /// <summary>普通公共共享 (禁止误判为个人目录)</summary>
+        OrdinarySharedFolder
+    }
+
+    /// <summary>
     /// 飞牛 fnOS 个人备份空间 (我的文件) 状态评估模型
     /// </summary>
     public class FnOsPersonalSpaceStatus
     {
         public bool HasPersonalSpaceTarget { get; set; }
+        public FnOsPersonalSpaceCategory Category { get; set; } = FnOsPersonalSpaceCategory.NotConfigured;
         public string PersonalSpaceRootUnc { get; set; } = string.Empty;
         public string DisplayTitle { get; set; } = string.Empty;
         public string Explanation { get; set; } = string.Empty;
@@ -198,6 +214,7 @@ namespace FNSyncPlus.Core.Services
                     if (eval.State == NasShareSecurityState.VerifiedPersonalSpace)
                     {
                         status.HasPersonalSpaceTarget = true;
+                        status.Category = FnOsPersonalSpaceCategory.CustomPersonalBackupShare;
                         status.PersonalSpaceRootUnc = preferredRoot;
                         status.CanDirectlyBackup = true;
                         status.DisplayTitle = "👤 个人空间 (我的文件) 已就绪";
@@ -218,6 +235,9 @@ namespace FNSyncPlus.Core.Services
                 if (validation.DoesShareExist && validation.IsDirectoryWritable)
                 {
                     status.HasPersonalSpaceTarget = true;
+                    status.Category = (personalShare.Name.Contains("我的文件") || personalShare.Name.Equals(username, StringComparison.OrdinalIgnoreCase))
+                        ? FnOsPersonalSpaceCategory.OfficialPersonalFileShare
+                        : FnOsPersonalSpaceCategory.CustomPersonalBackupShare;
                     status.PersonalSpaceRootUnc = personalShare.UncPath;
                     status.CanDirectlyBackup = true;
                     status.DisplayTitle = "👤 个人空间 (我的文件) 已就绪";
@@ -226,8 +246,9 @@ namespace FNSyncPlus.Core.Services
                 }
             }
 
-            // 3. 未在 SMB 中发现个人专属共享：生成真实原因剖析与专属配置指引 (绝不自动使用团队共享)
+            // 3. 未在 SMB 中发现个人专属共享：生成真实原因剖析与专属配置指引 (绝不自动使用团队共享，绝不把普通共享误判为个人目录)
             status.HasPersonalSpaceTarget = false;
+            status.Category = FnOsPersonalSpaceCategory.NotConfigured;
             status.PersonalSpaceRootUnc = string.Empty;
             status.CanDirectlyBackup = false;
             status.IsTeamShareDiverted = false;
@@ -237,17 +258,19 @@ namespace FNSyncPlus.Core.Services
             status.DisplayTitle = "未发现可访问的 fnOS 个人专属 SMB 共享";
             status.Explanation =
                 $"当前 NAS 账号【{username}】未开放独立的个人空间 SMB 共享目录{uidInfo}。\n" +
-                "飞牛 fnOS 默认将「我的文件」存放在系统内部存储空间中，默认未对局域网开放个人主目录的 SMB 网络共享；Windows SMB 列表中当前仅存在团队共享文件。\n" +
-                "为了保护您的私人数据安全，FN Sync Plus 严格遵循隐私隔离规范：\n" +
-                "1. 绝不自动将个人文件备份至公共团队共享；\n" +
-                "2. 严禁通过拼接用户名伪造不存在的私人网络路径。";
+                "【飞牛 fnOS 存储与 SMB 文件共享协议机制说明】：\n" +
+                "1. 飞牛 fnOS 将官方「我的文件」存放在 Linux 物理路径 /vol1/{uid}，官方桌面端通过私有 WebSocket RPC 协议（5667 端口）直通该私有目录；\n" +
+                "2. 在飞牛「设置 → 文件共享协议」中，Samba (SMB) 仅对外暴露管理员明确配置的共享文件夹。系统默认未对当前账号的「我的文件」开启局域网直接 SMB 共享；\n" +
+                "3. 严禁通过拼接用户名或 UID 伪造不存在的私人网络路径（会触发 Win32 Error 67 找不到网络名）；\n" +
+                "4. 严禁将公共团队文件误判为个人目录，绝不自动越权备份至公共团队共享；\n" +
+                "5. 严禁直接使用未经长期稳定性与安全验证的私有 RPC 协议用于正式数据备份。";
 
             status.SetupGuidance =
-                "【如何在飞牛 fnOS 中开启个人专属 SMB 共享】：\n" +
+                "【如何在飞牛 fnOS 中开通个人专属 SMB 备份共享】：\n" +
                 $"1. 使用电脑浏览器登录飞牛后台管理界面 (https://{serverAddress}:5667)；\n" +
                 "2. 进入【文件管理】->【我的文件】，或在【控制面板】->【共享文件夹】中；\n" +
                 "3. 为您的账号新建一个专属的共享文件夹（例如命名为『个人备份』或『我的文件』），并在权限设置中将其分配给当前账号【读写】权限，其他用户设为【禁止访问】；\n" +
-                "4. 完成后返回本软件，点击【刷新当前目录】，FN Sync Plus 将自动识别并优先挂载为「我的文件（个人空间）」。";
+                "4. 完成后返回本软件，点击【重新检测】，FN Sync Plus 将自动识别并优先挂载为「我的文件（个人空间）」。";
 
             return status;
         }
@@ -255,8 +278,12 @@ namespace FNSyncPlus.Core.Services
         /// <summary>
         /// 在经过验证的个人空间根目录下，自动规划同名子备份目录并建立
         /// 例如本地源为 D:\MyData\Docs，个人根目录为 \\server\personal，自动建立并规划为 \\server\personal\Docs
+        /// 若提供了 plannedSubFolderName（如批次去重规划产生的 Docs (1)），则优先使用以保障同名去重。
         /// </summary>
-        public async Task<(bool Success, string TargetUnc, string ErrorMessage)> EnsureSameNameBackupFolderAsync(string personalRootUnc, string localSourcePath)
+        public async Task<(bool Success, string TargetUnc, string ErrorMessage)> EnsureSameNameBackupFolderAsync(
+            string personalRootUnc, 
+            string localSourcePath, 
+            string? plannedSubFolderName = null)
         {
             if (string.IsNullOrWhiteSpace(personalRootUnc))
             {
@@ -268,7 +295,11 @@ namespace FNSyncPlus.Core.Services
                 return (false, string.Empty, "规划备份目录失败：本地源文件夹路径不能为空。");
             }
 
-            string folderName = Path.GetFileName(localSourcePath.TrimEnd('\\', '/'));
+            // 优先使用批次规划已去重的子目录名 (如 "资料 (1)")，否则从本地源目录提取
+            string folderName = !string.IsNullOrWhiteSpace(plannedSubFolderName)
+                ? plannedSubFolderName.Trim()
+                : Path.GetFileName(localSourcePath.TrimEnd('\\', '/'));
+
             if (string.IsNullOrWhiteSpace(folderName))
             {
                 folderName = "BackupFolder";
@@ -277,14 +308,37 @@ namespace FNSyncPlus.Core.Services
             // 校验合法性
             if (!PathHelper.IsValidDirectoryName(folderName, out string valErr))
             {
-                return (false, string.Empty, $"本地文件夹名称不符合 NAS 命名规范: {valErr}");
+                return (false, string.Empty, $"备份子文件夹名称不符合 NAS 命名规范: {valErr}");
             }
 
             // 校验个人根目录状态
-            var (server, share, baseShareUnc, isServerRoot) = PathHelper.ParseUncShare(personalRootUnc);
-            if (isServerRoot || string.IsNullOrEmpty(share))
+            if (PathHelper.IsUncPath(personalRootUnc))
             {
-                return (false, string.Empty, "无法在服务器根路径建立备份目录，必须是已验证的具体共享。");
+                var (server, share, baseShareUnc, isServerRoot) = PathHelper.ParseUncShare(personalRootUnc);
+                if (isServerRoot || string.IsNullOrEmpty(share))
+                {
+                    return (false, string.Empty, "无法在服务器根路径建立备份目录，必须是已验证的具体共享。");
+                }
+
+                // 先校验个人根目录是否真实存在且可写
+                var rootState = await _smbService.ValidateDirectoryAccessStateAsync(personalRootUnc, server);
+                if (!rootState.DoesShareExist)
+                {
+                    return (false, string.Empty, $"目标根共享不存在 (Win32 Error 67): {rootState.DetailedMessage}");
+                }
+                if (!rootState.IsDirectoryWritable)
+                {
+                    return (false, string.Empty, $"目标根共享无写入权限 (Win32 Error 5): {rootState.DetailedMessage}");
+                }
+            }
+            else
+            {
+                // 本地路径或本地模拟测试环境
+                if (!Directory.Exists(personalRootUnc))
+                {
+                    try { Directory.CreateDirectory(personalRootUnc); }
+                    catch (Exception ex) { return (false, string.Empty, $"本地目标目录无法创建: {ex.Message}"); }
+                }
             }
 
             string targetUnc = PathHelper.CombineWindowsPath(personalRootUnc, folderName);
@@ -294,15 +348,26 @@ namespace FNSyncPlus.Core.Services
             {
                 if (!Directory.Exists(longPath))
                 {
-                    // 调用底层经过强验证的创建子目录逻辑
-                    await _smbService.CreateSubFolderAsync(personalRootUnc, folderName, baseShareUnc);
+                    if (PathHelper.IsUncPath(personalRootUnc))
+                    {
+                        var (_, _, baseShareUnc, _) = PathHelper.ParseUncShare(personalRootUnc);
+                        await _smbService.CreateSubFolderAsync(personalRootUnc, folderName, baseShareUnc);
+                    }
+                    else
+                    {
+                        Directory.CreateDirectory(longPath);
+                    }
                 }
 
-                // 再次验证读写权限
-                var validation = await _smbService.ValidateDirectoryAccessStateAsync(targetUnc, server);
-                if (!validation.IsDirectoryWritable)
+                if (PathHelper.IsUncPath(personalRootUnc))
                 {
-                    return (false, targetUnc, $"已建立同名目录，但当前账号无写入权限: {validation.DetailedMessage}");
+                    var (server, _, _, _) = PathHelper.ParseUncShare(personalRootUnc);
+                    // 再次验证新目录读写权限
+                    var validation = await _smbService.ValidateDirectoryAccessStateAsync(targetUnc, server);
+                    if (!validation.IsDirectoryWritable)
+                    {
+                        return (false, targetUnc, $"已建立目标目录，但当前账号对该目录无写入权限: {validation.DetailedMessage}");
+                    }
                 }
 
                 return (true, targetUnc, string.Empty);

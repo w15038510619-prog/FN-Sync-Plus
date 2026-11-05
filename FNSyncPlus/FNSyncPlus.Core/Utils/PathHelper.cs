@@ -108,6 +108,16 @@ namespace FNSyncPlus.Core.Utils
         }
 
         /// <summary>
+        /// 判断给定路径是否为 Windows UNC 网络路径 (如 \\server\share)
+        /// </summary>
+        public static bool IsUncPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return false;
+            string trimmed = path.Trim();
+            return trimmed.StartsWith(@"\\") || trimmed.StartsWith("//");
+        }
+
+        /// <summary>
         /// 获取字符串的 UTF-8 字节长度
         /// </summary>
         public static int GetUtf8ByteCount(string s)
