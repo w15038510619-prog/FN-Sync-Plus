@@ -74,37 +74,37 @@
             </Border>
 
             <!-- RIGHT: SMB AUTHENTICATION FORM -->
-            <Border Grid.Column="1" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="20,16">
+            <Border Grid.Column="1" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="24,20">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel Spacing="16" MaxWidth="520" HorizontalAlignment="Left">
+                    <StackPanel Spacing="16" HorizontalAlignment="Left" Width="380">
                         <StackPanel Spacing="4">
-                            <TextBlock Text="SMB 会话与账号认证" FontSize="14" FontWeight="SemiBold" />
-                            <TextBlock Text="输入飞牛 NAS 的 IP 地址及用于 SMB 挂载访问的飞牛账号密码" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="SMB 会话与账号认证" FontSize="15" FontWeight="SemiBold" />
+                            <TextBlock Text="输入飞牛 NAS 的 IP 地址及用于 SMB 挂载访问的飞牛账号密码" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                         </StackPanel>
 
                         <!-- NAS Address -->
-                        <StackPanel Spacing="6">
+                        <StackPanel Spacing="6" Width="360" HorizontalAlignment="Left">
                             <TextBlock Text="NAS 主机名 / IP 地址" FontSize="12" FontWeight="Medium" />
-                            <TextBox Text="{x:Bind ViewModel.NasAddress, Mode=TwoWay}" PlaceholderText="例如: 192.168.8.120" FontFamily="Consolas, Segoe UI" FontSize="13" />
+                            <TextBox Text="{x:Bind ViewModel.NasAddress, Mode=TwoWay}" Width="360" PlaceholderText="例如: 192.168.8.120" FontFamily="Consolas, Segoe UI" FontSize="13" />
                         </StackPanel>
 
                         <!-- Username -->
-                        <StackPanel Spacing="6">
+                        <StackPanel Spacing="6" Width="360" HorizontalAlignment="Left">
                             <TextBlock Text="飞牛 NAS 用户名" FontSize="12" FontWeight="Medium" />
-                            <TextBox Text="{x:Bind ViewModel.Username, Mode=TwoWay}" PlaceholderText="例如: admin 或个人用户名" FontSize="13" />
+                            <TextBox Text="{x:Bind ViewModel.Username, Mode=TwoWay}" Width="360" PlaceholderText="例如: admin 或个人用户名" FontSize="13" />
                         </StackPanel>
 
                         <!-- Password -->
-                        <StackPanel Spacing="6">
+                        <StackPanel Spacing="6" Width="360" HorizontalAlignment="Left">
                             <TextBlock Text="密码" FontSize="12" FontWeight="Medium" />
-                            <PasswordBox x:Name="TxtPassword" PasswordChanged="TxtPassword_PasswordChanged" PlaceholderText="输入飞牛 NAS 登录密码" FontSize="13" />
+                            <PasswordBox x:Name="TxtPassword" PasswordChanged="TxtPassword_PasswordChanged" Width="360" PlaceholderText="输入飞牛 NAS 登录密码" FontSize="13" />
                         </StackPanel>
 
                         <!-- Remember Password -->
-                        <CheckBox Content="记住凭据 (使用 Windows DPAPI 本地强加密安全存储)" IsChecked="{x:Bind ViewModel.RememberPassword, Mode=TwoWay}" FontSize="12" />
+                        <CheckBox Content="记住凭据 (使用 Windows DPAPI 本地强加密安全存储)" IsChecked="{x:Bind ViewModel.RememberPassword, Mode=TwoWay}" FontSize="12" Width="360" />
 
                         <!-- Action Buttons -->
-                        <StackPanel Orientation="Horizontal" Spacing="12">
+                        <StackPanel Orientation="Horizontal" Spacing="12" Width="360">
                             <Button Command="{x:Bind ViewModel.LoginCommand}" Style="{ThemeResource AccentButtonStyle}" Padding="16,8">
                                 <StackPanel Orientation="Horizontal" Spacing="6">
                                     <FontIcon Glyph="&#xE8D7;" FontSize="13" />
@@ -122,6 +122,8 @@
 
                         <!-- Status Message / InfoBar -->
                         <InfoBar
+                            Width="360"
+                            HorizontalAlignment="Left"
                             IsOpen="{x:Bind HasStatusMessage(ViewModel.StatusMessage), Mode=OneWay}"
                             Severity="{x:Bind GetSeverity(ViewModel.IsSuccess), Mode=OneWay}"
                             Title="{x:Bind GetStatusTitle(ViewModel.IsSuccess), Mode=OneWay}"

@@ -32,16 +32,23 @@ namespace FNSyncPlus.WinUI.Services
             var taskManager = new TaskManager(settings, longNameEngine, manifestManager, smbService);
             services.AddSingleton(taskManager);
 
+            var connectionService = new NasConnectionService(smbService, settings, taskManager);
+            services.AddSingleton(connectionService);
+
             var restoreEngine = new RestoreEngine(manifestManager);
             services.AddSingleton(restoreEngine);
+
+            var testLabEngine = new TestLabEngine(longNameEngine, manifestManager, smbService);
+            services.AddSingleton(testLabEngine);
 
             // 2. ViewModels
             services.AddSingleton<MainViewModel>();
             services.AddSingleton<TasksViewModel>();
-            services.AddTransient<AddFolderWizardViewModel>();
-            services.AddTransient<NasBrowserViewModel>();
+            services.AddSingleton<AddFolderWizardViewModel>();
+            services.AddSingleton<NasBrowserViewModel>();
             services.AddSingleton<RestoreViewModel>();
             services.AddSingleton<DeviceViewModel>();
+            services.AddSingleton<TestLabViewModel>();
             services.AddSingleton<SettingsViewModel>();
             services.AddTransient<TaskDetailsViewModel>();
 

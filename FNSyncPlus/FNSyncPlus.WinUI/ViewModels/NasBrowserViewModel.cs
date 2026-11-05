@@ -60,6 +60,9 @@ namespace FNSyncPlus.WinUI.ViewModels
         private bool _isTeamShare = false;
 
         [ObservableProperty]
+        private string _emptyFolderNotice = string.Empty;
+
+        [ObservableProperty]
         private bool _hasWritePermission = true;
 
         [ObservableProperty]
@@ -92,40 +95,30 @@ namespace FNSyncPlus.WinUI.ViewModels
                 var categorized = await _smbService.EnumerateCategorizedSharesAsync(server, _settings.Username);
 
                 Categories.Clear();
-                if (categorized.Shares.Count == 0)
+                foreach (var share in categorized.Shares)
                 {
-                    string user = !string.IsNullOrEmpty(_settings.Username) ? _settings.Username : "cenco";
+                    bool isPers = share.Category == NasShareCategory.PersonalSpace;
                     Categories.Add(new CategoryItem
                     {
-                        Title = $"{user} (个人空间)",
-                        UncPath = $@"\\{server}\{user}",
-                        Category = NasShareCategory.PersonalSpace,
-                        IsPersonal = true,
-                        IconGlyph = "\uE77B"
-                    });
-                    Categories.Add(new CategoryItem
-                    {
-                        Title = $"团队文件-{user}-public (团队共享)",
-                        UncPath = $@"\\{server}\团队文件-{user}-public",
-                        Category = NasShareCategory.TeamShare,
-                        IsPersonal = false,
-                        IconGlyph = "\uE716"
+                        Title = share.Name,
+                        UncPath = share.UncPath,
+                        Category = share.Category,
+                        IsPersonal = isPers,
+                        IconGlyph = isPers ? "\uE77B" : "\uE716"
                     });
                 }
-                else
+
+                if (Categories.Count == 0)
                 {
-                    foreach (var share in categorized.Shares)
-                    {
-                        bool isPers = share.Category == NasShareCategory.PersonalSpace;
-                        Categories.Add(new CategoryItem
-                        {
-                            Title = share.Name,
-                            UncPath = share.UncPath,
-                            Category = share.Category,
-                            IsPersonal = isPers,
-                            IconGlyph = isPers ? "\uE77B" : "\uE716"
-                        });
-                    }
+                    PermissionStatusText = "未在 NAS 检测到可用共享";
+                    SecurityTitle = "无可用共享目录";
+                    SecurityDescription = "当前 NAS 账号未被授权访问任何 SMB 共享，或共享未开放。请在飞牛 fnOS 控制面板检查共享权限。";
+                    SecurityBadgeBg = "#FEE2E2";
+                    SecurityBadgeColor = "#B91C1C";
+                    HasWritePermission = false;
+                    FolderItems.Clear();
+                    EmptyFolderNotice = "未在 NAS 检测到可用共享目录";
+                    return;
                 }
 
                 // 默认选中第一个私人空间，或根路径
@@ -198,15 +191,6 @@ namespace FNSyncPlus.WinUI.ViewModels
                 else
                 {
                     var subs = await _smbService.ListSubFoldersAsync(uncPath, _baseShare);
-                    if (subs.Count == 0)
-                    {
-                        subs = new List<NasFolderItem>
-                        {
-                            new NasFolderItem { Name = "WorkDocs", FullUncPath = Path.Combine(uncPath, "WorkDocs"), IsShareRoot = false },
-                            new NasFolderItem { Name = "Photos_Backup", FullUncPath = Path.Combine(uncPath, "Photos_Backup"), IsShareRoot = false },
-                            new NasFolderItem { Name = "Project_Archive", FullUncPath = Path.Combine(uncPath, "Project_Archive"), IsShareRoot = false }
-                        };
-                    }
                     _allLoadedItems = subs;
                 }
 
@@ -278,6 +262,8 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 FolderItems.Add(item);
             }
+
+            EmptyFolderNotice = FolderItems.Count == 0 ? "此目录为空 (暂无子文件夹)" : string.Empty;
         }
 
         public async Task<bool> CreateSubFolderAsync(string folderName)

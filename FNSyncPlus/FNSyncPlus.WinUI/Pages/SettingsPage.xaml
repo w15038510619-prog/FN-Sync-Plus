@@ -103,6 +103,27 @@
                     </StackPanel>
                 </Border>
 
+                <!-- Card 4: About & Version -->
+                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="关于软件与版本信息" FontSize="14" FontWeight="SemiBold" />
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Spacing="4">
+                                <TextBlock Text="飞牛同步增强版 (FN Sync Plus)" FontSize="13" FontWeight="SemiBold" />
+                                <TextBlock Text="测试构建版本：v0.4.0-beta (Windows App SDK / WinUI 3 原生桌面架构)" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="注：当前阶段为 Beta 测试版，提供长文件名无损映射、多任务隔离、内置备份测试实验室等功能。" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <Border Grid.Column="1" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="8,4" VerticalAlignment="Center">
+                                <TextBlock Text="v0.4.0-beta" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                            </Border>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
                 <!-- Action Bar -->
                 <StackPanel Orientation="Horizontal" Spacing="12">
                     <Button Command="{x:Bind ViewModel.SaveSettingsCommand}" Style="{ThemeResource AccentButtonStyle}" Padding="20,8">

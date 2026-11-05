@@ -18,7 +18,7 @@ namespace FNSyncPlus.WinUI
             ViewModel = AppServices.GetService<MainViewModel>();
             InitializeComponent();
 
-            WindowHelper.ConfigureWindow(this, "飞牛同步增强版 (FN Sync Plus) v3.0", 1200, 780);
+            WindowHelper.ConfigureWindow(this, "飞牛同步增强版 v0.4.0-beta", 1200, 780);
             WindowHelper.SetMicaBackdrop(this);
             SetTitleBar(AppTitleBar);
 
@@ -51,6 +51,10 @@ namespace FNSyncPlus.WinUI
                 ka4.Invoked += Accelerator_Settings_Invoked;
                 root.KeyboardAccelerators.Add(ka4);
 
+                var ka5 = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.Number5, Modifiers = Windows.System.VirtualKeyModifiers.Control };
+                ka5.Invoked += Accelerator_TestLab_Invoked;
+                root.KeyboardAccelerators.Add(ka5);
+
                 var kaN = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.N, Modifiers = Windows.System.VirtualKeyModifiers.Control };
                 kaN.Invoked += Accelerator_AddWizard_Invoked;
                 root.KeyboardAccelerators.Add(kaN);
@@ -61,6 +65,7 @@ namespace FNSyncPlus.WinUI
             {
                 "Restore" => 1,
                 "Device" => 2,
+                "TestLab" => 3,
                 "Settings" => -1,
                 _ => 0
             };
@@ -74,32 +79,54 @@ namespace FNSyncPlus.WinUI
                 NavView.SelectedItem = NavView.FooterMenuItems[0];
             }
 
-            NavigateToTag(initialView);
-
-            if (wizardStep > 0)
+            if (initialView == "AddFolder" || initialView == "AddWizard" || wizardStep > 0)
             {
-                bool shown = false;
+                NavigateToTag("AddFolder");
+                if (wizardStep > 0)
+                {
+                    bool stepApplied = false;
+                    this.Activated += async (s, e) =>
+                    {
+                        if (stepApplied) return;
+                        stepApplied = true;
+                        await System.Threading.Tasks.Task.Delay(300);
+                        var wizardVm = AppServices.GetService<AddFolderWizardViewModel>();
+                        if (wizardStep >= 2)
+                        {
+                            if (wizardVm.SelectedLocalFolders.Count == 0)
+                            {
+                                string testPath = @"D:\FN_AutoSync_Package\FN_Sync_Test";
+                                if (!System.IO.Directory.Exists(testPath))
+                                {
+                                    testPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                                }
+                                wizardVm.AddLocalFolder(testPath);
+                            }
+                            await wizardVm.NextStepAsync();
+                        }
+                        if (wizardStep >= 3)
+                        {
+                            await wizardVm.NextStepAsync();
+                        }
+                    };
+                }
+            }
+            else if (initialView == "TestLabReport")
+            {
+                NavigateToTag("TestLab");
+                bool ran = false;
                 this.Activated += async (s, e) =>
                 {
-                    if (shown) return;
-                    shown = true;
-                    await System.Threading.Tasks.Task.Delay(500);
-                    var wizardVm = AppServices.GetService<AddFolderWizardViewModel>();
-                    if (wizardStep >= 2)
-                    {
-                        await wizardVm.NextStepAsync();
-                    }
-                    if (wizardStep >= 3)
-                    {
-                        await wizardVm.NextStepAsync();
-                    }
-
-                    var dialog = new AddFolderDialog(wizardVm)
-                    {
-                        XamlRoot = this.Content.XamlRoot
-                    };
-                    await dialog.ShowAsync();
+                    if (ran) return;
+                    ran = true;
+                    await System.Threading.Tasks.Task.Delay(400);
+                    var labVm = AppServices.GetService<TestLabViewModel>();
+                    await labVm.RunTestAsync();
                 };
+            }
+            else
+            {
+                NavigateToTag(initialView);
             }
         }
 
@@ -118,7 +145,9 @@ namespace FNSyncPlus.WinUI
                 "Tasks" => typeof(TasksPage),
                 "Restore" => typeof(RestorePage),
                 "Device" => typeof(DevicePage),
+                "TestLab" => typeof(TestLabPage),
                 "Settings" => typeof(SettingsPage),
+                "AddFolder" => typeof(AddFolderPage),
                 _ => typeof(TasksPage)
             };
 
@@ -156,7 +185,7 @@ namespace FNSyncPlus.WinUI
         {
             DotNasStatus.Fill = ViewModel.IsNasConnected
                 ? new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 16, 185, 129))
-                : new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 245, 158, 11));
+                : new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 148, 163, 184));
         }
 
         private void Accelerator_Tasks_Invoked(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
@@ -187,11 +216,19 @@ namespace FNSyncPlus.WinUI
             args.Handled = true;
         }
 
+        private void Accelerator_TestLab_Invoked(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
+        {
+            NavigateToTag("TestLab");
+            if (NavView.MenuItems.Count >= 4)
+            {
+                NavView.SelectedItem = NavView.MenuItems[3];
+            }
+            args.Handled = true;
+        }
+
         private void Accelerator_AddWizard_Invoked(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
         {
-            NavigateToTag("Tasks");
-            var tasksVm = AppServices.GetService<TasksViewModel>();
-            tasksVm.AddFolderCommand.Execute(null);
+            NavigateToTag("AddFolder");
             args.Handled = true;
         }
     }

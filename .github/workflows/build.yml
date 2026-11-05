@@ -29,7 +29,7 @@ jobs:
     - name: Run Automated Tests
       run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release
 
-    - name: Publish WinUI 3 Desktop Application (v3.0)
+    - name: Publish WinUI 3 Desktop Application (v0.4.0-beta)
       run: >
         dotnet publish FNSyncPlus/FNSyncPlus.WinUI/FNSyncPlus.WinUI.csproj
         -c Release
@@ -38,10 +38,17 @@ jobs:
         -p:WindowsPackageType=None
         -o publish_winui/
 
+    - name: Ensure Resources PRI in Publish Output
+      shell: pwsh
+      run: |
+        if ((Test-Path "publish_winui/FNSyncPlus.WinUI.pri") -and !(Test-Path "publish_winui/resources.pri")) {
+          Copy-Item -Path "publish_winui/FNSyncPlus.WinUI.pri" -Destination "publish_winui/resources.pri" -Force
+        }
+
     - name: Compress WinUI 3 Release to ZIP
       shell: pwsh
       run: |
-        Compress-Archive -Path publish_winui/* -DestinationPath publish_winui/FN_Sync_Plus_v3.0_WinUI3_x64.zip -Force
+        Compress-Archive -Path publish_winui/* -DestinationPath publish_winui/FN_Sync_Plus_v0.4.0-beta_WinUI3_x64.zip -Force
 
     - name: Publish Legacy WPF Single-File Executable
       run: >
@@ -64,8 +71,8 @@ jobs:
     - name: Upload WinUI 3 Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: FN_Sync_Plus_v3.0_WinUI3_x64
-        path: publish_winui/FN_Sync_Plus_v3.0_WinUI3_x64.zip
+        name: FN_Sync_Plus_v0.4.0-beta_WinUI3_x64
+        path: publish_winui/FN_Sync_Plus_v0.4.0-beta_WinUI3_x64.zip
 
     - name: Upload Legacy WPF Artifact
       uses: actions/upload-artifact@v4

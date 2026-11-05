@@ -6,7 +6,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:vm="using:FNSyncPlus.WinUI.ViewModels"
-    Title="飞牛同步增强版 (FN Sync Plus) v3.0"
+    Title="飞牛同步增强版 v0.4.0-beta"
     mc:Ignorable="d">
 
     <Grid>
@@ -28,14 +28,14 @@
                 <Border Width="24" Height="24" Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="6">
                     <FontIcon Glyph="&#xE895;" FontSize="12" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
                 </Border>
-                <TextBlock Text="飞牛同步增强版 v3.0" FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                <TextBlock Text="飞牛同步增强版 v0.4.0-beta" FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
             </StackPanel>
 
             <!-- Center: Connected NAS Status Pill -->
             <StackPanel Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center">
                 <Border x:Name="BorderNasPill" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="14" Padding="12,4" Tapped="BorderNasPill_Tapped">
                     <StackPanel Orientation="Horizontal" Spacing="8">
-                        <Ellipse x:Name="DotNasStatus" Width="8" Height="8" Fill="#F59E0B" VerticalAlignment="Center" />
+                        <Ellipse x:Name="DotNasStatus" Width="8" Height="8" Fill="#94A3B8" VerticalAlignment="Center" />
                         <TextBlock Text="{x:Bind ViewModel.NasStatusText, Mode=OneWay}" FontSize="11" FontWeight="Medium" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
                     </StackPanel>
                 </Border>
@@ -73,6 +73,11 @@
                 <NavigationViewItem Content="NAS 设备" Tag="Device">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE774;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="测试实验室" Tag="TestLab">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE756;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
             </NavigationView.MenuItems>

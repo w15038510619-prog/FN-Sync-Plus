@@ -13,6 +13,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private readonly SmbAuthService _smbService;
         private readonly AppSettings _settings;
         private readonly TaskManager _taskManager;
+        private readonly NasConnectionService _connectionService;
 
         public ObservableCollection<DiscoveredDevice> DiscoveredDevices { get; } = new();
 
@@ -50,11 +51,12 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         public event Action? RequestRefreshConnectionPill;
 
-        public DeviceViewModel(SmbAuthService smbService, AppSettings settings, TaskManager taskManager)
+        public DeviceViewModel(SmbAuthService smbService, AppSettings settings, TaskManager taskManager, NasConnectionService connectionService)
         {
             _smbService = smbService;
             _settings = settings;
             _taskManager = taskManager;
+            _connectionService = connectionService;
 
             NasAddress = settings.NasServer;
             Username = settings.Username;
@@ -104,6 +106,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             if (string.IsNullOrWhiteSpace(NasAddress) || string.IsNullOrWhiteSpace(Username))
             {
                 StatusMessage = "请输入 NAS 地址和用户名。";
+                IsSuccess = false;
                 return;
             }
 
@@ -113,40 +116,19 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             try
             {
-                var (success, errorMsg) = await _smbService.ConnectNasAsync(
+                var (success, msg) = await _connectionService.ConnectAsync(
                     NasAddress.Trim(),
                     Username.Trim(),
-                    Password);
+                    Password,
+                    RememberPassword);
 
-                if (success)
-                {
-                    _settings.NasServer = NasAddress.Trim();
-                    _settings.Username = Username.Trim();
-                    _settings.RememberCredentials = RememberPassword;
-                    _settings.Save();
-
-                    if (RememberPassword)
-                    {
-                        SmbAuthService.SaveCredentials(NasAddress.Trim(), Username.Trim(), Password);
-                    }
-                    else
-                    {
-                        SmbAuthService.ClearSavedCredentials();
-                    }
-
-                    _taskManager.SetNasOnlineState(true);
-
-                    IsSuccess = true;
-                    StatusMessage = $"登录成功！已成功建立与 \\\\{NasAddress} 的经过身份验证的 SMB 会话。";
-                    RequestRefreshConnectionPill?.Invoke();
-                }
-                else
-                {
-                    StatusMessage = $"登录失败: {errorMsg}";
-                }
+                IsSuccess = success;
+                StatusMessage = msg;
+                RequestRefreshConnectionPill?.Invoke();
             }
             catch (Exception ex)
             {
+                IsSuccess = false;
                 StatusMessage = $"连接异常: {ex.Message}";
             }
             finally
@@ -156,15 +138,20 @@ namespace FNSyncPlus.WinUI.ViewModels
         }
 
         [RelayCommand]
-        public void Disconnect()
+        public async Task DisconnectAsync()
         {
-            _taskManager.SetNasOnlineState(false);
-            _settings.NasServer = string.Empty;
-            _settings.Save();
-            SmbAuthService.ClearSavedCredentials();
-
-            StatusMessage = "已断开会话并清除当前会话状态。";
-            RequestRefreshConnectionPill?.Invoke();
+            IsBusy = true;
+            try
+            {
+                await _connectionService.DisconnectAsync();
+                IsSuccess = false;
+                StatusMessage = "已断开当前 NAS SMB 会话。";
+                RequestRefreshConnectionPill?.Invoke();
+            }
+            finally
+            {
+                IsBusy = false;
+            }
         }
     }
 }

@@ -21,14 +21,16 @@ namespace FNSyncPlus.WinUI.Pages
             ViewModel.RequestConfirmDelete += ConfirmDeleteTask;
         }
 
-        private async void OpenAddFolderWizardDialog()
+        private void OpenAddFolderWizardDialog()
         {
-            var dialog = new AddFolderDialog
+            if (App.MainWindowInstance != null)
             {
-                XamlRoot = this.XamlRoot
-            };
-
-            await dialog.ShowAsync();
+                App.MainWindowInstance.NavigateToTag("AddFolder");
+            }
+            else
+            {
+                Frame.Navigate(typeof(AddFolderPage));
+            }
         }
 
         private async void OpenTaskDetailsDialog(SyncTaskItemViewModel taskItem)

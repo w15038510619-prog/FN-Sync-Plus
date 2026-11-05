@@ -48,6 +48,9 @@ namespace FNSyncPlus.Tests
                 await TestTaskPauseStrictnessAsync();
                 await TestRestoreStagingShortNameSafetyAsync();
                 TestStateBadgeColorMappingAndDisplayStatus();
+                TestNasConnectionServiceStateTransitionsAndDisconnect();
+                await TestTestLabEngineSampleGenerationAndSimulationAsync();
+                BuildApplicationIcons();
             }
             catch (Exception ex)
             {
@@ -1143,6 +1146,98 @@ namespace FNSyncPlus.Tests
 
             t.State = TaskSyncState.Error;
             Assert(t.StateBadgeBgHex == "#FEE2E2" && t.StateBadgeColorHex == "#DC2626", "Error 状态使用警示红胶囊");
+        }
+
+        static void TestNasConnectionServiceStateTransitionsAndDisconnect()
+        {
+            Console.WriteLine("\n--- 26. 全局单例 NasConnectionService 状态流转与断开清理测试 ---");
+
+            var settings = new AppSettings { NasServer = "192.168.8.120", Username = "cenco" };
+            var smb = new SmbAuthService();
+            var tm = new TaskManager(settings, new LongNameEngine(), new ManifestManager(), smb);
+            var connService = new NasConnectionService(smb, settings, tm);
+
+            Assert(connService.State == NasConnectionState.Disconnected, "初始状态为 Disconnected");
+            Assert(connService.StatusDescription.Contains("未连接"), "未连接状态描述准确");
+
+            bool stateChangedFired = false;
+            connService.StateChanged += (s, state) =>
+            {
+                if (state == NasConnectionState.Disconnected) stateChangedFired = true;
+            };
+
+            connService.DisconnectAsync().GetAwaiter().GetResult();
+            Assert(connService.State == NasConnectionState.Disconnected, "调用 DisconnectAsync 后状态为 Disconnected");
+            Assert(stateChangedFired, "DisconnectAsync 触发了 StateChanged 事件通知");
+            Assert(!tm.IsNasOnline, "断开连接后 TaskManager 标记 NAS 为离线状态");
+        }
+
+        static async Task TestTestLabEngineSampleGenerationAndSimulationAsync()
+        {
+            Console.WriteLine("\n--- 27. 备份测试实验室 (Test Lab) 样本生成、极限边界与模拟恢复强比对测试 ---");
+
+            var longEngine = new LongNameEngine(255);
+            var manifestMgr = new ManifestManager();
+            var smb = new SmbAuthService();
+            var testLab = new TestLabEngine(longEngine, manifestMgr, smb);
+
+            // 1. 测试生成测试样本
+            var items = await testLab.GenerateTestSamplesAsync();
+            Assert(items.Count >= 10, $"成功生成标准测试样本文件集 (共 {items.Count} 个文件)");
+
+            // 验证 254 字节文件不触发映射
+            var f254 = items.FirstOrDefault(i => i.Utf8ByteCount == 254);
+            Assert(f254 != null && !f254.RequiresMapping, "254 字节 UTF-8 边界文件被准确判定为不触发映射");
+
+            // 验证 255 字节文件不触发映射
+            var f255 = items.FirstOrDefault(i => i.Utf8ByteCount == 255);
+            Assert(f255 != null && !f255.RequiresMapping, "255 字节 UTF-8 极限边界文件被准确判定为不触发映射");
+
+            // 验证 256 字节超长文件必须触发映射
+            var f256 = items.FirstOrDefault(i => i.Utf8ByteCount == 256);
+            Assert(f256 != null && f256.RequiresMapping, "256 字节超长文件被准确判定为必须触发 _FN_LONG_* 映射");
+
+            // 验证 300 字节超长文件必须触发映射
+            var f300 = items.FirstOrDefault(i => i.Utf8ByteCount == 300);
+            Assert(f300 != null && f300.RequiresMapping, "300 字节超长文件被准确判定为必须触发 _FN_LONG_* 映射");
+
+            // 2. 运行本地模拟测试
+            var report = await testLab.RunLocalSimulationTestAsync();
+            Assert(report.IsAllPassed, "TestLabEngine 本地模拟测试全量通过 (IsAllPassed == true)");
+            Assert(report.InitialUploadedFiles >= 10, $"初次全量同步上传成功 ({report.InitialUploadedFiles} 个文件)");
+            Assert(report.LongNameFilesMapped >= 2, $"成功识别并映射 256/300 字节超长文件名 (映射数: {report.LongNameFilesMapped})");
+            Assert(report.IncrementalSkippedFiles >= 10, $"增量同步测试成功跳过未修改文件 (跳过数: {report.IncrementalSkippedFiles})");
+            Assert(report.IncrementalUploadedFiles == 1, "追加修改后仅精准增量同步 1 个变更文件");
+            Assert(report.RestoredFiles == report.TotalSourceFiles, $"异机原名恢复成功还原所有文件 ({report.RestoredFiles}/{report.TotalSourceFiles})");
+            Assert(report.Sha256VerifiedFiles == report.TotalSourceFiles, $"所有还原文件 SHA-256 强校验 100% 通过 ({report.Sha256VerifiedFiles}/{report.TotalSourceFiles})");
+
+            // 3. 报告导出验证
+            string tempMd = Path.Combine(Path.GetTempPath(), $"TestReport_{report.RunId}.md");
+            string tempJson = Path.Combine(Path.GetTempPath(), $"TestReport_{report.RunId}.json");
+            await TestLabEngine.ExportReportToMarkdownAsync(report, tempMd);
+            await TestLabEngine.ExportReportToJsonAsync(report, tempJson);
+
+            Assert(File.Exists(tempMd) && new FileInfo(tempMd).Length > 0, "测试实验室成功导出 Markdown 格式验证报告");
+            Assert(File.Exists(tempJson) && new FileInfo(tempJson).Length > 0, "测试实验室成功导出 JSON 格式机器可读验证报告");
+
+            try { File.Delete(tempMd); File.Delete(tempJson); } catch { }
+        }
+
+        static void BuildApplicationIcons()
+        {
+            Console.WriteLine("\n--- 28. 原创应用图标方案生成与多尺寸 ICO 资产校验 ---");
+            string artifactDir = @"C:\Users\S\.gemini\antigravity\brain\eacd3aa8-c774-45a0-b5d4-d23d66a0eaa6";
+            string assetsDir = @"D:\FN_AutoSync_Package\FNSyncPlus\FNSyncPlus.WinUI\Assets";
+
+            IconBuilder.GenerateIcons(artifactDir, assetsDir);
+
+            string icoPath = Path.Combine(assetsDir, "AppIcon.ico");
+            Assert(File.Exists(icoPath), "成功生成多尺寸复合 AppIcon.ico 文件");
+            var fi = new FileInfo(icoPath);
+            Assert(fi.Length > 10000, $"AppIcon.ico 包含真实多尺寸图像流 (体积: {fi.Length} 字节)");
+
+            string previewPath = Path.Combine(artifactDir, "gui_v0.4.0_icon_concepts.png");
+            Assert(File.Exists(previewPath), "成功输出三套原创图标概念对比全景图 (gui_v0.4.0_icon_concepts.png)");
         }
     }
 }

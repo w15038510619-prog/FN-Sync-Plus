@@ -35,6 +35,7 @@ namespace FNSyncPlus.Core.Services
         private readonly Task _queueWorkerTask;
 
         private bool _isNasOnline = true;
+        public bool IsNasOnline => _isNasOnline;
 
         public event Action<SyncTask, SyncProgressReport>? TaskProgressChanged;
         public event Action<SyncTask, string, string>? TaskLogEmitted; // (task, level, msg)

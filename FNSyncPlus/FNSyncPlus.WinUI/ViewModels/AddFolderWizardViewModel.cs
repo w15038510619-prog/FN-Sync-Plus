@@ -92,13 +92,6 @@ namespace FNSyncPlus.WinUI.ViewModels
                 }
             };
 
-            string defaultFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "WorkDocs");
-            if (!Directory.Exists(defaultFolder))
-            {
-                try { Directory.CreateDirectory(defaultFolder); } catch { }
-            }
-            SelectedLocalFolders.Add(defaultFolder);
-
             InitializeDefaultNasRoot();
             UpdateStepState();
         }
@@ -234,6 +227,13 @@ namespace FNSyncPlus.WinUI.ViewModels
                 3 => CanCreate && PlannedTasks.Count > 0,
                 _ => false
             };
+
+            if (CurrentStep == 1)
+            {
+                StatusMessage = SelectedLocalFolders.Count == 0 
+                    ? "请先添加至少一个本地待备份文件夹以继续下一步。" 
+                    : $"已选择 {SelectedLocalFolders.Count} 个待备份文件夹。";
+            }
         }
 
         public async Task RecomputePlannedTasksAsync()

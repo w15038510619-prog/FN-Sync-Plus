@@ -19,6 +19,9 @@
     <CsWinRTAotOptimizerEnabled>false</CsWinRTAotOptimizerEnabled>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <Version>0.4.0-beta</Version>
+    <AssemblyVersion>0.4.0.0</AssemblyVersion>
+    <FileVersion>0.4.0.0</FileVersion>
   </PropertyGroup>
 
   <ItemGroup>
@@ -57,5 +60,6 @@
   <Target Name="EnsureResourcesPri" AfterTargets="Build;Publish">
     <Copy SourceFiles="$(TargetDir)$(TargetName).pri" DestinationFiles="$(TargetDir)resources.pri" Condition="Exists('$(TargetDir)$(TargetName).pri')" ContinueOnError="true" />
     <Copy SourceFiles="$(PublishDir)$(TargetName).pri" DestinationFiles="$(PublishDir)resources.pri" Condition="Exists('$(PublishDir)$(TargetName).pri')" ContinueOnError="true" />
+    <Copy SourceFiles="$(TargetDir)$(TargetName).pri" DestinationFiles="$(PublishDir)resources.pri" Condition="Exists('$(TargetDir)$(TargetName).pri') and '$(PublishDir)' != ''" ContinueOnError="true" />
   </Target>
 </Project>

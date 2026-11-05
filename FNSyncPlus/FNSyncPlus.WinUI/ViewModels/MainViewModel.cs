@@ -10,12 +10,13 @@ namespace FNSyncPlus.WinUI.ViewModels
         private readonly AppSettings _settings;
         private readonly TaskManager _taskManager;
         private readonly SmbAuthService _smbService;
+        private readonly NasConnectionService _connectionService;
 
         [ObservableProperty]
-        private string _appTitle = "飞牛同步增强版 v3.0";
+        private string _appTitle = "飞牛同步增强版 v0.4.0-beta";
 
         [ObservableProperty]
-        private string _nasStatusText = "NAS 未连接 (点击登录)";
+        private string _nasStatusText = "NAS 未连接 (点击配置)";
 
         [ObservableProperty]
         private bool _isNasConnected = false;
@@ -44,33 +45,60 @@ namespace FNSyncPlus.WinUI.ViewModels
         public event Action<string>? RequestNavigate;
         public event Action? RequestToggleTheme;
 
-        public MainViewModel(AppSettings settings, TaskManager taskManager, SmbAuthService smbService)
+        public MainViewModel(AppSettings settings, TaskManager taskManager, SmbAuthService smbService, NasConnectionService connectionService)
         {
             _settings = settings;
             _taskManager = taskManager;
             _smbService = smbService;
+            _connectionService = connectionService;
+
+            _connectionService.PropertyChanged += (s, e) =>
+            {
+                if (e.PropertyName == nameof(NasConnectionService.State) ||
+                    e.PropertyName == nameof(NasConnectionService.ServerAddress))
+                {
+                    UpdateNasConnectionStatus();
+                }
+            };
 
             UpdateNasConnectionStatus();
         }
 
         public void UpdateNasConnectionStatus()
         {
-            string server = _settings.NasServer.Trim();
-            string user = _settings.Username.Trim();
-
-            if (!string.IsNullOrEmpty(server))
+            switch (_connectionService.State)
             {
-                IsNasConnected = true;
-                NasStatusText = $"{server} · {user} (SMB 已连接)";
-                PillBgColorHex = "#DCFCE7"; // Light green
-                PillTextColorHex = "#15803D"; // Deep green
-            }
-            else
-            {
-                IsNasConnected = false;
-                NasStatusText = "NAS 未连接 (点击配置)";
-                PillBgColorHex = "#FEF3C7"; // Light amber
-                PillTextColorHex = "#B45309"; // Amber
+                case NasConnectionState.Connected:
+                    IsNasConnected = true;
+                    NasStatusText = $"{_connectionService.ServerAddress} · {_connectionService.Username} (SMB 已连接)";
+                    PillBgColorHex = "#DCFCE7";
+                    PillTextColorHex = "#15803D";
+                    break;
+                case NasConnectionState.Connecting:
+                    IsNasConnected = false;
+                    NasStatusText = "🟡 正在连接 NAS SMB...";
+                    PillBgColorHex = "#FEF3C7";
+                    PillTextColorHex = "#B45309";
+                    break;
+                case NasConnectionState.AuthenticationFailed:
+                    IsNasConnected = false;
+                    NasStatusText = "▲ 认证失败 (点击配置)";
+                    PillBgColorHex = "#FEE2E2";
+                    PillTextColorHex = "#B91C1C";
+                    break;
+                case NasConnectionState.ConnectionLost:
+                    IsNasConnected = false;
+                    NasStatusText = "▲ NAS 会话断开 (点击配置)";
+                    PillBgColorHex = "#FEE2E2";
+                    PillTextColorHex = "#B91C1C";
+                    break;
+                case NasConnectionState.Disconnected:
+                default:
+                    IsNasConnected = false;
+                    NasStatusText = "🔴 NAS 未连接 (点击配置)";
+                    PillBgColorHex = "#F1F5F9";
+                    PillTextColorHex = "#64748B";
+                    break;
             }
         }
 

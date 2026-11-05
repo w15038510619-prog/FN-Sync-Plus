@@ -250,6 +250,52 @@ namespace FNSyncPlus.Core.Services
         }
 
         /// <summary>
+        /// 断开与指定 NAS 服务器的 SMB 会话
+        /// </summary>
+        public async Task<(bool Success, string Message)> DisconnectNasAsync(string serverAddress)
+        {
+            return await Task.Run(() =>
+            {
+                if (string.IsNullOrWhiteSpace(serverAddress))
+                {
+                    return (true, "已断开");
+                }
+
+                serverAddress = serverAddress.Trim().Trim('\\', '/');
+                if (serverAddress.Contains(':'))
+                {
+                    serverAddress = serverAddress.Split(':')[0];
+                }
+
+                // 尝试断开 IPC$ 及挂载会话
+                try
+                {
+                    WNetCancelConnection2($@"\\{serverAddress}\IPC$", 0, bForce: true);
+                }
+                catch { }
+
+                try
+                {
+                    using var p = new System.Diagnostics.Process();
+                    p.StartInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "net.exe",
+                        Arguments = $"use \\\\{serverAddress} /delete /y",
+                        CreateNoWindow = true,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    };
+                    p.Start();
+                    p.WaitForExit(3000);
+                }
+                catch { }
+
+                return (true, "已安全断开 SMB 会话");
+            });
+        }
+
+        /// <summary>
         /// 列出 NAS 上所有可访问的 SMB 共享目录，并智能区分为【私人空间 (我的文件)】与【团队共享 (团队文件)】，优先推荐私人备份
         /// </summary>
         public async Task<NasSharesResult> EnumerateCategorizedSharesAsync(string serverAddress, string? currentUsername = null)
