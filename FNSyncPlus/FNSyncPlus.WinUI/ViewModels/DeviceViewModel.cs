@@ -1,0 +1,170 @@
+using System;
+using System.Collections.ObjectModel;
+using System.Threading.Tasks;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using FNSyncPlus.Core.Services;
+
+namespace FNSyncPlus.WinUI.ViewModels
+{
+    public partial class DeviceViewModel : ObservableObject
+    {
+        private readonly NasDiscoveryService _discoveryService = new();
+        private readonly SmbAuthService _smbService;
+        private readonly AppSettings _settings;
+        private readonly TaskManager _taskManager;
+
+        public ObservableCollection<DiscoveredDevice> DiscoveredDevices { get; } = new();
+
+        [ObservableProperty]
+        private DiscoveredDevice? _selectedDevice;
+
+        partial void OnSelectedDeviceChanged(DiscoveredDevice? value)
+        {
+            if (value != null && !string.IsNullOrWhiteSpace(value.IpAddress))
+            {
+                NasAddress = value.IpAddress;
+            }
+        }
+
+        [ObservableProperty]
+        private string _nasAddress = string.Empty;
+
+        [ObservableProperty]
+        private string _username = string.Empty;
+
+        [ObservableProperty]
+        private string _password = string.Empty;
+
+        [ObservableProperty]
+        private bool _rememberPassword = true;
+
+        [ObservableProperty]
+        private string _statusMessage = string.Empty;
+
+        [ObservableProperty]
+        private bool _isBusy = false;
+
+        [ObservableProperty]
+        private bool _isSuccess = false;
+
+        public event Action? RequestRefreshConnectionPill;
+
+        public DeviceViewModel(SmbAuthService smbService, AppSettings settings, TaskManager taskManager)
+        {
+            _smbService = smbService;
+            _settings = settings;
+            _taskManager = taskManager;
+
+            NasAddress = settings.NasServer;
+            Username = settings.Username;
+            RememberPassword = settings.RememberCredentials;
+
+            if (settings.RememberCredentials && !string.IsNullOrEmpty(settings.NasServer))
+            {
+                var creds = SmbAuthService.LoadCredentials();
+                if (creds.HasValue && !string.IsNullOrEmpty(creds.Value.Password))
+                {
+                    Password = creds.Value.Password;
+                }
+            }
+
+            _ = SearchLanDevicesAsync();
+        }
+
+        [RelayCommand]
+        public async Task SearchLanDevicesAsync()
+        {
+            IsBusy = true;
+            StatusMessage = "正在探测局域网中的飞牛 NAS 设备...";
+            try
+            {
+                var devices = await _discoveryService.DiscoverNasDevicesAsync(NasAddress.Trim());
+                DiscoveredDevices.Clear();
+                foreach (var d in devices)
+                {
+                    DiscoveredDevices.Add(d);
+                }
+
+                StatusMessage = $"搜索完成，找到 {DiscoveredDevices.Count} 台局域网设备。";
+            }
+            catch (Exception ex)
+            {
+                StatusMessage = $"搜索异常: {ex.Message}";
+            }
+            finally
+            {
+                IsBusy = false;
+            }
+        }
+
+        [RelayCommand]
+        public async Task LoginAsync()
+        {
+            if (string.IsNullOrWhiteSpace(NasAddress) || string.IsNullOrWhiteSpace(Username))
+            {
+                StatusMessage = "请输入 NAS 地址和用户名。";
+                return;
+            }
+
+            IsBusy = true;
+            StatusMessage = "正在建立 Windows SMB 安全会话...";
+            IsSuccess = false;
+
+            try
+            {
+                var (success, errorMsg) = await _smbService.ConnectNasAsync(
+                    NasAddress.Trim(),
+                    Username.Trim(),
+                    Password);
+
+                if (success)
+                {
+                    _settings.NasServer = NasAddress.Trim();
+                    _settings.Username = Username.Trim();
+                    _settings.RememberCredentials = RememberPassword;
+                    _settings.Save();
+
+                    if (RememberPassword)
+                    {
+                        SmbAuthService.SaveCredentials(NasAddress.Trim(), Username.Trim(), Password);
+                    }
+                    else
+                    {
+                        SmbAuthService.ClearSavedCredentials();
+                    }
+
+                    _taskManager.SetNasOnlineState(true);
+
+                    IsSuccess = true;
+                    StatusMessage = $"登录成功！已成功建立与 \\\\{NasAddress} 的经过身份验证的 SMB 会话。";
+                    RequestRefreshConnectionPill?.Invoke();
+                }
+                else
+                {
+                    StatusMessage = $"登录失败: {errorMsg}";
+                }
+            }
+            catch (Exception ex)
+            {
+                StatusMessage = $"连接异常: {ex.Message}";
+            }
+            finally
+            {
+                IsBusy = false;
+            }
+        }
+
+        [RelayCommand]
+        public void Disconnect()
+        {
+            _taskManager.SetNasOnlineState(false);
+            _settings.NasServer = string.Empty;
+            _settings.Save();
+            SmbAuthService.ClearSavedCredentials();
+
+            StatusMessage = "已断开会话并清除当前会话状态。";
+            RequestRefreshConnectionPill?.Invoke();
+        }
+    }
+}

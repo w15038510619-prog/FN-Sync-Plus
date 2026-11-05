@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "FNSyncPlus.WinUI (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "FNSyncPlus.WinUI (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

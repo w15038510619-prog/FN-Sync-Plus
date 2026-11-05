@@ -29,7 +29,16 @@ jobs:
     - name: Run Automated Tests
       run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release
 
-    - name: Publish Self-Contained Single-File Executable
+    - name: Publish WinUI 3 Desktop Application (v3.0)
+      run: >
+        dotnet publish FNSyncPlus/FNSyncPlus.WinUI/FNSyncPlus.WinUI.csproj
+        -c Release
+        -r win-x64
+        --self-contained true
+        -p:WindowsPackageType=None
+        -o publish_winui/
+
+    - name: Publish Legacy WPF Single-File Executable
       run: >
         dotnet publish FNSyncPlus/FNSyncPlus.App/FNSyncPlus.App.csproj
         -c Release
@@ -47,8 +56,14 @@ jobs:
           Copy-Item publish/FNSyncPlus.App.exe publish/FN_Sync_Plus.exe -Force
         }
 
-    - name: Upload Artifact
+    - name: Upload WinUI 3 Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: FN_Sync_Plus_v2.2_Win64
+        name: FN_Sync_Plus_v3.0_WinUI3
+        path: publish_winui/
+
+    - name: Upload Legacy WPF Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: FN_Sync_Plus_v2.2_WPF
         path: publish/FN_Sync_Plus.exe

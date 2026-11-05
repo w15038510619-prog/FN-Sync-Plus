@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FNSyncPlus.App", "FNSyncPlu
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FNSyncPlus.Tests", "FNSyncPlus.Tests\FNSyncPlus.Tests.csproj", "{2E77E929-0479-4E64-8027-4296FFB0B028}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FNSyncPlus.WinUI", "FNSyncPlus.WinUI\FNSyncPlus.WinUI.csproj", "{97CF1C23-055D-42BD-8B87-7C183F6F116D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -30,5 +32,9 @@ Global
 		{2E77E929-0479-4E64-8027-4296FFB0B028}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{2E77E929-0479-4E64-8027-4296FFB0B028}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{2E77E929-0479-4E64-8027-4296FFB0B028}.Release|Any CPU.Build.0 = Release|Any CPU
+		{97CF1C23-055D-42BD-8B87-7C183F6F116D}.Debug|Any CPU.ActiveCfg = Debug|x86
+		{97CF1C23-055D-42BD-8B87-7C183F6F116D}.Debug|Any CPU.Build.0 = Debug|x86
+		{97CF1C23-055D-42BD-8B87-7C183F6F116D}.Release|Any CPU.ActiveCfg = Release|x86
+		{97CF1C23-055D-42BD-8B87-7C183F6F116D}.Release|Any CPU.Build.0 = Release|x86
 	EndGlobalSection
 EndGlobal

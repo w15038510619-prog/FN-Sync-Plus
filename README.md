@@ -1,17 +1,39 @@
-# 飞牛同步增强版 (FN Sync Plus) v2.2
+# 飞牛同步增强版 (FN Sync Plus) v3.0 (WinUI 3 旗舰版)
 
-> Windows 10/11 64位 独立单文件版多文件夹 NAS 自动备份、长文件名兼容与异机恢复系统  
+> Windows 10/11 64位 原生 WinUI 3 多文件夹 NAS 自动备份、长文件名兼容与异机恢复系统  
 > 专为飞牛 NAS（fnOS）用户解决 Windows 超长中文文件名 `上传-文件名过长 (failed_code: 1018)` 痛点与多目录自动同步需求
+
+---
+
+## 🌟 v3.0 原生 WinUI 3 重构亮点
+
+从 v2.2 到 v3.0，项目彻底告别旧版 WPF 样式修补路线，**使用微软官方原生 WinUI 3 + Windows App SDK 进行桌面前端全面重构**：
+
+1. **原生 WinUI 3 + Windows App SDK 桌面架构**：
+   - 引入微软官方 Windows App SDK，采用最新现代化 XAML 规范。
+   - 开启原生 **Mica（云母）沉浸式材质背景** 与 Windows 11 Fluent Design System。
+   - 深度自定义原生标题栏，集成 **NAS 实时连接状态指示药丸** 与 **深色/浅色主题一键平滑切换**。
+2. **NavigationView 现代导航体系**：
+   - 原生 WinUI 3 `NavigationView` 折叠侧边栏，清晰划分「同步任务」、「异机恢复」、「NAS 设备」、「系统设置」四大板块。
+3. **原生 ContentDialog 弹窗体系**：
+   - **多文件夹向导 (`AddFolderDialog`)**：支持本地文件夹单选/批量添加、自动规划 NAS 同名文件夹、批次内同名去重规划、5 级隐私安全评级。
+   - **双栏 NAS 浏览器 (`NasBrowserDialog`)**：左侧存储分类（私人空间/团队共享），右侧子文件夹列表，集成原生 `BreadcrumbBar` 面包屑路径导航、`AutoSuggestBox` 实时搜索过滤、一键新建子文件夹与实时 SMB 权限检查。
+   - **任务详情清单 (`TaskDetailsDialog`)**：清晰展示超长文件名别名物理映射表（原始长相对路径、NAS 物理别名、UTF-8 字节数、SHA-256 哈希）与实时诊断日志流。
+4. **业务核心与界面彻底解耦 (MVVM)**：
+   - 全面采用 `CommunityToolkit.Mvvm` (8.3.2)，View 与 ViewModel 100% 数据绑定驱动。
+   - `FNSyncPlus.Core` 业务引擎 100% 完整保留，**155 项核心自动化回归测试 100% 通过**。
+5. **独立免安装部署 (Unpackaged Desktop Executable)**：
+   - 配置 `<WindowsPackageType>None</WindowsPackageType>` 与 `<WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>`，生成绿色独立的 Windows 原生桌面应用程序，无需开发者模式，无需任何 MSIX 签名证书，开箱即用。
 
 ---
 
 ## 一、交付文件清单
 
-1. **`FN_Sync_Plus.exe`**：Windows 10/11 64位 独立免安装程序（已内置 .NET 8 运行时，单文件双击即用）
-2. **`使用说明书.md`**：完整使用说明、深度架构设计、多任务模型与 155 项自动化测试报告
-3. **`FNSyncPlus\`**：完整项目源代码（包含 C# WPF 现代化桌面应用、Core 引擎库、自动化测试套件）
-4. **`FNSyncPlus\build.bat`**：一键重新编译、测试与单文件打包脚本
-5. **`.github/workflows/build.yml`**：GitHub Actions 持续集成与发布工作流配置
+1. **`FNSyncPlus.WinUI`**：微软原生 WinUI 3 + Windows App SDK 现代桌面应用源码。
+2. **`FNSyncPlus.Core`**：底层高性能同步引擎、长文件名映射、安全隔离清单、DPAPI 凭据安全存储与网络探测服务。
+3. **`FNSyncPlus.Tests`**：155 项核心自动化回归测试套件。
+4. **`Release_WinUI\`**：已编译发布的 WinUI 3 独立绿色自包含运行目录，内含 `FNSyncPlus.WinUI.exe`。
+5. **`使用说明书.md`**：完整使用手册、架构设计与 155 项测试报告。
 
 ---
 
