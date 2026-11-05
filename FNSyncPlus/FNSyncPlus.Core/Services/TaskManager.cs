@@ -45,6 +45,13 @@ namespace FNSyncPlus.Core.Services
 
         public TaskManager(
             AppSettings settings,
+            SmbAuthService smbService)
+            : this(settings, new LongNameEngine(), new ManifestManager(), smbService)
+        {
+        }
+
+        public TaskManager(
+            AppSettings settings,
             LongNameEngine longNameEngine,
             ManifestManager manifestManager,
             SmbAuthService smbService)
@@ -145,7 +152,14 @@ namespace FNSyncPlus.Core.Services
         public void TriggerSync(string taskId)
         {
             var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-            if (task == null || !task.Enabled) return;
+            if (task == null || !task.Enabled || task.State == TaskSyncState.Paused)
+            {
+                if (task != null && task.State == TaskSyncState.Paused)
+                {
+                    AppendTaskLog(task, "INFO", "任务处于暂停状态，已忽略触发。");
+                }
+                return;
+            }
 
             if (task.IsRunning)
             {
@@ -168,7 +182,7 @@ namespace FNSyncPlus.Core.Services
         /// </summary>
         public void TriggerSyncAll()
         {
-            foreach (var task in _settings.Tasks.Where(t => t.Enabled))
+            foreach (var task in _settings.Tasks.Where(t => t.Enabled && t.State != TaskSyncState.Paused))
             {
                 TriggerSync(task.TaskId);
             }
@@ -180,10 +194,12 @@ namespace FNSyncPlus.Core.Services
             if (task == null) return;
 
             CancelTaskSync(taskId);
+            StopTaskAutomation(taskId); // 彻底注销并停止文件变动监听与定时轮询
             task.State = TaskSyncState.Paused;
             task.LastSyncStatus = "已暂停";
+            _settings.Save();
             TaskStateChanged?.Invoke(task);
-            AppendTaskLog(task, "INFO", "任务已手动暂停。");
+            AppendTaskLog(task, "INFO", "任务已手动暂停，本地变动监控与定时器已彻底停止。");
         }
 
         public void ResumeTask(string taskId)
@@ -193,8 +209,10 @@ namespace FNSyncPlus.Core.Services
 
             task.State = TaskSyncState.Idle;
             task.LastSyncStatus = "已恢复就绪";
+            ApplyTaskAutomation(task); // 重新挂载监听与定时轮询
+            _settings.Save();
             TaskStateChanged?.Invoke(task);
-            AppendTaskLog(task, "INFO", "任务已恢复，即将触发检查。");
+            AppendTaskLog(task, "INFO", "任务已恢复，已重新激活变动监听，即将触发首次检查。");
             TriggerSync(taskId);
         }
 
@@ -222,7 +240,7 @@ namespace FNSyncPlus.Core.Services
                     if (_taskQueue.TryDequeue(out string? taskId))
                     {
                         var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-                        if (task == null || !task.Enabled) continue;
+                        if (task == null || !task.Enabled || task.State == TaskSyncState.Paused) continue;
 
                         // 等待获取全局并发信号量槽位
                         await _concurrencySemaphore.WaitAsync(token).ConfigureAwait(false);
@@ -257,7 +275,10 @@ namespace FNSyncPlus.Core.Services
             var taskCts = CancellationTokenSource.CreateLinkedTokenSource(managerToken);
             _runningCts[task.TaskId] = taskCts;
 
-            var syncEngine = new SyncEngine(_longNameEngine, _manifestManager, _smbService);
+            // 每个任务独立实例化 LongNameEngine 与 ManifestManager，彻底隔离多任务字典与临时映射
+            var taskLongNameEngine = new LongNameEngine(maxUtf8Bytes: 255);
+            var taskManifestManager = new ManifestManager();
+            var syncEngine = new SyncEngine(taskLongNameEngine, taskManifestManager, _smbService);
 
             syncEngine.ProgressChanged += rep =>
             {
@@ -288,16 +309,21 @@ namespace FNSyncPlus.Core.Services
                 task.LastFailedFiles = report.FailedFiles;
                 task.LastTransferredBytes = report.BytesTransferred;
 
+                task.CurrentProgress = 100.0;
+                task.CurrentSpeedBytesPerSec = 0;
+
                 if (report.FailedFiles > 0)
                 {
                     task.State = TaskSyncState.Error;
+                    task.CurrentFile = $"完成 (有 {report.FailedFiles} 个文件失败)";
                     task.LastSyncStatus = $"完成 (有 {report.FailedFiles} 个文件失败)";
-                    task.LastError = $"有 {report.FailedFiles} 个文件同步失败，可在日志中查看详情";
+                    task.LastError = $"有 {report.FailedFiles} 个文件同步失败，可在任务日志中查看详情";
                 }
                 else
                 {
                     task.State = TaskSyncState.Completed;
-                    task.LastSyncStatus = "同步成功完成";
+                    task.CurrentFile = "所有文件均已同步更新至最新状态";
+                    task.LastSyncStatus = "同步成功完成 (已最新)";
                 }
 
                 _settings.Save();
@@ -332,7 +358,11 @@ namespace FNSyncPlus.Core.Services
         {
             foreach (var task in _settings.Tasks)
             {
-                ApplyTaskAutomation(task);
+                // 若任务处于暂停状态，软件重启后坚决保持暂停，绝不擅自启动后台监控或定时器
+                if (task.Enabled && task.State != TaskSyncState.Paused)
+                {
+                    ApplyTaskAutomation(task);
+                }
             }
         }
 
@@ -340,7 +370,8 @@ namespace FNSyncPlus.Core.Services
         {
             StopTaskAutomation(task.TaskId);
 
-            if (!task.Enabled) return;
+            // 暂停状态或禁用状态绝对不启动变动监听与定时轮询
+            if (!task.Enabled || task.State == TaskSyncState.Paused) return;
 
             // 1. 本地目录变动实时监听
             if (task.RealtimeWatchEnabled && Directory.Exists(task.SourceFolder))

@@ -626,7 +626,10 @@ namespace FNSyncPlus.App
         private void ApplyAppTheme(string theme)
         {
             bool isDark = theme.Equals("Dark", StringComparison.OrdinalIgnoreCase);
-            BtnThemeToggle.Content = isDark ? "🌙" : "☀️";
+            if (IconThemeToggle != null)
+            {
+                IconThemeToggle.Data = (Geometry)FindResource(isDark ? "GeoMoon" : "GeoSun");
+            }
 
             if (isDark)
             {

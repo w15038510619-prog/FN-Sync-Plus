@@ -2,7 +2,7 @@ name: Build and Release FN Sync Plus
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "feature/**" ]
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
@@ -21,17 +21,17 @@ jobs:
         dotnet-version: 8.0.x
 
     - name: Restore Dependencies
-      run: dotnet restore FNSyncPlus.sln
+      run: dotnet restore FNSyncPlus/FNSyncPlus.sln
 
     - name: Build Solution
-      run: dotnet build FNSyncPlus.sln -c Release --no-restore
+      run: dotnet build FNSyncPlus/FNSyncPlus.sln -c Release --no-restore
 
-    - name: Run Core Automated Tests
-      run: dotnet test FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release --no-build --verbosity normal
+    - name: Run Automated Tests
+      run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release
 
     - name: Publish Self-Contained Single-File Executable
       run: >
-        dotnet publish FNSyncPlus.App/FNSyncPlus.App.csproj
+        dotnet publish FNSyncPlus/FNSyncPlus.App/FNSyncPlus.App.csproj
         -c Release
         -r win-x64
         --self-contained true
@@ -40,8 +40,15 @@ jobs:
         -p:EnableCompressionInSingleFile=true
         -o publish/
 
+    - name: Rename Output Executable
+      shell: pwsh
+      run: |
+        if (Test-Path publish/FNSyncPlus.App.exe) {
+          Copy-Item publish/FNSyncPlus.App.exe publish/FN_Sync_Plus.exe -Force
+        }
+
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: FN_Sync_Plus_Win64
-        path: publish/FNSyncPlus.App.exe
+        name: FN_Sync_Plus_v2.2_Win64
+        path: publish/FN_Sync_Plus.exe

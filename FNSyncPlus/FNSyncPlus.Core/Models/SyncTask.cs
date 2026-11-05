@@ -111,21 +111,50 @@ namespace FNSyncPlus.Core.Models
         [JsonIgnore]
         public bool IsRunning => State == TaskSyncState.Scanning || State == TaskSyncState.Syncing;
 
+        [JsonIgnore]
+        public bool IsPaused => State == TaskSyncState.Paused;
+
         /// <summary>
         /// 状态描述友好文字
         /// </summary>
         [JsonIgnore]
         public string DisplayStatus => State switch
         {
-            TaskSyncState.Idle => string.IsNullOrEmpty(LastSyncStatus) ? "空闲就绪" : LastSyncStatus,
-            TaskSyncState.Queued => "排队等待中...",
-            TaskSyncState.Scanning => "正在扫描本地变动...",
+            TaskSyncState.Idle => string.IsNullOrEmpty(LastSyncStatus) ? "待命中" : LastSyncStatus,
+            TaskSyncState.Queued => "排队等待调度...",
+            TaskSyncState.Scanning => "正在比对扫描...",
             TaskSyncState.Syncing => $"正在同步备份 ({CurrentProgress:F0}%)...",
             TaskSyncState.Paused => "已暂停",
             TaskSyncState.OfflineWaiting => "NAS离线等待恢复",
-            TaskSyncState.Completed => "同步完成",
+            TaskSyncState.Completed => "已就绪 (已最新)",
             TaskSyncState.Error => string.IsNullOrEmpty(LastError) ? "同步出错" : $"出错: {LastError}",
             _ => State.ToString()
+        };
+
+        [JsonIgnore]
+        public string StateBadgeColorHex => State switch
+        {
+            TaskSyncState.Completed => "#15803D", // Green
+            TaskSyncState.Syncing => "#2563EB",   // Blue
+            TaskSyncState.Scanning => "#0284C7",  // Cyan
+            TaskSyncState.Queued => "#6366F1",    // Indigo
+            TaskSyncState.Paused => "#D97706",    // Amber
+            TaskSyncState.Error => "#DC2626",     // Red
+            TaskSyncState.OfflineWaiting => "#9333EA", // Purple
+            _ => "#475569"                         // Slate
+        };
+
+        [JsonIgnore]
+        public string StateBadgeBgHex => State switch
+        {
+            TaskSyncState.Completed => "#DCFCE7",
+            TaskSyncState.Syncing => "#DBEAFE",
+            TaskSyncState.Scanning => "#E0F2FE",
+            TaskSyncState.Queued => "#EEF2FF",
+            TaskSyncState.Paused => "#FEF3C7",
+            TaskSyncState.Error => "#FEE2E2",
+            TaskSyncState.OfflineWaiting => "#F3E8FF",
+            _ => "#F1F5F9"
         };
     }
 }

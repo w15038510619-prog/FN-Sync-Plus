@@ -24,6 +24,7 @@ namespace FNSyncPlus.App
         private string _baseShare = "";
         private readonly Stack<string> _history = new();
         private List<NasFolderItem> _allItems = new();
+        private bool _isViewReady = false;
 
         public NasBrowserDialog(AppSettings settings, SmbAuthService smbService)
         {
@@ -37,6 +38,14 @@ namespace FNSyncPlus.App
 
         private async void NasBrowserDialog_Loaded(object sender, RoutedEventArgs e)
         {
+            _isViewReady = true;
+
+            // 确保在控件已完整创建并加载后，再安全挂载单选过滤器事件
+            RadioFilterAll.Checked += (s, ev) => ApplyCurrentFilter();
+            RadioFilterPersonal.Checked += (s, ev) => ApplyCurrentFilter();
+            RadioFilterTeam.Checked += (s, ev) => ApplyCurrentFilter();
+            RadioFilterAll.IsChecked = true;
+
             string server = _settings.NasServer.Trim();
             if (string.IsNullOrEmpty(server))
             {
@@ -83,18 +92,24 @@ namespace FNSyncPlus.App
             catch (Exception ex)
             {
                 TxtNasBrowserSelectionHint.Text = $"获取共享失败: {ex.Message}";
+                SetPermissionBadge(false, "● 无法连接");
             }
         }
 
         private void ApplyCurrentFilter()
         {
+            if (!_isViewReady || TxtSearchBox == null || ListNasBrowserItems == null)
+            {
+                return;
+            }
+
             var filtered = _allItems.AsEnumerable();
 
-            if (RadioFilterPersonal.IsChecked == true)
+            if (RadioFilterPersonal?.IsChecked == true)
             {
                 filtered = filtered.Where(i => i.Category == NasShareCategory.PersonalSpace);
             }
-            else if (RadioFilterTeam.IsChecked == true)
+            else if (RadioFilterTeam?.IsChecked == true)
             {
                 filtered = filtered.Where(i => i.Category == NasShareCategory.TeamShare);
             }
@@ -134,11 +149,25 @@ namespace FNSyncPlus.App
             }
         }
 
-        private void ListNasBrowserItems_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private async void ListNasBrowserItems_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (ListNasBrowserItems.SelectedItem is NasFolderItem sel)
             {
                 TxtNasBrowserSelectionHint.Text = $"已选中: 【{sel.Name}】。双击进入，或点击【选择当前文件夹】确认。";
+                
+                try
+                {
+                    var (canWrite, writeErr) = await _smbService.TestDirectoryWritePermissionAsync(sel.FullUncPath);
+                    var sec = SmbAuthService.EvaluateShareSecurity(sel.FullUncPath, _settings.Username, canWrite, writeErr);
+                    TxtSecurityNoticeBottom.Text = $"[{sec.Title}] {sec.Description}";
+                    TxtSecurityNoticeBottom.Foreground = sec.IsDangerousForPersonalUse 
+                        ? new SolidColorBrush(Color.FromRgb(217, 119, 6)) // 警示黄
+                        : new SolidColorBrush(Color.FromRgb(15, 118, 110)); // 安全青绿
+                }
+                catch
+                {
+                    // 忽略异步探测异常
+                }
             }
         }
 
@@ -264,28 +293,49 @@ namespace FNSyncPlus.App
 
         private void BtnSelectFolder_Click(object sender, RoutedEventArgs e)
         {
+            string candidatePath = string.Empty;
+
             if (string.IsNullOrEmpty(_baseShare))
             {
                 if (ListNasBrowserItems.SelectedItem is NasFolderItem sel)
                 {
-                    SelectedUncPath = sel.FullUncPath;
-                    DialogResult = true;
-                    Close();
+                    candidatePath = sel.FullUncPath;
+                }
+                else
+                {
+                    WpfMessageBox.Show("请在列表中选择一个具体的共享文件夹作为备份根目录", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
                     return;
                 }
-                WpfMessageBox.Show("请在列表中选择一个具体的共享文件夹作为备份根目录", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
-
-            if (ListNasBrowserItems.SelectedItem is NasFolderItem selSub)
-            {
-                SelectedUncPath = selSub.FullUncPath;
             }
             else
             {
-                SelectedUncPath = _currentUnc;
+                if (ListNasBrowserItems.SelectedItem is NasFolderItem selSub)
+                {
+                    candidatePath = selSub.FullUncPath;
+                }
+                else
+                {
+                    candidatePath = _currentUnc;
+                }
             }
 
+            // 安全检查：如果所选目录为团队共享，进行强提示
+            var sec = SmbAuthService.EvaluateShareSecurity(candidatePath, _settings.Username, true, null);
+            if (sec.State == NasShareSecurityState.TeamShare)
+            {
+                var warnRes = WpfMessageBox.Show(
+                    $"【隐私安全重要提醒】\n\n您选择的目标目录：\n{candidatePath}\n\n该目录属于【团队共享文件】！NAS 上其他团队成员有权查看、下载此目录中的所有文件。\n\n如果您是要备份个人工作/私人文件，极度建议取消并改用【私人空间】。\n\n是否仍然确认使用此团队共享目录？",
+                    "团队共享文件 - 隐私安全确认",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+
+                if (warnRes != MessageBoxResult.Yes)
+                {
+                    return;
+                }
+            }
+
+            SelectedUncPath = candidatePath;
             DialogResult = true;
             Close();
         }

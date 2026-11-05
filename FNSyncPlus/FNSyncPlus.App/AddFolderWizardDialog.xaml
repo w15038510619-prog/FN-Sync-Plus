@@ -108,15 +108,15 @@
                             <Button Content="🌐 浏览并选择 NAS 目录..." Click="BtnBrowseNasRoot_Click" Style="{StaticResource FluentPrimaryBtn}" Grid.Column="1" Margin="10,0,0,0" Height="36"/>
                         </Grid>
 
-                        <!-- Personal Space Priority Notice -->
-                        <Border Background="#F0FDF4" BorderBrush="#BBF7D0" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,0,16">
+                        <!-- Dynamic Security & Privacy Evaluation Card -->
+                        <Border x:Name="BorderSecurityNotice" Background="#F1F5F9" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,0,16">
                             <StackPanel>
                                 <StackPanel Orientation="Horizontal">
-                                    <Path Data="{StaticResource GeoShield}" Fill="{StaticResource SuccessBrush}" Width="16" Height="16" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                                    <TextBlock Text="已优先启用私人备份安全空间" FontWeight="Bold" Foreground="#15803D" FontSize="13"/>
+                                    <Path x:Name="PathSecurityIcon" Data="{StaticResource GeoShield}" Fill="#64748B" Width="16" Height="16" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <TextBlock x:Name="TxtSecurityTitle" Text="尚未配置私人备份位置" FontWeight="Bold" Foreground="#475569" FontSize="13"/>
                                 </StackPanel>
-                                <TextBlock Text="• 软件默认规划个人私有空间目录，绝不强加团队共享文件夹，保障数据隐私安全。" Foreground="#166534" FontSize="12" Margin="24,4,0,0"/>
-                                <TextBlock Text="• 您也可随时点击【浏览并选择 NAS 目录】切换为您自选的任意 NAS 共享与子文件夹。" Foreground="#166534" FontSize="12" Margin="24,2,0,0"/>
+                                <TextBlock x:Name="TxtSecurityDesc1" Text="• 系统优先推荐使用您的个人专属私有主目录，避免将私人文件混入团队公共文件夹。" Foreground="#475569" FontSize="12" Margin="24,4,0,0" TextWrapping="Wrap"/>
+                                <TextBlock x:Name="TxtSecurityDesc2" Text="• 您可随时点击【浏览并选择 NAS 目录】切换为您自选的任意 NAS 共享与子文件夹。" Foreground="#475569" FontSize="12" Margin="24,2,0,0" TextWrapping="Wrap"/>
                             </StackPanel>
                         </Border>
 

@@ -36,6 +36,7 @@ namespace FNSyncPlus.App
         private int _currentStep = 1;
         private readonly ObservableCollection<LocalFolderItem> _selectedFolders = new();
         private readonly List<PlannedTaskPreviewItem> _plannedTasks = new();
+        private ShareSecurityEvaluation _currentSecurityEvaluation = new();
 
         public AddFolderWizardDialog(AppSettings settings, SmbAuthService smbService, TaskManager taskManager)
         {
@@ -53,9 +54,10 @@ namespace FNSyncPlus.App
         private async void AddFolderWizardDialog_Loaded(object sender, RoutedEventArgs e)
         {
             // 初始化 NAS 备份根目录（优先使用上次记住的根目录，或者自动探测私人空间）
+            string candidateRoot = "";
             if (!string.IsNullOrEmpty(_settings.PreferredBackupRoot))
             {
-                TxtNasBackupRoot.Text = _settings.PreferredBackupRoot;
+                candidateRoot = _settings.PreferredBackupRoot;
             }
             else if (!string.IsNullOrEmpty(_settings.NasServer))
             {
@@ -65,14 +67,62 @@ namespace FNSyncPlus.App
                     var personalShare = sharesRes.Shares.FirstOrDefault(s => s.IsPersonal);
                     if (personalShare != null)
                     {
-                        TxtNasBackupRoot.Text = personalShare.UncPath;
+                        candidateRoot = personalShare.UncPath;
                     }
-                    else if (sharesRes.Shares.Count > 0)
-                    {
-                        TxtNasBackupRoot.Text = sharesRes.Shares[0].UncPath;
-                    }
+                    // 若无经证明的私人空间，绝不擅自把团队公共共享当作个人空间！
                 }
                 catch { }
+            }
+
+            TxtNasBackupRoot.Text = candidateRoot;
+            await UpdateSecurityBadgeAsync(candidateRoot);
+        }
+
+        private async System.Threading.Tasks.Task UpdateSecurityBadgeAsync(string rootUnc)
+        {
+            if (string.IsNullOrWhiteSpace(rootUnc))
+            {
+                _currentSecurityEvaluation = SmbAuthService.EvaluateShareSecurity(null, _settings.Username);
+            }
+            else
+            {
+                var (canWrite, permErr) = await _smbService.TestDirectoryWritePermissionAsync(rootUnc);
+                _currentSecurityEvaluation = SmbAuthService.EvaluateShareSecurity(rootUnc, _settings.Username, canWrite, permErr);
+            }
+
+            // 更新 UI 样式与文案
+            var colorConverter = new System.Windows.Media.BrushConverter();
+            var bgBrush = (System.Windows.Media.Brush?)colorConverter.ConvertFromString(_currentSecurityEvaluation.BadgeBgHex) ?? System.Windows.Media.Brushes.Transparent;
+            var textBrush = (System.Windows.Media.Brush?)colorConverter.ConvertFromString(_currentSecurityEvaluation.BadgeColorHex) ?? System.Windows.Media.Brushes.Black;
+
+            BorderSecurityNotice.Background = bgBrush;
+            TxtSecurityTitle.Text = _currentSecurityEvaluation.Title;
+            TxtSecurityTitle.Foreground = textBrush;
+            PathSecurityIcon.Fill = textBrush;
+
+            if (_currentSecurityEvaluation.State == NasShareSecurityState.VerifiedPersonalSpace)
+            {
+                PathSecurityIcon.Data = (System.Windows.Media.Geometry)FindResource("GeoShield");
+                TxtSecurityDesc1.Text = "• " + _currentSecurityEvaluation.Description;
+                TxtSecurityDesc2.Text = "• 所有选中的本地文件夹将在此私人主目录下自动创建对应子目录，其他团队成员无法查看。";
+            }
+            else if (_currentSecurityEvaluation.State == NasShareSecurityState.TeamShare)
+            {
+                PathSecurityIcon.Data = (System.Windows.Media.Geometry)FindResource("GeoShieldAlert");
+                TxtSecurityDesc1.Text = "• 警告：当前选中的是团队公共共享文件，团队内其他成员可能拥有查看或修改权限！";
+                TxtSecurityDesc2.Text = "• 强烈建议在飞牛 fnOS【文件服务】开启『用户个人主目录』作为专属私人备份。";
+            }
+            else if (_currentSecurityEvaluation.State == NasShareSecurityState.NoPermission)
+            {
+                PathSecurityIcon.Data = (System.Windows.Media.Geometry)FindResource("GeoWarning");
+                TxtSecurityDesc1.Text = "• " + _currentSecurityEvaluation.Description;
+                TxtSecurityDesc2.Text = "• 请在飞牛后台为该账号开通对该目录的写入权限，否则备份将无法执行。";
+            }
+            else
+            {
+                PathSecurityIcon.Data = (System.Windows.Media.Geometry)FindResource("GeoInfo");
+                TxtSecurityDesc1.Text = "• " + _currentSecurityEvaluation.Description;
+                TxtSecurityDesc2.Text = "• 请点击右侧【浏览并选择 NAS 目录】指定备份根目录。";
             }
         }
 
@@ -147,7 +197,24 @@ namespace FNSyncPlus.App
                     return;
                 }
 
-                // 规划第三步的任务预览
+                _currentSecurityEvaluation = SmbAuthService.EvaluateShareSecurity(root, _settings.Username, canWrite, permErr);
+
+                // 若选中的是团队公用共享，必须弹出明确警示并获得用户的主动确认！
+                if (_currentSecurityEvaluation.State == NasShareSecurityState.TeamShare)
+                {
+                    var confirm = WpfMessageBox.Show(
+                        $"【隐私安全重要提示】\n\n您当前选中的 NAS 备份目标属于【团队共享】：\n{root}\n\n该目录下的所有备份文件可能会被局域网或团队其他成员查看与修改。\n若要保护个人隐私，强烈建议在飞牛 fnOS 管理后台开启『用户个人主目录』。\n\n您是否确认仍要将文件备份到此团队公共共享？",
+                        "团队共享隐私确认",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Warning);
+
+                    if (confirm != MessageBoxResult.Yes)
+                    {
+                        return;
+                    }
+                }
+
+                // 规划第三步的任务预览 (支持同批次同名去重)
                 await PlanTasksForStep3Async(root);
 
                 _currentStep = 3;
@@ -251,16 +318,25 @@ namespace FNSyncPlus.App
 
         #region Step 2: 浏览 NAS 根目录
 
-        private void BtnBrowseNasRoot_Click(object sender, RoutedEventArgs e)
+        private async void BtnBrowseNasRoot_Click(object sender, RoutedEventArgs e)
         {
-            var browserDlg = new NasBrowserDialog(_settings, _smbService)
+            try
             {
-                Owner = this
-            };
+                var browserDlg = new NasBrowserDialog(_settings, _smbService)
+                {
+                    Owner = this
+                };
 
-            if (browserDlg.ShowDialog() == true)
+                if (browserDlg.ShowDialog() == true)
+                {
+                    TxtNasBackupRoot.Text = browserDlg.SelectedUncPath;
+                    await UpdateSecurityBadgeAsync(browserDlg.SelectedUncPath);
+                }
+            }
+            catch (Exception ex)
             {
-                TxtNasBackupRoot.Text = browserDlg.SelectedUncPath;
+                App.LogCrashException("OpenNasBrowserFromWizard", ex);
+                WpfMessageBox.Show($"打开 NAS 文件夹浏览器失败: {ex.Message}", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
         }
 
@@ -272,9 +348,26 @@ namespace FNSyncPlus.App
         {
             _plannedTasks.Clear();
 
+            var allocatedSubNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // 包含当前 rootUnc 下已有任务的子目录
+            foreach (var t in _taskManager.Tasks)
+            {
+                if (PathHelper.ArePathsSameOrNested(rootUnc, t.DestinationFolder, out _))
+                {
+                    string sub = Path.GetRelativePath(rootUnc, t.DestinationFolder);
+                    if (!string.IsNullOrEmpty(sub) && sub != ".") allocatedSubNames.Add(sub);
+                }
+            }
+
             foreach (var folder in _selectedFolders)
             {
-                var (finalSub, isExisting, hasConflict) = await _smbService.PlanTargetSubFolderAsync(rootUnc, folder.Name, folder.FullPath);
+                var (finalSub, isExisting, hasConflict) = await _smbService.PlanTargetSubFolderAsync(
+                    rootUnc, 
+                    folder.Name, 
+                    folder.FullPath,
+                    allocatedSubNames);
+
+                allocatedSubNames.Add(finalSub);
                 string fullTarget = Path.Combine(rootUnc, finalSub);
 
                 string status = "✔ 正常新目录";

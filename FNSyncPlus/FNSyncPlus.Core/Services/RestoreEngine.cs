@@ -287,7 +287,8 @@ namespace FNSyncPlus.Core.Services
                     fn.EndsWith(".bak", StringComparison.OrdinalIgnoreCase) ||
                     fn.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) ||
                     fn.Contains(".fn_part_") ||
-                    fn.Contains(".restore_tmp_"))
+                    fn.Contains(".restore_tmp_") ||
+                    fn.StartsWith(".fnsync_rst_"))
                 {
                     continue;
                 }
@@ -367,7 +368,8 @@ namespace FNSyncPlus.Core.Services
                     }
                 }
 
-                string tempRestorePath = targetLocalFull + ".restore_tmp_" + Guid.NewGuid().ToString("N");
+                // 使用固定短随机名暂存 (.fnsync_rst_{Guid:N}.tmp)，彻底避免长文件名追加后缀导致突破 255 字节上限
+                string tempRestorePath = Path.Combine(targetDir, $".fnsync_rst_{Guid.NewGuid():N}.tmp");
 
                 try
                 {

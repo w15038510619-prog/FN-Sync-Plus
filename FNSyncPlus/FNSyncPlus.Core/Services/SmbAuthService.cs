@@ -19,6 +19,41 @@ namespace FNSyncPlus.Core.Services
         SystemOrOther    // 其他系统共享
     }
 
+    public enum NasShareSecurityState
+    {
+        NotConfigured,         // 尚未配置 (中性灰)
+        VerifiedPersonalSpace, // 已验证的私人备份位置 (绿色盾牌)
+        UnverifiedSmbShare,    // 普通 SMB 共享，私人属性未验证 (蓝色)
+        TeamShare,             // 团队共享 (黄色警告，可能被其他成员查看)
+        NoPermission           // 无权限 (红色)
+    }
+
+    public class ShareSecurityEvaluation
+    {
+        public NasShareSecurityState State { get; set; } = NasShareSecurityState.NotConfigured;
+        public string Title { get; set; } = "尚未配置";
+        public string Description { get; set; } = "";
+        public bool IsDangerousForPersonalUse => State == NasShareSecurityState.TeamShare || State == NasShareSecurityState.NoPermission;
+
+        public string BadgeColorHex => State switch
+        {
+            NasShareSecurityState.VerifiedPersonalSpace => "#15803D", // Green
+            NasShareSecurityState.TeamShare => "#B45309",             // Amber
+            NasShareSecurityState.UnverifiedSmbShare => "#2563EB",    // Blue
+            NasShareSecurityState.NoPermission => "#B91C1C",          // Red
+            _ => "#64748B"                                           // Slate
+        };
+
+        public string BadgeBgHex => State switch
+        {
+            NasShareSecurityState.VerifiedPersonalSpace => "#DCFCE7", // Light Green
+            NasShareSecurityState.TeamShare => "#FEF3C7",             // Light Amber
+            NasShareSecurityState.UnverifiedSmbShare => "#DBEAFE",    // Light Blue
+            NasShareSecurityState.NoPermission => "#FEE2E2",          // Light Red
+            _ => "#F1F5F9"                                           // Light Slate
+        };
+    }
+
     public class SmbShareItem
     {
         public string Name { get; set; } = string.Empty;
@@ -349,6 +384,75 @@ namespace FNSyncPlus.Core.Services
         }
 
         /// <summary>
+        /// 深度评估指定 NAS 路径的安全与隐私级别，明确区分私人空间、团队共享、未验证共享及无权限
+        /// </summary>
+        public static ShareSecurityEvaluation EvaluateShareSecurity(string? uncPath, string? username, bool canWrite = true, string? writeError = null)
+        {
+            var eval = new ShareSecurityEvaluation();
+
+            if (string.IsNullOrWhiteSpace(uncPath))
+            {
+                eval.State = NasShareSecurityState.NotConfigured;
+                eval.Title = "尚未配置私人备份位置";
+                eval.Description = "请点击【浏览并选择 NAS 目录】指定备份位置，或在飞牛 fnOS 开启用户主目录。";
+                return eval;
+            }
+
+            if (!canWrite)
+            {
+                eval.State = NasShareSecurityState.NoPermission;
+                eval.Title = "无写入权限";
+                eval.Description = $"当前账号无法向此目录写入文件: {writeError ?? "拒绝访问"}。请在 fnOS 管理后台为此账号开通读写权限。";
+                return eval;
+            }
+
+            string trimmed = uncPath.Trim().TrimEnd('\\', '/');
+            string[] parts = trimmed.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+            string share = parts.Length >= 2 ? parts[1] : (parts.Length == 1 ? parts[0] : "");
+
+            // 1. 优先检查是否为已验证的私人主目录
+            bool isPersonal = false;
+            if (!string.IsNullOrEmpty(username) && string.Equals(share, username, StringComparison.OrdinalIgnoreCase))
+            {
+                isPersonal = true;
+            }
+            else if (string.Equals(share, "home", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(share, "homes", StringComparison.OrdinalIgnoreCase) ||
+                     share.Contains("我的文件") ||
+                     (share.Contains("私人") && !share.Contains("团队")) ||
+                     (share.Contains("个人") && !share.Contains("公")))
+            {
+                isPersonal = true;
+            }
+
+            if (isPersonal)
+            {
+                eval.State = NasShareSecurityState.VerifiedPersonalSpace;
+                eval.Title = "已验证的私人备份安全空间";
+                eval.Description = $"当前目录位于您的专属私人空间【{share}】，仅您当前账号具备访问权限，数据隐私安全得到充分保障。";
+                return eval;
+            }
+
+            // 2. 严格检查是否属于公共或团队文件共享 (绝不能因为有可写权限就当作私人空间)
+            if (share.Contains("团队") ||
+                share.Contains("public", StringComparison.OrdinalIgnoreCase) ||
+                share.Contains("share", StringComparison.OrdinalIgnoreCase) ||
+                share.Contains("common", StringComparison.OrdinalIgnoreCase))
+            {
+                eval.State = NasShareSecurityState.TeamShare;
+                eval.Title = "团队公有共享文件 (非私人空间)";
+                eval.Description = $"共享【{share}】属于团队公用空间，其他成员可能拥有查看或修改权限。建议个人工作文件备份到专属个人主目录。";
+                return eval;
+            }
+
+            // 3. 普通未验证 SMB 共享
+            eval.State = NasShareSecurityState.UnverifiedSmbShare;
+            eval.Title = "普通 SMB 共享 (私人属性未验证)";
+            eval.Description = $"目录【{share}】为标准网络共享，未验证是否具备多用户隐私隔离。如需绝对隐私，请使用个人主目录。";
+            return eval;
+        }
+
+        /// <summary>
         /// 兼容旧版调用的共享列出方法
         /// </summary>
         public async Task<List<SmbShareItem>> EnumerateSharesAsync(string serverAddress)
@@ -482,24 +586,48 @@ namespace FNSyncPlus.Core.Services
         }
 
         /// <summary>
-        /// 检查目标目录是否已存在以及是否与其他任务冲突，自动规划去重建议名称
+        /// 检查目标目录是否已存在以及是否与其他任务冲突，自动规划去重建议名称（支持同批次批量添加同名去重）
         /// </summary>
         public async Task<(string FinalSubFolder, bool IsExisting, bool HasForeignConflict)> PlanTargetSubFolderAsync(
             string destinationRootUnc,
             string desiredFolderName,
-            string sourceFolderPath)
+            string sourceFolderPath,
+            IEnumerable<string>? alreadyAllocatedSubNames = null)
         {
             return await Task.Run(async () =>
             {
+                var allocatedSet = alreadyAllocatedSubNames != null 
+                    ? new HashSet<string>(alreadyAllocatedSubNames, StringComparer.OrdinalIgnoreCase) 
+                    : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
                 string candidateName = desiredFolderName.Trim();
                 string targetUnc = Path.Combine(destinationRootUnc, candidateName);
 
+                // 1. 同一批次内已经有前面的文件夹占用了该名称 (例如 D:\资料 与 E:\资料 同时添加)
+                if (allocatedSet.Contains(candidateName))
+                {
+                    int suffix = 2;
+                    string dedupName;
+                    while (true)
+                    {
+                        dedupName = $"{candidateName}_{suffix}";
+                        string testUnc = Path.Combine(destinationRootUnc, dedupName);
+                        if (!allocatedSet.Contains(dedupName) && !Directory.Exists(testUnc))
+                        {
+                            break;
+                        }
+                        suffix++;
+                    }
+                    return (dedupName, false, true);
+                }
+
+                // 2. 目标目录不存在且未被同批次占用：直接采用原名
                 if (!Directory.Exists(targetUnc))
                 {
                     return (candidateName, false, false);
                 }
 
-                // 目标目录已存在：检查是否包含当前任务的历史元数据
+                // 3. 目标目录已在 NAS 存在：检查是否包含当前任务的历史元数据
                 var manifestMgr = new ManifestManager();
                 try
                 {
@@ -519,7 +647,7 @@ namespace FNSyncPlus.Core.Services
                         {
                             dedupName = $"{candidateName}_{suffix}";
                             string testUnc = Path.Combine(destinationRootUnc, dedupName);
-                            if (!Directory.Exists(testUnc))
+                            if (!allocatedSet.Contains(dedupName) && !Directory.Exists(testUnc))
                             {
                                 break;
                             }

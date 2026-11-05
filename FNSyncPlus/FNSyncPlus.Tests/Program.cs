@@ -42,6 +42,12 @@ namespace FNSyncPlus.Tests
                 await TestAutoPlanTargetSubFolderAndDeduplicationAsync();
                 await TestTaskManagerConcurrencyAndMultiTaskIsolationAsync();
                 await TestRestoreEngineDiscoverBackupPackagesAsync();
+                TestPrivateSpaceSafetyAndTeamShareWarning();
+                await TestBatchFolderCollisionPlanningAsync();
+                await TestMultiTaskEngineIsolationAsync();
+                await TestTaskPauseStrictnessAsync();
+                await TestRestoreStagingShortNameSafetyAsync();
+                TestStateBadgeColorMappingAndDisplayStatus();
             }
             catch (Exception ex)
             {
@@ -898,6 +904,245 @@ namespace FNSyncPlus.Tests
             Assert(rep.IntegrityVerifiedFiles == 1, "恢复文件完整性 SHA-256 校验 100% 通过");
 
             try { Directory.Delete(testBase, true); } catch { }
+        }
+
+        static void TestPrivateSpaceSafetyAndTeamShareWarning()
+        {
+            Console.WriteLine("\n--- 20. 私人空间与团队共享多级安全判定与警示测试 ---");
+            string username = "cenco";
+
+            // 1. 私人空间安全判定
+            var sec1 = SmbAuthService.EvaluateShareSecurity(@"\\192.168.8.120\cenco", username, true, null);
+            Assert(sec1.State == NasShareSecurityState.VerifiedPersonalSpace, "用户同名私人共享判定为 VerifiedPersonalSpace");
+            Assert(!sec1.IsDangerousForPersonalUse, "私人空间不触发危险警示");
+            Assert(sec1.BadgeBgHex == "#DCFCE7" && sec1.BadgeColorHex == "#15803D", "私人空间徽章使用安全绿配色");
+
+            // 2. 团队公有共享判定
+            var sec2 = SmbAuthService.EvaluateShareSecurity(@"\\192.168.8.120\团队文件-cenco-public", username, true, null);
+            Assert(sec2.State == NasShareSecurityState.TeamShare, "团队文件共享判定为 TeamShare");
+            Assert(sec2.IsDangerousForPersonalUse, "团队公有共享标记为存在隐私扩散风险");
+            Assert(sec2.Title.Contains("团队公有共享"), "团队共享具备明确的警示标题");
+
+            // 3. 普通非私人共享判定
+            var sec3 = SmbAuthService.EvaluateShareSecurity(@"\\192.168.8.120\custom_data", username, true, null);
+            Assert(sec3.State == NasShareSecurityState.UnverifiedSmbShare, "未确认归属的共享判定为 UnverifiedSmbShare");
+            Assert(!sec3.IsDangerousForPersonalUse, "普通共享未直接判定为团队危险");
+
+            // 4. 无权限共享判定
+            var sec4 = SmbAuthService.EvaluateShareSecurity(@"\\192.168.8.120\admin_only", username, false, "拒绝访问");
+            Assert(sec4.State == NasShareSecurityState.NoPermission, "写权限失败判定为 NoPermission");
+            Assert(sec4.IsDangerousForPersonalUse, "无权限共享标记危险状态阻止前进");
+
+            // 5. 未配置判定
+            var sec5 = SmbAuthService.EvaluateShareSecurity("", username, true, null);
+            Assert(sec5.State == NasShareSecurityState.NotConfigured, "空路径判定为 NotConfigured");
+        }
+
+        static async Task TestBatchFolderCollisionPlanningAsync()
+        {
+            Console.WriteLine("\n--- 21. 批量添加同名目录批次内去重自动规划测试 ---");
+            var smb = new SmbAuthService();
+            string testRoot = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Test_BatchPlan_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(testRoot);
+
+            try
+            {
+                var allocated = new System.Collections.Generic.List<string>();
+
+                // 批次文件夹 1: D:\工作资料
+                var plan1 = await smb.PlanTargetSubFolderAsync(testRoot, "工作资料", @"D:\工作资料", allocated);
+                allocated.Add(plan1.FinalSubFolder);
+                Assert(plan1.FinalSubFolder == "工作资料", "第一个文件夹推荐原名 '工作资料'");
+
+                // 批次文件夹 2: E:\工作资料 (同名但不同盘符，属于同一批次添加)
+                var plan2 = await smb.PlanTargetSubFolderAsync(testRoot, "工作资料", @"E:\工作资料", allocated);
+                allocated.Add(plan2.FinalSubFolder);
+                Assert(plan2.FinalSubFolder == "工作资料_2", "批次内同名第二个文件夹自动命名为 '工作资料_2'");
+
+                // 批次文件夹 3: F:\工作资料
+                var plan3 = await smb.PlanTargetSubFolderAsync(testRoot, "工作资料", @"F:\工作资料", allocated);
+                allocated.Add(plan3.FinalSubFolder);
+                Assert(plan3.FinalSubFolder == "工作资料_3", "批次内同名第三个文件夹自动命名为 '工作资料_3'");
+
+                // 批次文件夹 4: G:\其他资料
+                var plan4 = await smb.PlanTargetSubFolderAsync(testRoot, "其他资料", @"G:\其他资料", allocated);
+                Assert(plan4.FinalSubFolder == "其他资料", "非重名文件夹保持原名 '其他资料'");
+            }
+            finally
+            {
+                try { Directory.Delete(testRoot, true); } catch { }
+            }
+        }
+
+        static async Task TestMultiTaskEngineIsolationAsync()
+        {
+            Console.WriteLine("\n--- 22. 多任务独立长文件名引擎与元数据隔离沙箱测试 ---");
+            string testBase = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Test_Isolation_" + Guid.NewGuid().ToString("N"));
+            string src1 = Path.Combine(testBase, "Src1");
+            string dst1 = Path.Combine(testBase, "Dst1");
+            string src2 = Path.Combine(testBase, "Src2");
+            string dst2 = Path.Combine(testBase, "Dst2");
+            Directory.CreateDirectory(src1);
+            Directory.CreateDirectory(dst1);
+            Directory.CreateDirectory(src2);
+            Directory.CreateDirectory(dst2);
+
+            try
+            {
+                // 在两个不同任务的源目录中放入具有相同文件名但内容不同的长中文名文件
+                string longName = new string('测', 95) + ".txt"; // > 255 字节 UTF-8
+                File.WriteAllText(Path.Combine(src1, longName), "TASK1 CONTENT");
+                File.WriteAllText(Path.Combine(src2, longName), "TASK2 DIFFERENT CONTENT");
+
+                var settings = new AppSettings { MaxConcurrentSyncs = 2 };
+                var smbAuth = new SmbAuthService();
+                var taskManager = new TaskManager(settings, smbAuth);
+
+                var t1 = new SyncTask { TaskId = "iso_1", TaskName = "Task1", SourceFolder = src1, DestinationFolder = dst1, IntervalMinutes = 0 };
+                var t2 = new SyncTask { TaskId = "iso_2", TaskName = "Task2", SourceFolder = src2, DestinationFolder = dst2, IntervalMinutes = 0 };
+                taskManager.AddTask(t1);
+                taskManager.AddTask(t2);
+
+                var tcs1 = new TaskCompletionSource<bool>();
+                var tcs2 = new TaskCompletionSource<bool>();
+
+                taskManager.TaskStateChanged += t =>
+                {
+                    if (t.TaskId == "iso_1" && t.State == TaskSyncState.Completed) tcs1.TrySetResult(true);
+                    if (t.TaskId == "iso_2" && t.State == TaskSyncState.Completed) tcs2.TrySetResult(true);
+                };
+
+                taskManager.TriggerSync("iso_1");
+                taskManager.TriggerSync("iso_2");
+
+                await Task.WhenAll(tcs1.Task, tcs2.Task);
+
+                // 验证两个任务的 manifest.json 相互独立存在
+                var m1Path = Path.Combine(dst1, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName);
+                var m2Path = Path.Combine(dst2, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName);
+                Assert(File.Exists(m1Path) && File.Exists(m2Path), "两个任务分别生成独立的隔离清单");
+
+                var mfMgr = new ManifestManager();
+                var m1 = await mfMgr.LoadManifestAsync(dst1);
+                var m2 = await mfMgr.LoadManifestAsync(dst2);
+
+                Assert(m1.Files.Count == 1 && m2.Files.Count == 1, "两任务各自记录 1 个长文件名映射");
+                Assert(m1.Files[0].Sha256 != m2.Files[0].Sha256, "各自元数据 SHA-256 准确反映各自文件内容，无字典交叉污染");
+            }
+            finally
+            {
+                try { Directory.Delete(testBase, true); } catch { }
+            }
+        }
+
+        static async Task TestTaskPauseStrictnessAsync()
+        {
+            Console.WriteLine("\n--- 23. 同步任务暂停状态严格拦截与队列跳过测试 ---");
+            string testBase = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Test_PauseStrict_" + Guid.NewGuid().ToString("N"));
+            string src = Path.Combine(testBase, "Src");
+            string dst = Path.Combine(testBase, "Dst");
+            Directory.CreateDirectory(src);
+            Directory.CreateDirectory(dst);
+
+            try
+            {
+                File.WriteAllText(Path.Combine(src, "file.txt"), "TEST");
+                var settings = new AppSettings { MaxConcurrentSyncs = 1 };
+                var smbAuth = new SmbAuthService();
+                var taskManager = new TaskManager(settings, smbAuth);
+
+                var task = new SyncTask
+                {
+                    TaskId = "pause_test_1",
+                    TaskName = "PauseTest",
+                    SourceFolder = src,
+                    DestinationFolder = dst,
+                    IntervalMinutes = 10,
+                    State = TaskSyncState.Idle
+                };
+                taskManager.AddTask(task);
+
+                // 1. 暂停任务
+                taskManager.PauseTask("pause_test_1");
+                Assert(task.State == TaskSyncState.Paused, "任务状态成功转为 Paused");
+                Assert(task.IsPaused, "IsPaused 标志为 true");
+
+                // 2. 尝试触发暂停任务同步
+                taskManager.TriggerSync("pause_test_1");
+                await Task.Delay(200); // 稍作等待
+                Assert(task.State == TaskSyncState.Paused, "TriggerSync 严格跳过已暂停的任务，状态维持 Paused");
+                Assert(!File.Exists(Path.Combine(dst, "file.txt")), "暂停任务未向目标端同步任何文件");
+
+                // 3. 恢复任务
+                taskManager.ResumeTask("pause_test_1");
+                Assert(task.State != TaskSyncState.Paused, "ResumeTask 成功解除暂停状态");
+                Assert(!task.IsPaused, "IsPaused 标志为 false");
+            }
+            finally
+            {
+                try { Directory.Delete(testBase, true); } catch { }
+            }
+        }
+
+        static async Task TestRestoreStagingShortNameSafetyAsync()
+        {
+            Console.WriteLine("\n--- 24. 恢复临时中转文件名长度与原文件名解耦测试 ---");
+            string testBase = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Test_RestoreStaging_" + Guid.NewGuid().ToString("N"));
+            string nasDir = Path.Combine(testBase, "NasDir");
+            string localDir = Path.Combine(testBase, "LocalDir");
+            Directory.CreateDirectory(nasDir);
+            Directory.CreateDirectory(localDir);
+
+            try
+            {
+                // 构建接近 240 个字符的长文件名
+                string extremeName = new string('A', 220) + "_orig.txt";
+                string content = "RECOVERY_SAFETY_PAYLOAD";
+                string storedName = "short_alias.txt";
+                File.WriteAllText(Path.Combine(nasDir, storedName), content);
+
+                var mfMgr = new ManifestManager();
+                var manifest = new Manifest { SourceRoot = @"D:\MockSource" };
+                manifest.Files.Add(new ManifestFileEntry
+                {
+                    OriginalRel = extremeName,
+                    StoredRel = storedName,
+                    Sha256 = HashHelper.ComputeStringSha256(content),
+                    Size = content.Length,
+                    IsLongName = true
+                });
+                await mfMgr.SaveManifestAtomicAsync(nasDir, manifest);
+
+                var restoreEngine = new RestoreEngine(mfMgr);
+                var rep = await restoreEngine.RunRestoreAsync(nasDir, localDir, ConflictResolution.Overwrite);
+
+                Assert(rep.RestoredFiles == 1 && rep.FailedFiles == 0, "超长文件名使用固定短临时名 .fnsync_rst_*.tmp 成功还原，无溢出崩溃");
+                Assert(File.Exists(Path.Combine(localDir, extremeName)), "超长原始文件名完整还原成功");
+                Assert(rep.IntegrityVerifiedFiles == 1, "还原数据完整性校验通过");
+            }
+            finally
+            {
+                try { Directory.Delete(testBase, true); } catch { }
+            }
+        }
+
+        static void TestStateBadgeColorMappingAndDisplayStatus()
+        {
+            Console.WriteLine("\n--- 25. UI 状态胶囊配色与完成态 100% 进度验证测试 ---");
+
+            var t = new SyncTask { TaskId = "ui_test", State = TaskSyncState.Completed, LastSyncStatus = "同步成功完成" };
+            Assert(t.StateBadgeBgHex == "#DCFCE7", "Completed 状态使用淡绿色胶囊背景");
+            Assert(t.StateBadgeColorHex == "#15803D", "Completed 状态使用深绿色胶囊文字");
+            Assert(t.DisplayStatus == "已就绪 (已最新)", "Completed 状态展示专业友好的文案 '已就绪 (已最新)'");
+
+            t.State = TaskSyncState.Syncing;
+            Assert(t.StateBadgeBgHex == "#DBEAFE" && t.StateBadgeColorHex == "#2563EB", "Syncing 状态使用品牌蓝胶囊");
+
+            t.State = TaskSyncState.Paused;
+            Assert(t.StateBadgeBgHex == "#FEF3C7" && t.StateBadgeColorHex == "#D97706", "Paused 状态使用警示琥珀黄胶囊");
+
+            t.State = TaskSyncState.Error;
+            Assert(t.StateBadgeBgHex == "#FEE2E2" && t.StateBadgeColorHex == "#DC2626", "Error 状态使用警示红胶囊");
         }
     }
 }
