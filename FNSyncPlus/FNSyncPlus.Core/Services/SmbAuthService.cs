@@ -23,6 +23,7 @@ namespace FNSyncPlus.Core.Services
         public string FullUncPath { get; set; } = string.Empty;
         public string RelativeSubPath { get; set; } = string.Empty;
         public DateTime LastModified { get; set; }
+        public bool IsShareRoot { get; set; }
     }
 
     public class SmbAuthService
@@ -111,7 +112,6 @@ namespace FNSyncPlus.Core.Services
                 }
 
                 serverAddress = serverAddress.Trim().Trim('\\', '/');
-                // 去除可能携带的端口号（SMB 固定 445 / 139 端口）
                 if (serverAddress.Contains(':'))
                 {
                     serverAddress = serverAddress.Split(':')[0];
@@ -124,7 +124,7 @@ namespace FNSyncPlus.Core.Services
                 var nr = new NETRESOURCE
                 {
                     dwType = RESOURCETYPE_DISK,
-                    lpLocalName = null, // 无需分配驱动器盘符
+                    lpLocalName = null,
                     lpRemoteName = remoteTarget,
                     lpProvider = null
                 };
@@ -140,7 +140,7 @@ namespace FNSyncPlus.Core.Services
                 // 处理已有会话凭据冲突 (Error 1219)
                 if (result == ERROR_SESSION_CREDENTIAL_CONFLICT)
                 {
-                    // 检查当前会话是否已经能够访问该共享
+                    // 先检查当前已有的 Windows 会话是否能够直接访问
                     try
                     {
                         if (!string.IsNullOrEmpty(shareName))
@@ -148,27 +148,27 @@ namespace FNSyncPlus.Core.Services
                             string checkPath = $@"\\{serverAddress}\{shareName}";
                             if (Directory.Exists(checkPath))
                             {
-                                return (true, "已复用当前 Windows 已建立的有效会话连接成功");
+                                return (true, "已复用当前 Windows 会话连接成功");
                             }
                         }
                     }
                     catch
                     {
-                        // 无法直接访问，需要断开原有无凭据或旧凭据空闲连接并重新连接
+                        // 无法直接访问
                     }
 
-                    // 尝试断开可能残留的 IPC$ 冲突会话重试一次
+                    // 仅断开临时的 IPC$ 连接尝试重试一次，绝不断开用户的其他现有盘符或正常会话
                     WNetCancelConnection2($@"\\{serverAddress}\IPC$", 0, bForce: false);
                     result = WNetAddConnection2(ref nr, password, username, 0);
 
                     if (result == NO_ERROR)
                     {
-                        return (true, "已重置连接并验证成功");
+                        return (true, "已建立连接并验证成功");
                     }
 
                     if (result == ERROR_SESSION_CREDENTIAL_CONFLICT)
                     {
-                        return (false, $"Windows 存在同一服务器的不同账号凭据冲突。请在控制面板-凭据管理器中移除对 {serverAddress} 的旧凭据，或重启该服务器连接后重试。");
+                        return (false, $"Windows 提示已存在与 NAS 服务器 ({serverAddress}) 的其他账号网络会话 (错误代码 1219)。为保障您其他工作连接的安全，请在 Windows 控制面板【凭据管理器】中查看并管理旧凭据，或使用一致的账号登录。");
                     }
                 }
 
@@ -214,7 +214,6 @@ namespace FNSyncPlus.Core.Services
                             var info = Marshal.PtrToStructure<SHARE_INFO_1>(currentPtr);
 
                             string shareName = info.shi1_netname;
-                            // 过滤管理共享和隐藏共享
                             if (string.IsNullOrEmpty(shareName)) continue;
                             if (shareName.EndsWith("$", StringComparison.OrdinalIgnoreCase)) continue;
                             if ((info.shi1_type & STYPE_SPECIAL) != 0) continue;
@@ -234,8 +233,8 @@ namespace FNSyncPlus.Core.Services
                 }
                 else
                 {
-                    // 若 NetShareEnum 失败（部分权限受限环境），尝试探测常用共享名
-                    string[] commonShares = { "FN_Sync_Test", "public", "homes", "data", "backup", "sk" };
+                    // 在部分限制 NetShareEnum 的环境中，探测常用共享名称
+                    string[] commonShares = { "public", "data", "homes", "backup", "files" };
                     foreach (var sh in commonShares)
                     {
                         string testUnc = $@"\\{serverAddress}\{sh}";
@@ -251,10 +250,7 @@ namespace FNSyncPlus.Core.Services
                                 });
                             }
                         }
-                        catch
-                        {
-                            // 忽略单个探测失败
-                        }
+                        catch { }
                     }
                 }
 
@@ -274,21 +270,23 @@ namespace FNSyncPlus.Core.Services
 
                 if (!Directory.Exists(longPath))
                 {
-                    throw new DirectoryNotFoundException($"指定的 NAS 目录不存在: {uncPath}");
+                    throw new DirectoryNotFoundException($"指定的 NAS 目录不存在或无访问权限: {uncPath}");
                 }
 
                 var di = new DirectoryInfo(longPath);
                 foreach (var sub in di.EnumerateDirectories())
                 {
-                    // 忽略隐藏系统目录如 .recycle 等
-                    if (sub.Name.StartsWith("$") || sub.Name.Equals(".recycle", StringComparison.OrdinalIgnoreCase))
+                    // 忽略隐藏系统目录如 .recycle、.fnsync
+                    if (sub.Name.StartsWith("$") ||
+                        sub.Name.Equals(".recycle", StringComparison.OrdinalIgnoreCase) ||
+                        sub.Name.Equals(FNSyncPlus.Core.Models.Manifest.MetadataDirName, StringComparison.OrdinalIgnoreCase))
                     {
                         continue;
                     }
 
                     string subUnc = PathHelper.RemoveLongPathPrefix(sub.FullName);
                     string relSub = "";
-                    if (subUnc.StartsWith(baseShareUnc, StringComparison.OrdinalIgnoreCase))
+                    if (!string.IsNullOrEmpty(baseShareUnc) && subUnc.StartsWith(baseShareUnc, StringComparison.OrdinalIgnoreCase))
                     {
                         relSub = subUnc.Substring(baseShareUnc.Length).TrimStart('\\');
                     }
@@ -298,7 +296,8 @@ namespace FNSyncPlus.Core.Services
                         Name = sub.Name,
                         FullUncPath = subUnc,
                         RelativeSubPath = relSub,
-                        LastModified = sub.LastWriteTime
+                        LastModified = sub.LastWriteTime,
+                        IsShareRoot = false
                     });
                 }
 
@@ -307,15 +306,47 @@ namespace FNSyncPlus.Core.Services
         }
 
         /// <summary>
-        /// 在 NAS 上创建新子文件夹
+        /// 测试目标 SMB 目录是否具备写入权限
+        /// </summary>
+        public async Task<(bool CanWrite, string ErrorMessage)> TestDirectoryWritePermissionAsync(string uncPath)
+        {
+            return await Task.Run(() =>
+            {
+                string testFile = Path.Combine(uncPath, $".fn_perm_test_{Guid.NewGuid():N}.tmp");
+                string longPath = PathHelper.EnsureLongPathPrefix(testFile);
+
+                try
+                {
+                    using (var fs = new FileStream(longPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        byte[] testBytes = Encoding.UTF8.GetBytes("test");
+                        fs.Write(testBytes, 0, testBytes.Length);
+                    }
+
+                    try { File.Delete(longPath); } catch { }
+                    return (true, string.Empty);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    return (false, "当前登录账号在此 NAS 文件夹没有写入权限。请联系管理员或在飞牛 NAS 管理面板为该账号分配【读写】权限。");
+                }
+                catch (Exception ex)
+                {
+                    return (false, $"无法写入 NAS 文件夹: {ex.Message}");
+                }
+            });
+        }
+
+        /// <summary>
+        /// 在 NAS 上创建新子文件夹（包含文件夹名称合法性校验和权限检查）
         /// </summary>
         public async Task<NasFolderItem> CreateSubFolderAsync(string parentUncPath, string newFolderName, string baseShareUnc)
         {
             return await Task.Run(() =>
             {
-                if (string.IsNullOrWhiteSpace(newFolderName))
+                if (!PathHelper.IsValidDirectoryName(newFolderName, out string validationError))
                 {
-                    throw new ArgumentException("文件夹名称不能为空", nameof(newFolderName));
+                    throw new ArgumentException(validationError, nameof(newFolderName));
                 }
 
                 string newUnc = Path.Combine(parentUncPath, newFolderName.Trim());
@@ -323,22 +354,30 @@ namespace FNSyncPlus.Core.Services
 
                 if (Directory.Exists(longPath))
                 {
-                    throw new IOException($"文件夹已存在: {newFolderName}");
+                    throw new IOException($"NAS 上已存在同名文件夹: {newFolderName}");
                 }
 
-                var di = Directory.CreateDirectory(longPath);
-                string fullUnc = PathHelper.RemoveLongPathPrefix(di.FullName);
-                string relSub = fullUnc.StartsWith(baseShareUnc, StringComparison.OrdinalIgnoreCase)
-                    ? fullUnc.Substring(baseShareUnc.Length).TrimStart('\\')
-                    : newFolderName;
-
-                return new NasFolderItem
+                try
                 {
-                    Name = di.Name,
-                    FullUncPath = fullUnc,
-                    RelativeSubPath = relSub,
-                    LastModified = di.LastWriteTime
-                };
+                    var di = Directory.CreateDirectory(longPath);
+                    string fullUnc = PathHelper.RemoveLongPathPrefix(di.FullName);
+                    string relSub = (!string.IsNullOrEmpty(baseShareUnc) && fullUnc.StartsWith(baseShareUnc, StringComparison.OrdinalIgnoreCase))
+                        ? fullUnc.Substring(baseShareUnc.Length).TrimStart('\\')
+                        : newFolderName;
+
+                    return new NasFolderItem
+                    {
+                        Name = di.Name,
+                        FullUncPath = fullUnc,
+                        RelativeSubPath = relSub,
+                        LastModified = di.LastWriteTime,
+                        IsShareRoot = false
+                    };
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    throw new UnauthorizedAccessException($"创建文件夹被拒绝：当前 NAS 账号在【{parentUncPath}】缺少写入权限。请在飞牛系统管理中开放该共享的写权限。");
+                }
             });
         }
 
@@ -364,10 +403,7 @@ namespace FNSyncPlus.Core.Services
                 byte[] encrypted = ProtectedData.Protect(raw, Entropy, DataProtectionScope.CurrentUser);
                 File.WriteAllBytes(GetCredentialStoragePath(), encrypted);
             }
-            catch
-            {
-                // 保存失败不破坏主运行
-            }
+            catch { }
         }
 
         public static (string Server, string Username, string Password)? LoadCredentials()
@@ -386,10 +422,7 @@ namespace FNSyncPlus.Core.Services
                     return (parts[0], parts[1], parts[2]);
                 }
             }
-            catch
-            {
-                // 解密失败可能由于环境变化，返回 null
-            }
+            catch { }
             return null;
         }
 

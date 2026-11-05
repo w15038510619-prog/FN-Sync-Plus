@@ -8,11 +8,11 @@ namespace FNSyncPlus.Core.Services
 {
     public class AppSettings
     {
-        public string NasServer { get; set; } = "192.168.8.120";
-        public string Username { get; set; } = "wangxiaoliang";
+        public string NasServer { get; set; } = "";
+        public string Username { get; set; } = "";
         public bool RememberCredentials { get; set; } = true;
-        public string SourceFolder { get; set; } = @"D:\FN_AutoSync_Package\FN_Sync_Test";
-        public string TargetShare { get; set; } = "FN_Sync_Test";
+        public string SourceFolder { get; set; } = "";
+        public string TargetShare { get; set; } = "";
         public string TargetSubFolder { get; set; } = "";
         public bool AutoSyncEnabled { get; set; } = true;
         public int SyncIntervalMinutes { get; set; } = 5;

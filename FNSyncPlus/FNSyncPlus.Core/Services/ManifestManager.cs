@@ -10,8 +10,31 @@ using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.Core.Services
 {
+    public class ManifestLockHandle : IDisposable
+    {
+        private FileStream? _lockStream;
+
+        public ManifestLockHandle(FileStream stream)
+        {
+            _lockStream = stream;
+        }
+
+        public void Dispose()
+        {
+            if (_lockStream != null)
+            {
+                try
+                {
+                    _lockStream.Dispose();
+                }
+                catch { }
+                _lockStream = null;
+            }
+        }
+    }
+
     /// <summary>
-    /// 清单管理服务：负责清单的加载、跨版本兼容与原子可靠写入
+    /// 清单管理服务：负责清单在 .fnsync/ 专用隔离目录下的加载、跨版本兼容迁移与原子可靠持久化
     /// </summary>
     public class ManifestManager
     {
@@ -22,34 +45,129 @@ namespace FNSyncPlus.Core.Services
             PropertyNameCaseInsensitive = true
         };
 
-        private readonly SemaphoreSlim _fileLock = new(1, 1);
+        private readonly SemaphoreSlim _memoryLock = new(1, 1);
 
         /// <summary>
-        /// 从目标目录读取清单（若新版本清单不存在，自动兼容旧版 __FN_ORIGINAL_NAMES__.json）
+        /// 获取 NAS 目标目录下的元数据专用隔离目录路径 (.fnsync)
+        /// </summary>
+        public static string GetMetadataDirectory(string targetRootDirectory)
+        {
+            string longTarget = PathHelper.EnsureLongPathPrefix(targetRootDirectory);
+            return Path.Combine(longTarget, Manifest.MetadataDirName);
+        }
+
+        /// <summary>
+        /// 获取临时分块暂存目录路径 (.fnsync/staging)
+        /// </summary>
+        public static string GetStagingDirectory(string targetRootDirectory)
+        {
+            return Path.Combine(GetMetadataDirectory(targetRootDirectory), Manifest.StagingDirName);
+        }
+
+        /// <summary>
+        /// 尝试对目标 NAS 目录获取独占同步锁，防止多任务或跨机器并发写入同一个目标目录
+        /// </summary>
+        public async Task<ManifestLockHandle?> TryAcquireTargetLockAsync(string targetRootDirectory)
+        {
+            string metaDir = GetMetadataDirectory(targetRootDirectory);
+            if (!Directory.Exists(metaDir))
+            {
+                try { Directory.CreateDirectory(metaDir); } catch { }
+            }
+
+            string lockPath = Path.Combine(metaDir, Manifest.LockFileName);
+
+            return await Task.Run(() =>
+            {
+                try
+                {
+                    var stream = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                    return new ManifestLockHandle(stream);
+                }
+                catch
+                {
+                    // 无法获取独占共享锁，说明已有其他同步任务在操作该目录
+                    return null;
+                }
+            });
+        }
+
+        /// <summary>
+        /// 从目标目录读取清单（自动从 .fnsync/manifest.json 加载；若不存在自动检查并迁移旧版本根目录清单）
         /// </summary>
         public async Task<Manifest> LoadManifestAsync(string targetRootDirectory, CancellationToken cancellationToken = default)
         {
-            await _fileLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await _memoryLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                string targetDir = PathHelper.EnsureLongPathPrefix(targetRootDirectory);
-                string currentPath = Path.Combine(targetDir, Manifest.CurrentManifestFileName);
-                string legacyPath = Path.Combine(targetDir, Manifest.LegacyManifestFileName);
+                string longTarget = PathHelper.EnsureLongPathPrefix(targetRootDirectory);
+                string metaDir = Path.Combine(longTarget, Manifest.MetadataDirName);
+                string isolatedPath = Path.Combine(metaDir, Manifest.IsolatedManifestFileName);
+                string backupPath = Path.Combine(metaDir, Manifest.IsolatedManifestFileName + ".bak");
 
-                if (File.Exists(currentPath))
+                // 1. 优先从隔离元数据目录 .fnsync/manifest.json 读取
+                if (File.Exists(isolatedPath))
                 {
-                    string json = await File.ReadAllTextAsync(currentPath, cancellationToken).ConfigureAwait(false);
-                    var manifest = JsonSerializer.Deserialize<Manifest>(json, JsonOptions);
-                    if (manifest != null) return manifest;
+                    try
+                    {
+                        string json = await File.ReadAllTextAsync(isolatedPath, cancellationToken).ConfigureAwait(false);
+                        var manifest = JsonSerializer.Deserialize<Manifest>(json, JsonOptions);
+                        if (manifest != null && manifest.Files != null)
+                        {
+                            return manifest;
+                        }
+                    }
+                    catch
+                    {
+                        // 主清单文件可能在异常断电时损坏，尝试读取备用清单 .bak
+                        if (File.Exists(backupPath))
+                        {
+                            try
+                            {
+                                string bakJson = await File.ReadAllTextAsync(backupPath, cancellationToken).ConfigureAwait(false);
+                                var bakManifest = JsonSerializer.Deserialize<Manifest>(bakJson, JsonOptions);
+                                if (bakManifest != null) return bakManifest;
+                            }
+                            catch { }
+                        }
+                    }
                 }
 
-                if (File.Exists(legacyPath))
+                // 2. 兼容并自动迁移 v1/v2 位于备份根目录下的 __FN_SYNC_MANIFEST__.json
+                string legacyRootPath = Path.Combine(longTarget, Manifest.LegacyManifestFileName);
+                if (File.Exists(legacyRootPath))
                 {
-                    // 兼容旧版清单结构
-                    string legacyJson = await File.ReadAllTextAsync(legacyPath, cancellationToken).ConfigureAwait(false);
-                    return ParseLegacyManifest(legacyJson);
+                    try
+                    {
+                        string legacyJson = await File.ReadAllTextAsync(legacyRootPath, cancellationToken).ConfigureAwait(false);
+                        var manifest = JsonSerializer.Deserialize<Manifest>(legacyJson, JsonOptions);
+                        if (manifest != null)
+                        {
+                            manifest.Note = "已自动从旧版本根目录清单迁移到 .fnsync 专用隔离空间";
+                            manifest.Version = Manifest.CurrentVersion;
+                            // 迁移完成后尝试保存到新目录
+                            _ = SaveManifestAtomicInternalAsync(targetRootDirectory, manifest, cancellationToken);
+                            return manifest;
+                        }
+                    }
+                    catch { }
                 }
 
+                // 3. 兼容旧版 Go 清单 __FN_ORIGINAL_NAMES__.json
+                string legacyGoPath = Path.Combine(longTarget, Manifest.LegacyGoManifestFileName);
+                if (File.Exists(legacyGoPath))
+                {
+                    try
+                    {
+                        string legacyJson = await File.ReadAllTextAsync(legacyGoPath, cancellationToken).ConfigureAwait(false);
+                        var manifest = ParseLegacyGoManifest(legacyJson);
+                        _ = SaveManifestAtomicInternalAsync(targetRootDirectory, manifest, cancellationToken);
+                        return manifest;
+                    }
+                    catch { }
+                }
+
+                // 4. 全新备份，返回初始清单对象
                 return new Manifest
                 {
                     Version = Manifest.CurrentVersion,
@@ -59,63 +177,68 @@ namespace FNSyncPlus.Core.Services
             }
             finally
             {
-                _fileLock.Release();
+                _memoryLock.Release();
             }
         }
 
         /// <summary>
-        /// 原子写入清单到 NAS 目标目录（写临时文件 -> 强制落盘 -> 原子覆盖），确保写入完整性
+        /// 原子写入清单到 NAS 目标目录的 .fnsync/manifest.json（写入临时文件 -> 强制落盘 -> 原子覆盖）
         /// </summary>
         public async Task SaveManifestAtomicAsync(string targetRootDirectory, Manifest manifest, CancellationToken cancellationToken = default)
         {
             if (manifest == null) throw new ArgumentNullException(nameof(manifest));
 
-            await _fileLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await _memoryLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                string targetDir = PathHelper.EnsureLongPathPrefix(targetRootDirectory);
-                if (!Directory.Exists(targetDir))
-                {
-                    Directory.CreateDirectory(targetDir);
-                }
-
-                manifest.UpdatedAt = DateTimeOffset.UtcNow;
-                string currentPath = Path.Combine(targetDir, Manifest.CurrentManifestFileName);
-                string tmpPath = Path.Combine(targetDir, Manifest.CurrentManifestFileName + ".tmp");
-                string bakPath = Path.Combine(targetDir, Manifest.CurrentManifestFileName + ".bak");
-
-                byte[] utf8Bytes = JsonSerializer.SerializeToUtf8Bytes(manifest, JsonOptions);
-
-                // 1. 写入临时文件并强行落盘 Flush
-                using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
-                {
-                    await fs.WriteAsync(utf8Bytes, cancellationToken).ConfigureAwait(false);
-                    await fs.FlushAsync(cancellationToken).ConfigureAwait(false);
-                }
-
-                // 2. 备份原清单
-                if (File.Exists(currentPath))
-                {
-                    try
-                    {
-                        File.Copy(currentPath, bakPath, overwrite: true);
-                    }
-                    catch
-                    {
-                        // 备份失败不阻塞主流程
-                    }
-                }
-
-                // 3. 原子移动覆盖
-                File.Move(tmpPath, currentPath, overwrite: true);
+                await SaveManifestAtomicInternalAsync(targetRootDirectory, manifest, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
-                _fileLock.Release();
+                _memoryLock.Release();
             }
         }
 
-        private static Manifest ParseLegacyManifest(string legacyJson)
+        private async Task SaveManifestAtomicInternalAsync(string targetRootDirectory, Manifest manifest, CancellationToken cancellationToken)
+        {
+            string metaDir = GetMetadataDirectory(targetRootDirectory);
+            if (!Directory.Exists(metaDir))
+            {
+                Directory.CreateDirectory(metaDir);
+            }
+
+            manifest.UpdatedAt = DateTimeOffset.UtcNow;
+            string currentPath = Path.Combine(metaDir, Manifest.IsolatedManifestFileName);
+            string tmpPath = Path.Combine(metaDir, Manifest.IsolatedManifestFileName + ".tmp");
+            string bakPath = Path.Combine(metaDir, Manifest.IsolatedManifestFileName + ".bak");
+
+            byte[] utf8Bytes = JsonSerializer.SerializeToUtf8Bytes(manifest, JsonOptions);
+
+            // 1. 写入临时文件并强行落盘 Flush
+            using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+            {
+                await fs.WriteAsync(utf8Bytes, cancellationToken).ConfigureAwait(false);
+                await fs.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            // 2. 备份原清单
+            if (File.Exists(currentPath))
+            {
+                try
+                {
+                    File.Copy(currentPath, bakPath, overwrite: true);
+                }
+                catch
+                {
+                    // 备份失败不阻塞主流程
+                }
+            }
+
+            // 3. 原子移动覆盖
+            File.Move(tmpPath, currentPath, overwrite: true);
+        }
+
+        private static Manifest ParseLegacyGoManifest(string legacyJson)
         {
             var manifest = new Manifest
             {
