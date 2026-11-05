@@ -26,8 +26,31 @@ namespace FNSyncPlus.WinUI.ViewModels
         private readonly SmbAuthService _smbService;
         private readonly AppSettings _settings;
 
+        public NasBrowserViewModel NasBrowser { get; }
+
         public ObservableCollection<string> SelectedLocalFolders { get; } = new();
         public ObservableCollection<PlannedTaskItem> PlannedTasks { get; } = new();
+
+        [ObservableProperty]
+        private int _currentStep = 1; // 1 = Local Folders, 2 = NAS Destination, 3 = Auto-Plan Preview
+
+        [ObservableProperty]
+        private string _stepIndicatorText = "步骤 1 / 3：选择本地备份源文件夹";
+
+        [ObservableProperty]
+        private bool _canGoBack = false;
+
+        [ObservableProperty]
+        private bool _canGoNext = false;
+
+        [ObservableProperty]
+        private bool _isStep1 = true;
+
+        [ObservableProperty]
+        private bool _isStep2 = false;
+
+        [ObservableProperty]
+        private bool _isStep3 = false;
 
         [ObservableProperty]
         private string _nasDestinationRoot = string.Empty;
@@ -53,13 +76,31 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private string _statusMessage = string.Empty;
 
-        public AddFolderWizardViewModel(TaskManager taskManager, SmbAuthService smbService, AppSettings settings)
+        public AddFolderWizardViewModel(TaskManager taskManager, SmbAuthService smbService, AppSettings settings, NasBrowserViewModel nasBrowser)
         {
             _taskManager = taskManager;
             _smbService = smbService;
             _settings = settings;
+            NasBrowser = nasBrowser;
+
+            NasBrowser.PropertyChanged += (s, e) =>
+            {
+                if (e.PropertyName == nameof(NasBrowser.CurrentUncPath) || 
+                    e.PropertyName == nameof(NasBrowser.HasWritePermission))
+                {
+                    UpdateStepState();
+                }
+            };
+
+            string defaultFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "WorkDocs");
+            if (!Directory.Exists(defaultFolder))
+            {
+                try { Directory.CreateDirectory(defaultFolder); } catch { }
+            }
+            SelectedLocalFolders.Add(defaultFolder);
 
             InitializeDefaultNasRoot();
+            UpdateStepState();
         }
 
         private async void InitializeDefaultNasRoot()
@@ -75,14 +116,12 @@ namespace FNSyncPlus.WinUI.ViewModels
                 return;
             }
 
-            // 优先检查用户上次选择的私人空间或配置
             if (!string.IsNullOrEmpty(_settings.PreferredBackupRoot))
             {
                 NasDestinationRoot = _settings.PreferredBackupRoot;
             }
             else
             {
-                // 默认探测用户私人主目录
                 NasDestinationRoot = $@"\\{server}\{user}";
             }
 
@@ -94,11 +133,12 @@ namespace FNSyncPlus.WinUI.ViewModels
             if (string.IsNullOrWhiteSpace(NasDestinationRoot))
             {
                 SecurityTitle = "尚未指定 NAS 备份根目录";
-                SecurityDescription = "请点击【浏览位置】选择要保存备份的 NAS 文件夹。";
+                SecurityDescription = "请选择要保存备份的 NAS 文件夹。";
                 SecurityBadgeBg = "#F1F5F9";
                 SecurityBadgeColor = "#64748B";
                 IsTeamShareWarning = false;
                 CanCreate = false;
+                UpdateStepState();
                 return;
             }
 
@@ -112,6 +152,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             IsTeamShareWarning = eval.State == NasShareSecurityState.TeamShare;
 
             await RecomputePlannedTasksAsync();
+            UpdateStepState();
         }
 
         public void AddLocalFolder(string folderPath)
@@ -123,6 +164,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 SelectedLocalFolders.Add(normalized);
                 _ = RecomputePlannedTasksAsync();
+                UpdateStepState();
             }
         }
 
@@ -130,6 +172,68 @@ namespace FNSyncPlus.WinUI.ViewModels
         {
             SelectedLocalFolders.Remove(folderPath);
             _ = RecomputePlannedTasksAsync();
+            UpdateStepState();
+        }
+
+        public async Task NextStepAsync()
+        {
+            if (CurrentStep == 1)
+            {
+                if (SelectedLocalFolders.Count == 0) return;
+                CurrentStep = 2;
+                StepIndicatorText = "步骤 2 / 3：选择 NAS 备份位置";
+                _ = NasBrowser.NavigateToFolderAsync(NasDestinationRoot);
+            }
+            else if (CurrentStep == 2)
+            {
+                NasBrowser.ConfirmSelection();
+                string selected = !string.IsNullOrWhiteSpace(NasBrowser.ConfirmedSelectedPath)
+                    ? NasBrowser.ConfirmedSelectedPath
+                    : NasBrowser.CurrentUncPath;
+
+                if (!string.IsNullOrWhiteSpace(selected))
+                {
+                    NasDestinationRoot = selected;
+                }
+
+                await EvaluateNasRootSecurityAsync();
+                await RecomputePlannedTasksAsync();
+
+                CurrentStep = 3;
+                StepIndicatorText = "步骤 3 / 3：自动规划预览与确认";
+            }
+            UpdateStepState();
+        }
+
+        public void PreviousStep()
+        {
+            if (CurrentStep == 3)
+            {
+                CurrentStep = 2;
+                StepIndicatorText = "步骤 2 / 3：选择 NAS 备份位置";
+            }
+            else if (CurrentStep == 2)
+            {
+                CurrentStep = 1;
+                StepIndicatorText = "步骤 1 / 3：选择本地备份源文件夹";
+            }
+            UpdateStepState();
+        }
+
+        private void UpdateStepState()
+        {
+            IsStep1 = CurrentStep == 1;
+            IsStep2 = CurrentStep == 2;
+            IsStep3 = CurrentStep == 3;
+
+            CanGoBack = CurrentStep > 1;
+            CanGoNext = CurrentStep switch
+            {
+                1 => SelectedLocalFolders.Count > 0,
+                2 => !string.IsNullOrWhiteSpace(NasBrowser.CurrentUncPath) && NasBrowser.HasWritePermission,
+                3 => CanCreate && PlannedTasks.Count > 0,
+                _ => false
+            };
         }
 
         public async Task RecomputePlannedTasksAsync()
@@ -139,6 +243,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             if (SelectedLocalFolders.Count == 0 || string.IsNullOrWhiteSpace(NasDestinationRoot))
             {
                 CanCreate = false;
+                UpdateStepState();
                 return;
             }
 
@@ -166,6 +271,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
 
             CanCreate = PlannedTasks.Count > 0;
+            UpdateStepState();
         }
 
         public async Task<int> CreateAllTasksAsync()

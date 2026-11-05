@@ -11,8 +11,8 @@ namespace FNSyncPlus.WinUI.Pages
 
         public SettingsPage()
         {
-            InitializeComponent();
             ViewModel = AppServices.GetService<SettingsViewModel>();
+            InitializeComponent();
         }
 
         public bool HasNotice(string notice)

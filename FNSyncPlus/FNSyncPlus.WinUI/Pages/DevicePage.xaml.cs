@@ -12,8 +12,8 @@ namespace FNSyncPlus.WinUI.Pages
 
         public DevicePage()
         {
-            InitializeComponent();
             ViewModel = AppServices.GetService<DeviceViewModel>();
+            InitializeComponent();
 
             this.Loaded += (s, e) =>
             {

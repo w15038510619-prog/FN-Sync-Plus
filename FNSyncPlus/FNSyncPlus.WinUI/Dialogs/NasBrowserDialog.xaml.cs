@@ -29,7 +29,7 @@ namespace FNSyncPlus.WinUI.Dialogs
         {
             if (args.Item is BreadcrumbItem item)
             {
-                await ViewModel.NavigateToFolderAsync(item.Path, "");
+                await ViewModel.NavigateToFolderAsync(item.Path);
             }
         }
 
@@ -37,7 +37,7 @@ namespace FNSyncPlus.WinUI.Dialogs
         {
             if (ViewModel.SelectedFolder != null)
             {
-                await ViewModel.NavigateToFolderAsync(ViewModel.SelectedFolder.FullUncPath, "");
+                await ViewModel.NavigateToFolderAsync(ViewModel.SelectedFolder.FullUncPath);
             }
         }
 

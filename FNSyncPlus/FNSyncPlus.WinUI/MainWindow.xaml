@@ -9,10 +9,6 @@
     Title="飞牛同步增强版 (FN Sync Plus) v3.0"
     mc:Ignorable="d">
 
-    <Window.SystemBackdrop>
-        <MicaBackdrop Kind="Base" />
-    </Window.SystemBackdrop>
-
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="44" />
@@ -30,7 +26,7 @@
             <!-- Brand Icon & Title -->
             <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
                 <Border Width="24" Height="24" Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="6">
-                    <FontIcon Glyph="&#xE895;" FontFamily="{ThemeResource SymbolThemeFontFamily}" FontSize="12" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    <FontIcon Glyph="&#xE895;" FontSize="12" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
                 </Border>
                 <TextBlock Text="飞牛同步增强版 v3.0" FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
             </StackPanel>

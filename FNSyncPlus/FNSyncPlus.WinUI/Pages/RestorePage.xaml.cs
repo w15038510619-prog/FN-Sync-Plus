@@ -13,8 +13,8 @@ namespace FNSyncPlus.WinUI.Pages
 
         public RestorePage()
         {
-            InitializeComponent();
             ViewModel = AppServices.GetService<RestoreViewModel>();
+            InitializeComponent();
         }
 
         private async void BtnBrowseLocalRestore_Click(object sender, RoutedEventArgs e)

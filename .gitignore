@@ -19,6 +19,7 @@ Release_WinUI/
 *.exe
 *.dll
 *.pdb
+*.zip
 
 # Sensitive and temporary files
 credentials.dat

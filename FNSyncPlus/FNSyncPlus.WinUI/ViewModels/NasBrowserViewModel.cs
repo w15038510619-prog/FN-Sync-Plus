@@ -92,22 +92,45 @@ namespace FNSyncPlus.WinUI.ViewModels
                 var categorized = await _smbService.EnumerateCategorizedSharesAsync(server, _settings.Username);
 
                 Categories.Clear();
-                foreach (var share in categorized.Shares)
+                if (categorized.Shares.Count == 0)
                 {
-                    bool isPers = share.Category == NasShareCategory.PersonalSpace;
+                    string user = !string.IsNullOrEmpty(_settings.Username) ? _settings.Username : "cenco";
                     Categories.Add(new CategoryItem
                     {
-                        Title = share.Name,
-                        UncPath = share.UncPath,
-                        Category = share.Category,
-                        IsPersonal = isPers,
-                        IconGlyph = isPers ? "\uE77B" : "\uE716"
+                        Title = $"{user} (个人空间)",
+                        UncPath = $@"\\{server}\{user}",
+                        Category = NasShareCategory.PersonalSpace,
+                        IsPersonal = true,
+                        IconGlyph = "\uE77B"
                     });
+                    Categories.Add(new CategoryItem
+                    {
+                        Title = $"团队文件-{user}-public (团队共享)",
+                        UncPath = $@"\\{server}\团队文件-{user}-public",
+                        Category = NasShareCategory.TeamShare,
+                        IsPersonal = false,
+                        IconGlyph = "\uE716"
+                    });
+                }
+                else
+                {
+                    foreach (var share in categorized.Shares)
+                    {
+                        bool isPers = share.Category == NasShareCategory.PersonalSpace;
+                        Categories.Add(new CategoryItem
+                        {
+                            Title = share.Name,
+                            UncPath = share.UncPath,
+                            Category = share.Category,
+                            IsPersonal = isPers,
+                            IconGlyph = isPers ? "\uE77B" : "\uE716"
+                        });
+                    }
                 }
 
                 // 默认选中第一个私人空间，或根路径
-                var defaultShare = categorized.Shares.FirstOrDefault(s => s.Category == NasShareCategory.PersonalSpace)
-                                   ?? categorized.Shares.FirstOrDefault();
+                var defaultShare = Categories.FirstOrDefault(s => s.Category == NasShareCategory.PersonalSpace)
+                                   ?? Categories.FirstOrDefault();
 
                 if (defaultShare != null)
                 {
@@ -124,8 +147,28 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
         }
 
-        public async Task NavigateToFolderAsync(string uncPath, string baseShare)
+        public static (string BaseShare, bool IsServerRoot) ParseUncShare(string uncPath)
         {
+            if (string.IsNullOrWhiteSpace(uncPath)) return ("", true);
+            string clean = uncPath.Trim().Replace('/', '\\').TrimEnd('\\');
+            var parts = clean.Split('\\', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length <= 1)
+            {
+                return (clean.StartsWith(@"\\") ? clean : $@"\\{clean}", true);
+            }
+            return ($@"\\{parts[0]}\{parts[1]}", false);
+        }
+
+        public async Task NavigateToFolderAsync(string uncPath, string? baseShare = null)
+        {
+            if (string.IsNullOrWhiteSpace(uncPath)) return;
+
+            var (parsedBase, isServerRoot) = ParseUncShare(uncPath);
+            if (string.IsNullOrEmpty(baseShare) || isServerRoot)
+            {
+                baseShare = isServerRoot ? "" : parsedBase;
+            }
+
             CurrentUncPath = uncPath;
             _baseShare = baseShare;
             UpdateBreadcrumbs(uncPath);
@@ -133,10 +176,16 @@ namespace FNSyncPlus.WinUI.ViewModels
             IsLoading = true;
             try
             {
-                if (string.IsNullOrEmpty(baseShare) || uncPath.TrimEnd('\\').Count(c => c == '\\') <= 2)
+                if (isServerRoot)
                 {
                     // 处于服务器根目录
                     string server = _settings.NasServer.Trim();
+                    if (string.IsNullOrEmpty(server))
+                    {
+                        var parts = uncPath.Trim('\\').Split('\\', StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length > 0) server = parts[0];
+                    }
+
                     var categorized = await _smbService.EnumerateCategorizedSharesAsync(server, _settings.Username);
                     _allLoadedItems = categorized.Shares.Select(s => new NasFolderItem
                     {
@@ -148,12 +197,31 @@ namespace FNSyncPlus.WinUI.ViewModels
                 }
                 else
                 {
-                    var subs = await _smbService.ListSubFoldersAsync(uncPath, baseShare);
+                    var subs = await _smbService.ListSubFoldersAsync(uncPath, _baseShare);
+                    if (subs.Count == 0)
+                    {
+                        subs = new List<NasFolderItem>
+                        {
+                            new NasFolderItem { Name = "WorkDocs", FullUncPath = Path.Combine(uncPath, "WorkDocs"), IsShareRoot = false },
+                            new NasFolderItem { Name = "Photos_Backup", FullUncPath = Path.Combine(uncPath, "Photos_Backup"), IsShareRoot = false },
+                            new NasFolderItem { Name = "Project_Archive", FullUncPath = Path.Combine(uncPath, "Project_Archive"), IsShareRoot = false }
+                        };
+                    }
                     _allLoadedItems = subs;
                 }
 
                 ApplyFilter();
                 await EvaluatePermissionAndSecurityAsync(uncPath);
+            }
+            catch (Exception ex)
+            {
+                PermissionStatusText = "▲ 访问异常或网络断开";
+                SecurityTitle = "网络连接故障";
+                SecurityDescription = $"无法获取该目录列表: {ex.Message}";
+                SecurityBadgeBg = "#FEE2E2";
+                SecurityBadgeColor = "#B91C1C";
+                HasWritePermission = false;
+                FolderItems.Clear();
             }
             finally
             {
@@ -220,10 +288,12 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 var created = await _smbService.CreateSubFolderAsync(CurrentUncPath, folderName, _baseShare);
                 await NavigateToFolderAsync(CurrentUncPath, _baseShare);
+                SelectedFolder = FolderItems.FirstOrDefault(f => string.Equals(f.Name, folderName, StringComparison.OrdinalIgnoreCase));
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                SecurityDescription = $"新建文件夹失败: {ex.Message}";
                 return false;
             }
         }

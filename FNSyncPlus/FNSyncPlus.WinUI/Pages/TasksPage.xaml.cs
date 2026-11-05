@@ -13,8 +13,8 @@ namespace FNSyncPlus.WinUI.Pages
 
         public TasksPage()
         {
-            InitializeComponent();
             ViewModel = AppServices.GetService<TasksViewModel>();
+            InitializeComponent();
 
             ViewModel.RequestAddFolderWizard += OpenAddFolderWizardDialog;
             ViewModel.RequestTaskDetails += OpenTaskDetailsDialog;

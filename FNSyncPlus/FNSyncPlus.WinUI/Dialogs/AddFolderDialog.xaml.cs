@@ -1,9 +1,12 @@
 using System;
+using System.Linq;
 using FNSyncPlus.WinUI.Helpers;
 using FNSyncPlus.WinUI.Services;
 using FNSyncPlus.WinUI.ViewModels;
+using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 
 namespace FNSyncPlus.WinUI.Dialogs
 {
@@ -11,10 +14,18 @@ namespace FNSyncPlus.WinUI.Dialogs
     {
         public AddFolderWizardViewModel ViewModel { get; }
 
-        public AddFolderDialog()
+        public AddFolderDialog(AddFolderWizardViewModel? vm = null)
         {
+            ViewModel = vm ?? AppServices.GetService<AddFolderWizardViewModel>();
             InitializeComponent();
-            ViewModel = AppServices.GetService<AddFolderWizardViewModel>();
+
+            var kaNext = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.Right, Modifiers = Windows.System.VirtualKeyModifiers.Menu };
+            kaNext.Invoked += Accelerator_Next_Invoked;
+            this.KeyboardAccelerators.Add(kaNext);
+
+            var kaBack = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.Left, Modifiers = Windows.System.VirtualKeyModifiers.Menu };
+            kaBack.Invoked += Accelerator_Back_Invoked;
+            this.KeyboardAccelerators.Add(kaBack);
         }
 
         private async void BtnAddLocalFolder_Click(object sender, RoutedEventArgs e)
@@ -34,51 +45,101 @@ namespace FNSyncPlus.WinUI.Dialogs
             }
         }
 
-        private async void TxtNasRoot_TextChanged(object sender, TextChangedEventArgs e)
+        private async void CategoryList_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            await ViewModel.EvaluateNasRootSecurityAsync();
+            if (e.AddedItems.Count > 0 && e.AddedItems[0] is CategoryItem category)
+            {
+                await ViewModel.NasBrowser.NavigateToFolderAsync(category.UncPath);
+            }
         }
 
-        private async void BtnBrowseNasRoot_Click(object sender, RoutedEventArgs e)
+        private async void BreadcrumbBar_ItemClicked(BreadcrumbBar sender, BreadcrumbBarItemClickedEventArgs args)
+        {
+            if (args.Item is BreadcrumbItem item)
+            {
+                await ViewModel.NasBrowser.NavigateToFolderAsync(item.Path);
+            }
+        }
+
+        private async void FolderList_DoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
+        {
+            if (ViewModel.NasBrowser.SelectedFolder != null)
+            {
+                await ViewModel.NasBrowser.NavigateToFolderAsync(ViewModel.NasBrowser.SelectedFolder.FullUncPath);
+            }
+        }
+
+        private async void BtnInlineCreateFolder_Click(object sender, RoutedEventArgs e)
+        {
+            string name = TxtInlineNewFolderName.Text.Trim();
+            if (string.IsNullOrWhiteSpace(name)) return;
+
+            bool success = await ViewModel.NasBrowser.CreateSubFolderAsync(name);
+            if (success)
+            {
+                TxtInlineNewFolderName.Text = string.Empty;
+                InlineNewFolderFlyout.Hide();
+            }
+        }
+
+        private void BtnPreviousStep_Click(object sender, RoutedEventArgs e)
+        {
+            ViewModel.PreviousStep();
+        }
+
+        private async void BtnNextStep_Click(object sender, RoutedEventArgs e)
+        {
+            await ViewModel.NextStepAsync();
+        }
+
+        private async void BtnCreateAndStart_Click(object sender, RoutedEventArgs e)
+        {
+            int created = await ViewModel.CreateAllTasksAsync();
+            if (created > 0)
+            {
+                this.Hide();
+            }
+        }
+
+        private void BtnCancel_Click(object sender, RoutedEventArgs e)
         {
             this.Hide();
-
-            var browser = new NasBrowserDialog
-            {
-                XamlRoot = this.XamlRoot
-            };
-
-            var res = await browser.ShowAsync();
-            if (res == ContentDialogResult.Primary && !string.IsNullOrWhiteSpace(browser.ViewModel.ConfirmedSelectedPath))
-            {
-                ViewModel.NasDestinationRoot = browser.ViewModel.ConfirmedSelectedPath;
-                await ViewModel.EvaluateNasRootSecurityAsync();
-            }
-
-            await this.ShowAsync();
         }
 
-        private async void ContentDialog_PrimaryButtonClick(ContentDialog sender, ContentDialogButtonClickEventArgs args)
+        private void Accelerator_Next_Invoked(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
         {
-            if (!ViewModel.CanCreate || ViewModel.PlannedTasks.Count == 0)
+            if (ViewModel.CanGoNext)
             {
-                args.Cancel = true;
-                return;
+                _ = ViewModel.NextStepAsync();
+                args.Handled = true;
             }
+        }
 
-            var deferral = args.GetDeferral();
-            try
+        private void Accelerator_Back_Invoked(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
+        {
+            if (ViewModel.CanGoBack)
             {
-                int created = await ViewModel.CreateAllTasksAsync();
-                if (created == 0)
-                {
-                    args.Cancel = true;
-                }
+                ViewModel.PreviousStep();
+                args.Handled = true;
             }
-            finally
+        }
+
+        public Brush GetStepPillBg(int currentStep, int pillStep)
+        {
+            if (currentStep == pillStep)
             {
-                deferral.Complete();
+                return (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"];
             }
+            return (Brush)Application.Current.Resources["SubtleFillColorSecondaryBrush"];
+        }
+
+        public Brush GetStepPillFg(int currentStep, int pillStep)
+        {
+            if (currentStep == pillStep)
+            {
+                return new SolidColorBrush(Colors.White);
+            }
+            return (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
         }
 
         public InfoBarSeverity GetSecuritySeverity(bool isTeamShareWarning)

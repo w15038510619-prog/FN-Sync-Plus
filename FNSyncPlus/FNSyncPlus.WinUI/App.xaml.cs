@@ -39,7 +39,26 @@ namespace FNSyncPlus.WinUI
                 // 初始化依赖注入容器与底层 Core 业务引擎
                 AppServices.Initialize();
 
-                var win = new MainWindow();
+                string[] cmdArgs = Environment.GetCommandLineArgs();
+                string initialView = "Tasks";
+                int wizardStep = 0;
+
+                foreach (var arg in cmdArgs)
+                {
+                    if (arg.StartsWith("--view=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        initialView = arg.Substring("--view=".Length);
+                    }
+                    else if (arg.StartsWith("--wizard-step=", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (int.TryParse(arg.Substring("--wizard-step=".Length), out int s))
+                        {
+                            wizardStep = s;
+                        }
+                    }
+                }
+
+                var win = new MainWindow(initialView, wizardStep);
                 MainWindowInstance = win;
                 _window = win;
                 win.Activate();

@@ -38,6 +38,11 @@ jobs:
         -p:WindowsPackageType=None
         -o publish_winui/
 
+    - name: Compress WinUI 3 Release to ZIP
+      shell: pwsh
+      run: |
+        Compress-Archive -Path publish_winui/* -DestinationPath publish_winui/FN_Sync_Plus_v3.0_WinUI3_x64.zip -Force
+
     - name: Publish Legacy WPF Single-File Executable
       run: >
         dotnet publish FNSyncPlus/FNSyncPlus.App/FNSyncPlus.App.csproj
@@ -59,8 +64,8 @@ jobs:
     - name: Upload WinUI 3 Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: FN_Sync_Plus_v3.0_WinUI3
-        path: publish_winui/
+        name: FN_Sync_Plus_v3.0_WinUI3_x64
+        path: publish_winui/FN_Sync_Plus_v3.0_WinUI3_x64.zip
 
     - name: Upload Legacy WPF Artifact
       uses: actions/upload-artifact@v4

@@ -6,8 +6,10 @@
     <RootNamespace>FNSyncPlus.WinUI</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon Condition="Exists('Assets\AppIcon.ico')">Assets\AppIcon.ico</ApplicationIcon>
-    <Platforms>x86;x64;ARM64</Platforms>
-    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-$([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant())</RuntimeIdentifier>
+    <Platform Condition="'$(Platform)' == ''">x64</Platform>
+    <PlatformTarget>x64</PlatformTarget>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishProfile Condition="Exists('Properties\PublishProfiles\win-$(Platform).pubxml')">win-$(Platform).pubxml</PublishProfile>
     <UseWinUI>true</UseWinUI>
     <WinUISDKReferences>false</WinUISDKReferences>
@@ -37,7 +39,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2957" />
-    <PackageReference Include="Microsoft.WindowsAppSDK" Version="*" />
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.6.5" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.0" />
   </ItemGroup>
@@ -51,4 +53,9 @@
     <PublishReadyToRun>False</PublishReadyToRun>
     <PublishTrimmed>False</PublishTrimmed>
   </PropertyGroup>
+
+  <Target Name="EnsureResourcesPri" AfterTargets="Build;Publish">
+    <Copy SourceFiles="$(TargetDir)$(TargetName).pri" DestinationFiles="$(TargetDir)resources.pri" Condition="Exists('$(TargetDir)$(TargetName).pri')" ContinueOnError="true" />
+    <Copy SourceFiles="$(PublishDir)$(TargetName).pri" DestinationFiles="$(PublishDir)resources.pri" Condition="Exists('$(PublishDir)$(TargetName).pri')" ContinueOnError="true" />
+  </Target>
 </Project>
