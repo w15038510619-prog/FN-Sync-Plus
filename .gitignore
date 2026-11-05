@@ -1,0 +1,33 @@
+# Build and intermediate outputs
+[Bb]in/
+[Oo]bj/
+Release_Build/
+[Dd]ebug/
+[Rr]elease/
+
+# Visual Studio / IDE
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vscode/
+.idea/
+
+# Large binaries (Use GitHub Releases for distributing standalone exe)
+*.exe
+*.dll
+*.pdb
+
+# Sensitive and temporary files
+credentials.dat
+*.tmp
+*.bak
+*.log
+.sync_temp_dir/
+
+# OS metadata
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
