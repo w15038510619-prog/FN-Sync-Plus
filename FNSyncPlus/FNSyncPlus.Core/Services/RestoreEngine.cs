@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -40,6 +41,27 @@ namespace FNSyncPlus.Core.Services
         public DateTimeOffset ModTime { get; set; }
     }
 
+    public class DiscoveredBackupPackage
+    {
+        public string PackageName { get; set; } = string.Empty;
+        public string NasFolderUnc { get; set; } = string.Empty;
+        public string OriginalSourceRoot { get; set; } = string.Empty;
+        public int FileCount { get; set; }
+        public long TotalSizeBytes { get; set; }
+        public int LongNameCount { get; set; }
+        public DateTimeOffset LastUpdated { get; set; }
+
+        public string FormattedSize
+        {
+            get
+            {
+                double mb = TotalSizeBytes / (1024.0 * 1024.0);
+                if (mb > 1024) return $"{mb / 1024.0:F2} GB";
+                return $"{mb:F1} MB";
+            }
+        }
+    }
+
     public class RestoreEngine
     {
         private readonly ManifestManager _manifestManager;
@@ -55,6 +77,90 @@ namespace FNSyncPlus.Core.Services
         private void Log(string level, string message)
         {
             LogEmitted?.Invoke(level, $"[{DateTime.Now:HH:mm:ss}] [{level}] {message}");
+        }
+
+        /// <summary>
+        /// 在 NAS 备份根目录下自动发现所有包含清单元数据的备份任务包（完全不依赖原电脑本地配置）
+        /// 例如在 \\server\私人备份 下自动发现【工作资料】、【项目文件】、【照片备份】
+        /// </summary>
+        public async Task<List<DiscoveredBackupPackage>> DiscoverBackupPackagesAsync(string nasBackupRootUnc, CancellationToken cancellationToken = default)
+        {
+            var result = new List<DiscoveredBackupPackage>();
+            if (string.IsNullOrWhiteSpace(nasBackupRootUnc) || !Directory.Exists(nasBackupRootUnc))
+            {
+                return result;
+            }
+
+            await Task.Run(async () =>
+            {
+                string longRoot = PathHelper.EnsureLongPathPrefix(nasBackupRootUnc);
+                var rootDi = new DirectoryInfo(longRoot);
+
+                // 1. 检查根目录本身是否就是一个备份包
+                string rootMeta = Path.Combine(longRoot, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName);
+                string legacyRootMeta = Path.Combine(longRoot, Manifest.LegacyManifestFileName);
+                if (File.Exists(rootMeta) || File.Exists(legacyRootMeta))
+                {
+                    try
+                    {
+                        var m = await _manifestManager.LoadManifestAsync(nasBackupRootUnc, cancellationToken);
+                        if (m.Files.Count > 0)
+                        {
+                            result.Add(new DiscoveredBackupPackage
+                            {
+                                PackageName = rootDi.Name,
+                                NasFolderUnc = nasBackupRootUnc,
+                                OriginalSourceRoot = m.SourceRoot,
+                                FileCount = m.Files.Count,
+                                TotalSizeBytes = m.Files.Sum(f => f.Size),
+                                LongNameCount = m.Files.Count(f => f.IsLongName),
+                                LastUpdated = m.UpdatedAt
+                            });
+                        }
+                    }
+                    catch { }
+                }
+
+                // 2. 扫描根目录下的所有子文件夹
+                try
+                {
+                    foreach (var sub in rootDi.EnumerateDirectories())
+                    {
+                        if (sub.Name.Equals(Manifest.MetadataDirName, StringComparison.OrdinalIgnoreCase) ||
+                            sub.Name.StartsWith("$") ||
+                            sub.Name.Equals(".recycle", StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        string subUnc = PathHelper.RemoveLongPathPrefix(sub.FullName);
+                        string subMeta = Path.Combine(sub.FullName, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName);
+                        string legacySubMeta = Path.Combine(sub.FullName, Manifest.LegacyManifestFileName);
+
+                        if (File.Exists(subMeta) || File.Exists(legacySubMeta))
+                        {
+                            try
+                            {
+                                var m = await _manifestManager.LoadManifestAsync(subUnc, cancellationToken);
+                                result.Add(new DiscoveredBackupPackage
+                                {
+                                    PackageName = sub.Name,
+                                    NasFolderUnc = subUnc,
+                                    OriginalSourceRoot = m.SourceRoot,
+                                    FileCount = m.Files.Count,
+                                    TotalSizeBytes = m.Files.Sum(f => f.Size),
+                                    LongNameCount = m.Files.Count(f => f.IsLongName),
+                                    LastUpdated = m.UpdatedAt
+                                });
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+            }, cancellationToken);
+
+            return result;
         }
 
         /// <summary>
@@ -168,7 +274,6 @@ namespace FNSyncPlus.Core.Services
             var nasDi = new DirectoryInfo(longNas);
             foreach (var fi in nasDi.EnumerateFiles("*", SearchOption.AllDirectories))
             {
-                // 排除 .fnsync 内部元数据及 staging 临时文件
                 string relToNas = PathHelper.NormalizeRelPath(Path.GetRelativePath(longNas, fi.FullName));
                 if (relToNas.StartsWith(Manifest.MetadataDirName + "/", StringComparison.OrdinalIgnoreCase) ||
                     relToNas.Equals(Manifest.MetadataDirName, StringComparison.OrdinalIgnoreCase))

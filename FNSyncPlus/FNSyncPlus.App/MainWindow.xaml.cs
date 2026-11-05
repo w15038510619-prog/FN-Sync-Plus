@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -25,17 +24,13 @@ namespace FNSyncPlus.App
         private readonly ManifestManager _manifestManager;
         private readonly SmbAuthService _smbService;
         private readonly NasDiscoveryService _discoveryService;
-        private readonly SyncEngine _syncEngine;
+        private readonly TaskManager _taskManager;
         private readonly RestoreEngine _restoreEngine;
 
         private WinForms.NotifyIcon? _notifyIcon;
-        private readonly DispatcherTimer _syncTimer;
         private bool _isExplicitExit = false;
 
-        // NAS 文件夹浏览器状态
-        private string _nasBrowserCurrentUnc = "";
-        private string _nasBrowserBaseShare = "";
-        private readonly Stack<string> _nasBrowserHistory = new();
+        private List<DiscoveredBackupPackage> _discoveredPackages = new();
 
         public MainWindow()
         {
@@ -46,21 +41,14 @@ namespace FNSyncPlus.App
             _manifestManager = new ManifestManager();
             _smbService = new SmbAuthService();
             _discoveryService = new NasDiscoveryService();
-            _syncEngine = new SyncEngine(_longNameEngine, _manifestManager, _smbService);
             _restoreEngine = new RestoreEngine(_manifestManager);
 
-            // 增量同步引擎事件挂钩
-            _syncEngine.ProgressChanged += OnSyncProgressChanged;
-            _syncEngine.LogEmitted += OnLogEmitted;
-            _syncEngine.StateChanged += OnSyncStateChanged;
-            _syncEngine.RequestWatcherTriggeredSync += OnWatcherTriggeredSync;
+            // 初始化多任务协调器
+            _taskManager = new TaskManager(_settings, _longNameEngine, _manifestManager, _smbService);
 
-            _restoreEngine.ProgressChanged += OnRestoreProgressChanged;
-            _restoreEngine.LogEmitted += OnLogEmitted;
-
-            // 定时同步器
-            _syncTimer = new DispatcherTimer();
-            _syncTimer.Tick += OnSyncTimerTick;
+            _taskManager.TaskListChanged += () => Dispatcher.InvokeAsync(RefreshTasksUi);
+            _taskManager.TaskStateChanged += _ => Dispatcher.InvokeAsync(RefreshTasksUi);
+            _taskManager.TaskProgressChanged += (_, _) => Dispatcher.InvokeAsync(RefreshTasksUi);
 
             Loaded += MainWindow_Loaded;
             Closing += MainWindow_Closing;
@@ -70,27 +58,24 @@ namespace FNSyncPlus.App
         {
             InitializeTrayIcon();
             LoadUiFromSettings();
+            RefreshTasksUi();
 
-            // 自动加载 DPAPI 加密凭据
+            // 自动加载 DPAPI 本机加密凭据
             var creds = SmbAuthService.LoadCredentials();
             if (creds.HasValue)
             {
-                TxtNasAddress.Text = creds.Value.Server;
-                TxtNasUsername.Text = creds.Value.Username;
-                TxtNasPassword.Password = creds.Value.Password;
-                AppendLog("INFO", $"已从本机安全环境加载加密凭据: {creds.Value.Username}@{creds.Value.Server}");
+                TxtDeviceAddress.Text = creds.Value.Server;
+                TxtDeviceUsername.Text = creds.Value.Username;
+                TxtDevicePassword.Password = creds.Value.Password;
             }
 
-            // 启动异步局域网 NAS 发现
-            _ = RefreshDiscoveryAsync();
+            // 启动异步局域网设备发现
+            _ = RefreshLanDevicesAsync();
 
-            // 如果配置了自动同步，启动定时器和文件监控
-            ApplyAutoSyncSettings();
-
-            // 如果有凭据且指定了 NAS，尝试自动建立后台验证
-            if (!string.IsNullOrEmpty(TxtNasAddress.Text) && !string.IsNullOrEmpty(TxtNasUsername.Text) && !string.IsNullOrEmpty(TxtNasPassword.Password))
+            // 如果有凭据且指定了 NAS，后台自动尝试验证连接
+            if (!string.IsNullOrEmpty(TxtDeviceAddress.Text) && !string.IsNullOrEmpty(TxtDeviceUsername.Text) && !string.IsNullOrEmpty(TxtDevicePassword.Password))
             {
-                _ = AutoConnectOnStartupAsync();
+                _ = AutoConnectNasOnStartupAsync();
             }
         }
 
@@ -98,14 +83,14 @@ namespace FNSyncPlus.App
         {
             _notifyIcon = new WinForms.NotifyIcon
             {
-                Text = "飞牛同步增强版 (FN Sync Plus)",
+                Text = "飞牛同步增强版 (FN Sync Plus) v2.1",
                 Visible = true,
                 Icon = System.Drawing.SystemIcons.Application
             };
 
             var contextMenu = new WinForms.ContextMenuStrip();
             contextMenu.Items.Add("打开主界面", null, (s, e) => ShowWindowFromTray());
-            contextMenu.Items.Add("立即执行同步", null, (s, e) => Dispatcher.InvokeAsync(() => BtnRunSyncNow_Click(this, new RoutedEventArgs())));
+            contextMenu.Items.Add("全部立即备份", null, (s, e) => Dispatcher.InvokeAsync(() => _taskManager.TriggerSyncAll()));
             contextMenu.Items.Add("-");
             contextMenu.Items.Add("完全退出", null, (s, e) => ExitApplication());
 
@@ -125,93 +110,393 @@ namespace FNSyncPlus.App
             _isExplicitExit = true;
             _notifyIcon?.Dispose();
             _notifyIcon = null;
+            _taskManager.Dispose();
             WpfApplication.Current.Shutdown();
         }
 
         private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
-            if (!_isExplicitExit && ChkMinimizeToTray.IsChecked == true)
+            if (!_isExplicitExit && ChkGlobalMinimizeToTray.IsChecked == true)
             {
                 e.Cancel = true;
                 Hide();
-                _notifyIcon?.ShowBalloonTip(1500, "飞牛同步增强版", "程序已最小化到系统托盘，后台持续保持自动增量同步。", WinForms.ToolTipIcon.Info);
+                _notifyIcon?.ShowBalloonTip(1500, "飞牛同步增强版", "程序已最小化到系统托盘，后台持续守护多任务自动增量同步。", WinForms.ToolTipIcon.Info);
             }
             else
             {
-                _syncEngine.PauseOrCancel();
-                _syncEngine.StopWatcher();
+                _taskManager.Dispose();
                 _notifyIcon?.Dispose();
             }
         }
 
-        #region Navigation Handling
+        #region Navigation Tabs
 
-        private void Nav_Checked(object sender, RoutedEventArgs e)
+        private void TabNav_Checked(object sender, RoutedEventArgs e)
         {
-            if (TabDeviceView == null) return;
+            if (ViewTasks == null) return;
 
-            TabDeviceView.Visibility = Visibility.Collapsed;
-            TabTaskView.Visibility = Visibility.Collapsed;
-            TabMonitorView.Visibility = Visibility.Collapsed;
-            TabRestoreView.Visibility = Visibility.Collapsed;
-            TabSettingsView.Visibility = Visibility.Collapsed;
+            ViewTasks.Visibility = Visibility.Collapsed;
+            ViewRestore.Visibility = Visibility.Collapsed;
+            ViewDevice.Visibility = Visibility.Collapsed;
+            ViewSettings.Visibility = Visibility.Collapsed;
 
-            if (NavDevice.IsChecked == true) TabDeviceView.Visibility = Visibility.Visible;
-            else if (NavTask.IsChecked == true) TabTaskView.Visibility = Visibility.Visible;
-            else if (NavMonitor.IsChecked == true) TabMonitorView.Visibility = Visibility.Visible;
-            else if (NavRestore.IsChecked == true) TabRestoreView.Visibility = Visibility.Visible;
-            else if (NavSettings.IsChecked == true) TabSettingsView.Visibility = Visibility.Visible;
+            TabNavTasks.Foreground = (Brush)FindResource("TextMutedBrush");
+            TabNavRestore.Foreground = (Brush)FindResource("TextMutedBrush");
+            TabNavDevice.Foreground = (Brush)FindResource("TextMutedBrush");
+            TabNavSettings.Foreground = (Brush)FindResource("TextMutedBrush");
+
+            if (TabNavTasks.IsChecked == true)
+            {
+                ViewTasks.Visibility = Visibility.Visible;
+                TabNavTasks.Foreground = (Brush)FindResource("TextMainBrush");
+            }
+            else if (TabNavRestore.IsChecked == true)
+            {
+                ViewRestore.Visibility = Visibility.Visible;
+                TabNavRestore.Foreground = (Brush)FindResource("TextMainBrush");
+                // 默认填充 NAS 备份根目录
+                if (string.IsNullOrEmpty(TxtRestoreScanRoot.Text))
+                {
+                    TxtRestoreScanRoot.Text = _settings.PreferredBackupRoot;
+                }
+            }
+            else if (TabNavDevice.IsChecked == true)
+            {
+                ViewDevice.Visibility = Visibility.Visible;
+                TabNavDevice.Foreground = (Brush)FindResource("TextMainBrush");
+            }
+            else if (TabNavSettings.IsChecked == true)
+            {
+                ViewSettings.Visibility = Visibility.Visible;
+                TabNavSettings.Foreground = (Brush)FindResource("TextMainBrush");
+            }
+        }
+
+        private void BorderNasPill_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
+        {
+            TabNavDevice.IsChecked = true;
         }
 
         #endregion
 
-        #region TAB 0: 设备连接与认证
+        #region TAB 1: 任务看板与多任务管理
 
-        private async Task AutoConnectOnStartupAsync()
+        private void RefreshTasksUi()
         {
-            string server = TxtNasAddress.Text.Trim();
-            string user = TxtNasUsername.Text.Trim();
-            string pwd = TxtNasPassword.Password;
+            var tasks = _taskManager.Tasks.ToList();
 
-            AppendLog("INFO", $"正在后台自动验证 NAS 连接: {server} ...");
-            var (ok, msg) = await _smbService.ConnectNasAsync(server, user, pwd);
-            if (ok)
+            TxtStatTotalTasks.Text = tasks.Count.ToString();
+            TxtStatSyncingTasks.Text = tasks.Count(t => t.IsRunning).ToString();
+            TxtStatIdleTasks.Text = tasks.Count(t => t.State == TaskSyncState.Idle || t.State == TaskSyncState.Completed).ToString();
+            TxtStatFailedTasks.Text = tasks.Count(t => t.State == TaskSyncState.Error || t.LastFailedFiles > 0).ToString();
+
+            var lastSync = tasks.Where(t => t.LastSyncTime.HasValue).OrderByDescending(t => t.LastSyncTime).FirstOrDefault();
+            TxtStatLastSyncTime.Text = lastSync?.LastSyncTime.HasValue == true
+                ? lastSync.LastSyncTime.Value.ToString("HH:mm:ss")
+                : "--";
+
+            BorderEmptyTasks.Visibility = tasks.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+            ItemsControlTasks.ItemsSource = null;
+            ItemsControlTasks.ItemsSource = tasks;
+        }
+
+        private void BtnAddFolderWizard_Click(object sender, RoutedEventArgs e)
+        {
+            var wizard = new AddFolderWizardDialog(_settings, _smbService, _taskManager)
             {
-                SetStatusConnected(server, user);
-                AppendLog("INFO", $"NAS 连接验证成功: {server}");
-            }
-            else
+                Owner = this
+            };
+
+            if (wizard.ShowDialog() == true)
             {
-                SetStatusDisconnected($"连接未就绪: {msg}");
-                AppendLog("WARN", $"NAS 自动连接提示: {msg}");
+                RefreshTasksUi();
             }
         }
 
-        private async void BtnConnectNas_Click(object sender, RoutedEventArgs e)
+        private void BtnTaskRunSync_Click(object sender, RoutedEventArgs e)
         {
-            string server = TxtNasAddress.Text.Trim();
-            string user = TxtNasUsername.Text.Trim();
-            string pwd = TxtNasPassword.Password;
-
-            if (string.IsNullOrEmpty(server))
+            if (sender is Button btn && btn.Tag is string taskId)
             {
-                ShowLoginResult(false, "请输入 NAS 的 IP 地址或主机名");
+                _taskManager.TriggerSync(taskId);
+            }
+        }
+
+        private void BtnTaskPause_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button btn && btn.Tag is string taskId)
+            {
+                var task = _taskManager.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+                if (task != null)
+                {
+                    if (task.State == TaskSyncState.Paused)
+                    {
+                        _taskManager.ResumeTask(taskId);
+                    }
+                    else
+                    {
+                        _taskManager.PauseTask(taskId);
+                    }
+                }
+            }
+        }
+
+        private void BtnTaskViewLog_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button btn && btn.Tag is string taskId)
+            {
+                var task = _taskManager.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+                if (task != null)
+                {
+                    var dlg = new TaskLogDialog(task, _taskManager) { Owner = this };
+                    dlg.Show();
+                }
+            }
+        }
+
+        private void BtnTaskDelete_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button btn && btn.Tag is string taskId)
+            {
+                var task = _taskManager.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+                if (task == null) return;
+
+                var confirm = WpfMessageBox.Show(
+                    $"确认从软件中移除同步任务【{task.TaskName}】吗？\n\n安全说明：此操作仅移除当前软件的任务调度，绝对不会删除您电脑本地的文件，也绝不会删除 NAS 中已备份的任何数据。",
+                    "确认移除任务",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question);
+
+                if (confirm == MessageBoxResult.Yes)
+                {
+                    _taskManager.RemoveTask(taskId);
+                }
+            }
+        }
+
+        private void BtnSyncAllTasks_Click(object sender, RoutedEventArgs e)
+        {
+            _taskManager.TriggerSyncAll();
+        }
+
+        private async void BtnPreAnalyzeAll_Click(object sender, RoutedEventArgs e)
+        {
+            if (_taskManager.Tasks.Count == 0)
+            {
+                WpfMessageBox.Show("当前没有同步任务，请先添加文件夹。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
 
-            BtnConnectNas.IsEnabled = false;
-            BtnConnectNas.Content = "⏳ 正在连接认证...";
-            ShowLoginResult(true, "正在连接 NAS SMB 服务并进行身份验证，请稍候...", isPending: true);
+            int totalFiles = 0;
+            int newFiles = 0;
+            int modifiedFiles = 0;
+            int unchangedFiles = 0;
+            int longNames = 0;
+            long totalBytes = 0;
+
+            var syncEngine = new SyncEngine(_longNameEngine, _manifestManager, _smbService);
+
+            foreach (var task in _taskManager.Tasks)
+            {
+                try
+                {
+                    if (Directory.Exists(task.SourceFolder))
+                    {
+                        var res = await syncEngine.AnalyzeSyncAsync(task.SourceFolder, task.DestinationFolder);
+                        totalFiles += res.TotalFiles;
+                        newFiles += res.NewFiles;
+                        modifiedFiles += res.ModifiedFiles;
+                        unchangedFiles += res.UnchangedFiles;
+                        longNames += res.LongNameFiles;
+                        totalBytes += res.TotalSizeBytes;
+                    }
+                }
+                catch { }
+            }
+
+            double mb = totalBytes / (1024.0 * 1024.0);
+            string sizeStr = mb > 1024 ? $"{mb / 1024.0:F2} GB" : $"{mb:F1} MB";
+
+            string msg = $"【全部任务变动预先分析结果】\n" +
+                         $"• 本地受保护总文件数: {totalFiles} 个 ({sizeStr})\n" +
+                         $"• 待上传新增文件: {newFiles} 个\n" +
+                         $"• 待上传已修改文件: {modifiedFiles} 个\n" +
+                         $"• 未修改文件 (将秒级跳过): {unchangedFiles} 个\n" +
+                         $"• 触发长文件名兼容映射: {longNames} 个";
+
+            WpfMessageBox.Show(msg, "全局变动预先分析报告", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        #endregion
+
+        #region TAB 2: 多任务异机恢复中心
+
+        private async void BtnScanRestorePackages_Click(object sender, RoutedEventArgs e)
+        {
+            string rootUnc = TxtRestoreScanRoot.Text.Trim();
+            if (string.IsNullOrEmpty(rootUnc) || !Directory.Exists(rootUnc))
+            {
+                WpfMessageBox.Show("请指定有效的 NAS 备份根目录（如 \\\\192.168.8.120\\私人备份）", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            TxtRestoreGlobalStatus.Text = "正在扫描 NAS 根目录下的备份包...";
+            try
+            {
+                _discoveredPackages = await _restoreEngine.DiscoverBackupPackagesAsync(rootUnc);
+
+                CmbDiscoveredPackages.ItemsSource = null;
+                CmbDiscoveredPackages.ItemsSource = _discoveredPackages.Select(p => p.PackageName).ToList();
+
+                if (_discoveredPackages.Count > 0)
+                {
+                    CmbDiscoveredPackages.SelectedIndex = 0;
+                    TxtRestoreGlobalStatus.Text = $"扫描完成！发现 {_discoveredPackages.Count} 个可用备份任务包，选择即可直接预览并恢复。";
+                }
+                else
+                {
+                    TxtRestoreGlobalStatus.Text = "该目录下未发现包含 .fnsync 元数据清单的备份任务包。";
+                }
+            }
+            catch (Exception ex)
+            {
+                TxtRestoreGlobalStatus.Text = $"扫描异常: {ex.Message}";
+            }
+        }
+
+        private async void CmbDiscoveredPackages_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (CmbDiscoveredPackages.SelectedIndex >= 0 && CmbDiscoveredPackages.SelectedIndex < _discoveredPackages.Count)
+            {
+                var pkg = _discoveredPackages[CmbDiscoveredPackages.SelectedIndex];
+                TxtDiscoveredPackageDetail.Text = $"{pkg.FileCount} 个文件 | {pkg.FormattedSize} | {pkg.LongNameCount} 个超长名 | 上次备份: {pkg.LastUpdated:yyyy-MM-dd HH:mm}";
+
+                // 自动更新本地还原目标子目录
+                TxtRestoreLocalTarget.Text = Path.Combine(@"D:\Restored_Files", pkg.PackageName);
+
+                try
+                {
+                    var preview = await _restoreEngine.PreviewBackupAsync(pkg.NasFolderUnc);
+                    GridRestoreFiles.ItemsSource = preview;
+                }
+                catch { }
+            }
+        }
+
+        private void BtnBrowseRestoreLocal_Click(object sender, RoutedEventArgs e)
+        {
+            using var dialog = new WinForms.FolderBrowserDialog
+            {
+                Description = "选择用于存放恢复文件的本地文件夹",
+                UseDescriptionForTitle = true
+            };
+            if (dialog.ShowDialog() == WinForms.DialogResult.OK)
+            {
+                TxtRestoreLocalTarget.Text = dialog.SelectedPath;
+            }
+        }
+
+        private async void BtnExecuteRestore_Click(object sender, RoutedEventArgs e)
+        {
+            if (CmbDiscoveredPackages.SelectedIndex < 0 || CmbDiscoveredPackages.SelectedIndex >= _discoveredPackages.Count)
+            {
+                WpfMessageBox.Show("请先扫描并选择一个要恢复的备份任务包", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var pkg = _discoveredPackages[CmbDiscoveredPackages.SelectedIndex];
+            string localDest = TxtRestoreLocalTarget.Text.Trim();
+
+            if (string.IsNullOrEmpty(localDest))
+            {
+                WpfMessageBox.Show("请指定本地恢复目标文件夹", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var policy = CmbRestoreConflictPolicy.SelectedIndex switch
+            {
+                1 => ConflictResolution.Overwrite,
+                2 => ConflictResolution.RenameWithTimestamp,
+                _ => ConflictResolution.SkipExisting
+            };
+
+            BtnExecuteRestore.IsEnabled = false;
+            BtnExecuteRestore.Content = "⏳ 正在恢复中...";
 
             try
             {
-                var (success, message) = await _smbService.ConnectNasAsync(server, user, pwd);
-                if (success)
+                _restoreEngine.ProgressChanged += rep =>
                 {
-                    ShowLoginResult(true, $"✅ {message}！已成功建立安全认证会话。您现在可以前往【同步任务】自由浏览并选择 NAS 文件夹。");
-                    SetStatusConnected(server, user);
+                    Dispatcher.InvokeAsync(() =>
+                    {
+                        TxtRestoreGlobalStatus.Text = $"正在恢复 ({rep.RestoredFiles}/{rep.TotalFiles}): {rep.CurrentFile}";
+                        if (rep.TotalFiles > 0)
+                        {
+                            ProgressRestoreGlobal.Value = (double)rep.RestoredFiles / rep.TotalFiles * 100.0;
+                        }
+                    });
+                };
 
-                    if (ChkRememberPassword.IsChecked == true)
+                var report = await _restoreEngine.RunRestoreAsync(pkg.NasFolderUnc, localDest, policy);
+                WpfMessageBox.Show(report.StatusMessage, "恢复完成报告", MessageBoxButton.OK, MessageBoxImage.Information);
+                TxtRestoreGlobalStatus.Text = report.StatusMessage;
+            }
+            catch (Exception ex)
+            {
+                WpfMessageBox.Show($"恢复操作中断: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                BtnExecuteRestore.IsEnabled = true;
+                BtnExecuteRestore.Content = "🚀 开始一键完整还原 (带 SHA-256 校验)";
+            }
+        }
+
+        #endregion
+
+        #region TAB 3: NAS 设备与 SMB 认证
+
+        private async Task AutoConnectNasOnStartupAsync()
+        {
+            string server = TxtDeviceAddress.Text.Trim();
+            string user = TxtDeviceUsername.Text.Trim();
+            string pwd = TxtDevicePassword.Password;
+
+            var (ok, msg) = await _smbService.ConnectNasAsync(server, user, pwd);
+            if (ok)
+            {
+                SetNasOnlineState(true, $"{user} @ {server}");
+            }
+            else
+            {
+                SetNasOnlineState(false, $"未就绪: {msg}");
+            }
+        }
+
+        private async void BtnDeviceLogin_Click(object sender, RoutedEventArgs e)
+        {
+            string server = TxtDeviceAddress.Text.Trim();
+            string user = TxtDeviceUsername.Text.Trim();
+            string pwd = TxtDevicePassword.Password;
+
+            if (string.IsNullOrEmpty(server))
+            {
+                ShowDeviceLoginResult(false, "请输入 NAS 的 IP 地址或主机名");
+                return;
+            }
+
+            BtnDeviceLogin.IsEnabled = false;
+            BtnDeviceLogin.Content = "⏳ 正在认证...";
+
+            try
+            {
+                var (ok, msg) = await _smbService.ConnectNasAsync(server, user, pwd);
+                if (ok)
+                {
+                    ShowDeviceLoginResult(true, $"✅ {msg}！已成功建立安全 SMB 会话。所有同步任务将自动复用该连接。");
+                    SetNasOnlineState(true, $"{user} @ {server}");
+
+                    if (ChkDeviceRemember.IsChecked == true)
                     {
                         SmbAuthService.SaveCredentials(server, user, pwd);
                     }
@@ -221,735 +506,161 @@ namespace FNSyncPlus.App
                 }
                 else
                 {
-                    ShowLoginResult(false, $"❌ 登录失败: {message}");
-                    SetStatusDisconnected("登录失败");
+                    ShowDeviceLoginResult(false, $"❌ 登录失败: {msg}");
+                    SetNasOnlineState(false, "登录失败");
                 }
             }
             finally
             {
-                BtnConnectNas.IsEnabled = true;
-                BtnConnectNas.Content = "🔐 登录并连接 NAS";
+                BtnDeviceLogin.IsEnabled = true;
+                BtnDeviceLogin.Content = "🔐 登录并建立 SMB 认证";
             }
         }
 
-        private void BtnDisconnectNas_Click(object sender, RoutedEventArgs e)
+        private void BtnDeviceDisconnect_Click(object sender, RoutedEventArgs e)
         {
-            SetStatusDisconnected("未连接");
-            ShowLoginResult(true, "已断开本地 NAS 会话连接。");
+            SetNasOnlineState(false, "已断开连接");
+            ShowDeviceLoginResult(true, "已断开本地 NAS 会话连接。");
         }
 
-        private async void BtnRefreshDiscovery_Click(object sender, RoutedEventArgs e)
+        private async void BtnRefreshLanDevices_Click(object sender, RoutedEventArgs e)
         {
-            await RefreshDiscoveryAsync();
+            await RefreshLanDevicesAsync();
         }
 
-        private async Task RefreshDiscoveryAsync()
+        private async Task RefreshLanDevicesAsync()
         {
-            TxtDiscoveryHint.Text = "正在扫描局域网中的 NAS 设备...";
+            TxtDiscoveryStatus.Text = "正在扫描局域网中的飞牛 NAS 设备...";
             try
             {
-                string known = TxtNasAddress.Text.Trim();
-                var devices = await _discoveryService.DiscoverNasDevicesAsync(known);
-                ListDiscoveredDevices.ItemsSource = devices;
-                TxtDiscoveryHint.Text = $"扫描完成，共发现 {devices.Count} 台局域网设备。点击可快速填入。";
+                var devices = await _discoveryService.DiscoverNasDevicesAsync(TxtDeviceAddress.Text.Trim());
+                ListDiscoveredNas.ItemsSource = devices;
+                TxtDiscoveryStatus.Text = $"扫描完成，发现 {devices.Count} 台局域网设备。点击可快速填入。";
             }
             catch (Exception ex)
             {
-                TxtDiscoveryHint.Text = $"扫描出现错误: {ex.Message}";
+                TxtDiscoveryStatus.Text = $"扫描异常: {ex.Message}";
             }
         }
 
-        private void ListDiscoveredDevices_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private void ListDiscoveredNas_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
-            if (ListDiscoveredDevices.SelectedItem is DiscoveredDevice dev)
+            if (ListDiscoveredNas.SelectedItem is DiscoveredDevice dev)
             {
-                TxtNasAddress.Text = dev.IpAddress;
-                AppendLog("INFO", $"已选择发现的设备: {dev.Name} ({dev.IpAddress})");
+                TxtDeviceAddress.Text = dev.IpAddress;
             }
         }
 
-        private void ShowLoginResult(bool success, string message, bool isPending = false)
+        private void ShowDeviceLoginResult(bool ok, string msg)
         {
-            BorderLoginResult.Visibility = Visibility.Visible;
-            if (isPending)
+            BorderDeviceLoginResult.Visibility = Visibility.Visible;
+            if (ok)
             {
-                BorderLoginResult.Background = new SolidColorBrush(WpfColor.FromRgb(241, 245, 249));
-                BorderLoginResult.BorderBrush = new SolidColorBrush(WpfColor.FromRgb(203, 213, 225));
-                TxtLoginResult.Foreground = new SolidColorBrush(WpfColor.FromRgb(15, 23, 42));
-            }
-            else if (success)
-            {
-                BorderLoginResult.Background = new SolidColorBrush(WpfColor.FromRgb(240, 253, 244));
-                BorderLoginResult.BorderBrush = new SolidColorBrush(WpfColor.FromRgb(187, 247, 208));
-                TxtLoginResult.Foreground = new SolidColorBrush(WpfColor.FromRgb(22, 101, 52));
+                BorderDeviceLoginResult.Background = new SolidColorBrush(Color.FromRgb(240, 253, 244));
+                BorderDeviceLoginResult.BorderBrush = new SolidColorBrush(Color.FromRgb(187, 247, 208));
+                TxtDeviceLoginResult.Foreground = new SolidColorBrush(Color.FromRgb(22, 101, 52));
             }
             else
             {
-                BorderLoginResult.Background = new SolidColorBrush(WpfColor.FromRgb(254, 242, 242));
-                BorderLoginResult.BorderBrush = new SolidColorBrush(WpfColor.FromRgb(254, 202, 202));
-                TxtLoginResult.Foreground = new SolidColorBrush(WpfColor.FromRgb(153, 27, 27));
+                BorderDeviceLoginResult.Background = new SolidColorBrush(Color.FromRgb(254, 242, 242));
+                BorderDeviceLoginResult.BorderBrush = new SolidColorBrush(Color.FromRgb(254, 202, 202));
+                TxtDeviceLoginResult.Foreground = new SolidColorBrush(Color.FromRgb(153, 27, 27));
             }
-            TxtLoginResult.Text = message;
+            TxtDeviceLoginResult.Text = msg;
         }
 
-        private void SetStatusConnected(string server, string user)
+        private void SetNasOnlineState(bool online, string detail)
         {
-            StatusDot.Fill = new SolidColorBrush(WpfColor.FromRgb(16, 185, 129)); // Green
-            StatusText.Text = "NAS 已连接";
-            StatusSubText.Text = $"{user} @ {server}";
-        }
-
-        private void SetStatusDisconnected(string reason)
-        {
-            StatusDot.Fill = new SolidColorBrush(WpfColor.FromRgb(245, 158, 11)); // Amber
-            StatusText.Text = "NAS 未连接";
-            StatusSubText.Text = reason;
-        }
-
-        #endregion
-
-        #region TAB 1: 任务配置与 NAS 文件夹浏览器 (重点功能修复)
-
-        private void BtnBrowseLocal_Click(object sender, RoutedEventArgs e)
-        {
-            using var dialog = new WinForms.FolderBrowserDialog
+            if (online)
             {
-                Description = "选择要备份的电脑本地文件夹",
-                UseDescriptionForTitle = true,
-                SelectedPath = Directory.Exists(TxtSourceFolder.Text) ? TxtSourceFolder.Text : @"D:\"
-            };
-            if (dialog.ShowDialog() == WinForms.DialogResult.OK)
-            {
-                TxtSourceFolder.Text = dialog.SelectedPath;
-            }
-        }
-
-        private async void BtnOpenNasBrowser_Click(object sender, RoutedEventArgs e)
-        {
-            string server = TxtNasAddress.Text.Trim();
-            if (string.IsNullOrEmpty(server))
-            {
-                WpfMessageBox.Show("请先在【设备连接】中输入并登录 NAS", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
-                NavDevice.IsChecked = true;
-                return;
-            }
-
-            ModalNasBrowser.Visibility = Visibility.Visible;
-            _nasBrowserHistory.Clear();
-            await LoadNasSharesIntoBrowserAsync(server);
-        }
-
-        private void BtnCloseNasBrowser_Click(object sender, RoutedEventArgs e)
-        {
-            ModalNasBrowser.Visibility = Visibility.Collapsed;
-        }
-
-        private async Task LoadNasSharesIntoBrowserAsync(string server)
-        {
-            _nasBrowserCurrentUnc = $@"\\{server}";
-            _nasBrowserBaseShare = "";
-            TxtNasBrowserCurrentPath.Text = _nasBrowserCurrentUnc;
-            TxtNasBrowserSelectionHint.Text = "正在获取 NAS 共享列表...";
-            TxtNasBrowserPermissionStatus.Text = "";
-
-            try
-            {
-                var shares = await _smbService.EnumerateSharesAsync(server);
-                var items = shares.Select(s => new NasFolderItem
-                {
-                    Name = s.Name,
-                    FullUncPath = s.UncPath,
-                    RelativeSubPath = "",
-                    IsShareRoot = true
-                }).ToList();
-
-                ListNasBrowserItems.ItemsSource = items;
-                TxtNasBrowserSelectionHint.Text = $"找到 {items.Count} 个可用共享。点击选中共享即可在此新建文件夹，或双击进入浏览。";
-            }
-            catch (Exception ex)
-            {
-                TxtNasBrowserSelectionHint.Text = $"获取共享失败: {ex.Message}";
-            }
-        }
-
-        private async void ListNasBrowserItems_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
-        {
-            if (ListNasBrowserItems.SelectedItem is NasFolderItem selected)
-            {
-                _nasBrowserHistory.Push(_nasBrowserCurrentUnc);
-                if (string.IsNullOrEmpty(_nasBrowserBaseShare))
-                {
-                    _nasBrowserBaseShare = selected.FullUncPath;
-                }
-                _nasBrowserCurrentUnc = selected.FullUncPath;
-                TxtNasBrowserCurrentPath.Text = _nasBrowserCurrentUnc;
-                await RefreshNasBrowserFolderAsync();
-            }
-        }
-
-        private void ListNasBrowserItems_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (ListNasBrowserItems.SelectedItem is NasFolderItem selected)
-            {
-                if (string.IsNullOrEmpty(_nasBrowserBaseShare))
-                {
-                    TxtNasBrowserSelectionHint.Text = $"已选中共享: 【{selected.Name}】。可双击进入，也可直接点击【➕ 新建文件夹】在其下创建，或点击【✔ 选择当前文件夹】。";
-                }
-                else
-                {
-                    TxtNasBrowserSelectionHint.Text = $"已选中目录: 【{selected.Name}】。双击可进入子目录，点击【➕ 新建文件夹】可创建同级/子文件夹。";
-                }
-            }
-        }
-
-        private async void BtnNasBrowserUp_Click(object sender, RoutedEventArgs e)
-        {
-            if (_nasBrowserHistory.Count > 0)
-            {
-                _nasBrowserCurrentUnc = _nasBrowserHistory.Pop();
-                if (_nasBrowserCurrentUnc.Count(c => c == '\\') <= 2)
-                {
-                    // 返回到了服务器根层级
-                    await LoadNasSharesIntoBrowserAsync(TxtNasAddress.Text.Trim());
-                    return;
-                }
-                TxtNasBrowserCurrentPath.Text = _nasBrowserCurrentUnc;
-                await RefreshNasBrowserFolderAsync();
+                DotNasStatus.Fill = (Brush)FindResource("SuccessBrush");
+                TxtNasPillText.Text = $"NAS 在线: {detail}";
+                _taskManager.SetNasOnlineState(true);
             }
             else
             {
-                await LoadNasSharesIntoBrowserAsync(TxtNasAddress.Text.Trim());
-            }
-        }
-
-        private async void BtnNasBrowserRefresh_Click(object sender, RoutedEventArgs e)
-        {
-            if (string.IsNullOrEmpty(_nasBrowserBaseShare))
-            {
-                await LoadNasSharesIntoBrowserAsync(TxtNasAddress.Text.Trim());
-            }
-            else
-            {
-                await RefreshNasBrowserFolderAsync();
-            }
-        }
-
-        private async Task RefreshNasBrowserFolderAsync()
-        {
-            TxtNasBrowserSelectionHint.Text = "正在读取文件夹列表...";
-            try
-            {
-                var subFolders = await _smbService.ListSubFoldersAsync(_nasBrowserCurrentUnc, _nasBrowserBaseShare);
-                ListNasBrowserItems.ItemsSource = subFolders;
-                TxtNasBrowserSelectionHint.Text = $"当前目录有 {subFolders.Count} 个子文件夹。可继续双击进入，或点击【✔ 选择当前文件夹】作为备份目标。";
-
-                // 异步探测当前目录的写入权限
-                var (canWrite, _) = await _smbService.TestDirectoryWritePermissionAsync(_nasBrowserCurrentUnc);
-                TxtNasBrowserPermissionStatus.Text = canWrite ? "● 具备写入权限" : "▲ 只读或无写权限";
-                TxtNasBrowserPermissionStatus.Foreground = canWrite
-                    ? new SolidColorBrush(WpfColor.FromRgb(16, 185, 129))
-                    : new SolidColorBrush(WpfColor.FromRgb(239, 68, 68));
-            }
-            catch (Exception ex)
-            {
-                TxtNasBrowserSelectionHint.Text = $"读取目录失败: {ex.Message}";
-            }
-        }
-
-        /// <summary>
-        /// 新建 NAS 文件夹交互彻底修复：
-        /// 1. 选中共享目录时自动识别所选共享，不再弹出“请先双击进入”
-        /// 2. 校验文件夹名称合法性
-        /// 3. 检查 SMB 写入权限
-        /// 4. 创建成功后自动刷新并自动选中新文件夹
-        /// </summary>
-        private async void BtnNasBrowserNewFolder_Click(object sender, RoutedEventArgs e)
-        {
-            string targetParentUnc;
-
-            // 如果当前在服务器根层级
-            if (string.IsNullOrEmpty(_nasBrowserBaseShare))
-            {
-                if (ListNasBrowserItems.SelectedItem is NasFolderItem selectedShare)
-                {
-                    // 用户选中了某个共享目录，自动进入该共享作为基础路径
-                    _nasBrowserBaseShare = selectedShare.FullUncPath;
-                    _nasBrowserCurrentUnc = selectedShare.FullUncPath;
-                    _nasBrowserHistory.Push($@"\\{TxtNasAddress.Text.Trim()}");
-                    TxtNasBrowserCurrentPath.Text = _nasBrowserCurrentUnc;
-                    targetParentUnc = selectedShare.FullUncPath;
-                }
-                else
-                {
-                    WpfMessageBox.Show("请在列表中先单击选中一个共享目录（例如 团队文件-cenco-public），然后再点击【新建文件夹】。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
-                    return;
-                }
-            }
-            else
-            {
-                targetParentUnc = _nasBrowserCurrentUnc;
-            }
-
-            // 创建前检查写入权限
-            var (canWrite, permErr) = await _smbService.TestDirectoryWritePermissionAsync(targetParentUnc);
-            if (!canWrite)
-            {
-                WpfMessageBox.Show(permErr, "权限不足", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            var dlg = new InputFolderDialog { Owner = this };
-            if (dlg.ShowDialog() == true)
-            {
-                string folderName = dlg.FolderName;
-                try
-                {
-                    var created = await _smbService.CreateSubFolderAsync(targetParentUnc, folderName, _nasBrowserBaseShare);
-                    AppendLog("INFO", $"在 NAS 上成功新建文件夹: {created.FullUncPath}");
-
-                    await RefreshNasBrowserFolderAsync();
-
-                    // 自动选中新创建的文件夹
-                    if (ListNasBrowserItems.ItemsSource is List<NasFolderItem> items)
-                    {
-                        var createdItem = items.FirstOrDefault(i => i.Name.Equals(created.Name, StringComparison.OrdinalIgnoreCase));
-                        if (createdItem != null)
-                        {
-                            ListNasBrowserItems.SelectedItem = createdItem;
-                            ListNasBrowserItems.ScrollIntoView(createdItem);
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    WpfMessageBox.Show($"新建文件夹失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
-                }
-            }
-        }
-
-        private void BtnSelectNasBrowserFolder_Click(object sender, RoutedEventArgs e)
-        {
-            if (string.IsNullOrEmpty(_nasBrowserBaseShare))
-            {
-                if (ListNasBrowserItems.SelectedItem is NasFolderItem sel)
-                {
-                    TxtNasTargetUnc.Text = sel.FullUncPath;
-                    ModalNasBrowser.Visibility = Visibility.Collapsed;
-                    AppendLog("INFO", $"已选择 NAS 备份目标共享: {TxtNasTargetUnc.Text}");
-                    return;
-                }
-                WpfMessageBox.Show("请在列表中选中一个 NAS 共享文件夹作为备份位置", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
-
-            // 如果在子目录层级中用户选中了某个子文件夹，优先使用所选子项；否则使用当前所在目录
-            if (ListNasBrowserItems.SelectedItem is NasFolderItem selSub)
-            {
-                TxtNasTargetUnc.Text = selSub.FullUncPath;
-            }
-            else
-            {
-                TxtNasTargetUnc.Text = _nasBrowserCurrentUnc;
-            }
-
-            ModalNasBrowser.Visibility = Visibility.Collapsed;
-            AppendLog("INFO", $"已选择 NAS 备份目标目录: {TxtNasTargetUnc.Text}");
-        }
-
-        private async void BtnAnalyzeSync_Click(object sender, RoutedEventArgs e)
-        {
-            string src = TxtSourceFolder.Text.Trim();
-            string dest = TxtNasTargetUnc.Text.Trim();
-
-            if (!Directory.Exists(src))
-            {
-                WpfMessageBox.Show("本地源文件夹不存在，请检查配置", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-            if (string.IsNullOrWhiteSpace(dest))
-            {
-                WpfMessageBox.Show("请先选择 NAS 备份目标目录", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            BtnAnalyzeSync.IsEnabled = false;
-            BtnAnalyzeSync.Content = "⏳ 分析中...";
-
-            try
-            {
-                var analysis = await _syncEngine.AnalyzeSyncAsync(src, dest);
-                BorderPreSyncAnalysis.Visibility = Visibility.Visible;
-
-                TxtAnalysisTotalFiles.Text = analysis.TotalFiles.ToString();
-                TxtAnalysisNewFiles.Text = analysis.NewFiles.ToString();
-                TxtAnalysisModifiedFiles.Text = analysis.ModifiedFiles.ToString();
-                TxtAnalysisUnchangedFiles.Text = analysis.UnchangedFiles.ToString();
-                TxtAnalysisLongNameFiles.Text = analysis.LongNameFiles.ToString();
-
-                double sizeMb = analysis.TotalSizeBytes / (1024.0 * 1024.0);
-                string sizeStr = sizeMb > 1024 ? $"{sizeMb / 1024.0:F2} GB" : $"{sizeMb:F2} MB";
-
-                string detail = $"文件总体积: {sizeStr}。待增量上传/更新: {analysis.NewFiles + analysis.ModifiedFiles} 个文件，将跳过 {analysis.UnchangedFiles} 个未修改文件。";
-                if (analysis.LongNameFiles > 0)
-                {
-                    detail += $"\n其中 {analysis.LongNameFiles} 个文件触发长文件名兼容映射机制，将自动无损存储。";
-                }
-                TxtAnalysisDetail.Text = detail;
-                AppendLog("INFO", $"[变动分析完成] {detail}");
-            }
-            catch (Exception ex)
-            {
-                WpfMessageBox.Show($"分析失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-            finally
-            {
-                BtnAnalyzeSync.IsEnabled = true;
-                BtnAnalyzeSync.Content = "📊 分析变动";
-            }
-        }
-
-        private void BtnSaveSettings_Click(object sender, RoutedEventArgs e)
-        {
-            _settings.SourceFolder = TxtSourceFolder.Text.Trim();
-            _settings.TargetShare = TxtNasTargetUnc.Text.Trim();
-            _settings.RealtimeWatchEnabled = ChkRealtimeWatch.IsChecked == true;
-            _settings.AutoSyncEnabled = ChkAutoInterval.IsChecked == true;
-            _settings.SyncIntervalMinutes = GetIntervalMinutesFromComboBox();
-            _settings.StartWithWindows = ChkStartWithWindows.IsChecked == true;
-            _settings.MinimizeToTray = ChkMinimizeToTray.IsChecked == true;
-            _settings.Save();
-
-            ApplyAutoSyncSettings();
-            WpfMessageBox.Show("配置已成功保存！", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
-        }
-
-        private int GetIntervalMinutesFromComboBox() => CmbIntervalMinutes.SelectedIndex switch
-        {
-            0 => 1,
-            1 => 5,
-            2 => 15,
-            3 => 30,
-            4 => 60,
-            _ => 5
-        };
-
-        private void ApplyAutoSyncSettings()
-        {
-            // 实时监控
-            if (_settings.RealtimeWatchEnabled && Directory.Exists(_settings.SourceFolder))
-            {
-                _syncEngine.StartWatcher(_settings.SourceFolder, _settings.TargetShare);
-            }
-            else
-            {
-                _syncEngine.StopWatcher();
-            }
-
-            // 定时轮询
-            if (_settings.AutoSyncEnabled)
-            {
-                _syncTimer.Interval = TimeSpan.FromMinutes(_settings.SyncIntervalMinutes);
-                _syncTimer.Start();
-            }
-            else
-            {
-                _syncTimer.Stop();
+                DotNasStatus.Fill = (Brush)FindResource("WarningBrush");
+                TxtNasPillText.Text = $"NAS 未连接: {detail}";
+                _taskManager.SetNasOnlineState(false);
             }
         }
 
         #endregion
 
-        #region TAB 2: 同步监控与运行
+        #region TAB 4: 全局设置
 
-        private async void BtnRunSyncNow_Click(object sender, RoutedEventArgs e)
-        {
-            string src = TxtSourceFolder.Text.Trim();
-            string dest = TxtNasTargetUnc.Text.Trim();
-
-            if (!Directory.Exists(src))
-            {
-                WpfMessageBox.Show("本地源文件夹不存在，请检查配置", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
-                NavTask.IsChecked = true;
-                return;
-            }
-            if (string.IsNullOrWhiteSpace(dest))
-            {
-                WpfMessageBox.Show("请先选择 NAS 备份目标目录", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
-                NavTask.IsChecked = true;
-                return;
-            }
-
-            // 检查源与目标路径是否相同或相互嵌套
-            if (PathHelper.ArePathsSameOrNested(src, dest, out string reason))
-            {
-                WpfMessageBox.Show(reason, "安全阻止", MessageBoxButton.OK, MessageBoxImage.Error);
-                return;
-            }
-
-            // 切换到监控视图
-            NavMonitor.IsChecked = true;
-            BtnPauseSync.Content = "⏸ 暂停/取消";
-
-            try
-            {
-                await _syncEngine.RunSyncAsync(src, dest);
-                ListFailedItems.ItemsSource = null;
-                ListFailedItems.ItemsSource = _syncEngine.FailedItems;
-            }
-            catch (Exception ex)
-            {
-                AppendLog("ERROR", $"同步过程异常: {ex.Message}");
-            }
-        }
-
-        private void BtnPauseSync_Click(object sender, RoutedEventArgs e)
-        {
-            _syncEngine.PauseOrCancel();
-            BtnPauseSync.Content = "已暂停";
-        }
-
-        private void BtnClearLog_Click(object sender, RoutedEventArgs e)
-        {
-            TxtRealtimeLog.Clear();
-        }
-
-        private void OnSyncProgressChanged(SyncProgressReport rep)
-        {
-            Dispatcher.InvokeAsync(() =>
-            {
-                TxtMetricTotal.Text = rep.TotalFiles.ToString();
-                TxtMetricUploaded.Text = rep.UploadedFiles.ToString();
-                TxtMetricUnchanged.Text = rep.UnchangedFiles.ToString();
-                TxtMetricLongNames.Text = rep.LongNameFiles.ToString();
-                TxtMetricFailed.Text = rep.FailedFiles.ToString();
-
-                TxtCurrentSyncStatus.Text = $"状态: {rep.State} ({rep.ScannedFiles}/{rep.TotalFiles})";
-                TxtCurrentSyncFile.Text = string.IsNullOrEmpty(rep.CurrentFile) ? "就绪" : $"当前: {rep.CurrentFile}";
-
-                if (rep.TotalFiles > 0)
-                {
-                    ProgressSync.Value = (double)rep.ScannedFiles / rep.TotalFiles * 100.0;
-                }
-
-                if (rep.SpeedBytesPerSec > 0)
-                {
-                    double mbPerSec = rep.SpeedBytesPerSec / (1024.0 * 1024.0);
-                    TxtTransferSpeed.Text = $"{mbPerSec:F2} MB/s";
-                }
-                else
-                {
-                    TxtTransferSpeed.Text = "0 KB/s";
-                }
-            });
-        }
-
-        private void OnSyncStateChanged(SyncState state, string desc)
-        {
-            Dispatcher.InvokeAsync(() =>
-            {
-                TxtCurrentSyncStatus.Text = $"状态: {desc}";
-            });
-        }
-
-        private void OnLogEmitted(string level, string msg)
-        {
-            Dispatcher.InvokeAsync(() =>
-            {
-                AppendLog(level, msg);
-            });
-        }
-
-        private void AppendLog(string level, string msg)
-        {
-            if (TxtRealtimeLog.Text.Length > 200000)
-            {
-                TxtRealtimeLog.Text = TxtRealtimeLog.Text.Substring(50000);
-            }
-            TxtRealtimeLog.AppendText(msg + "\r\n");
-            TxtRealtimeLog.ScrollToEnd();
-        }
-
-        private void OnWatcherTriggeredSync()
-        {
-            Dispatcher.InvokeAsync(() =>
-            {
-                AppendLog("INFO", "[文件变动实时检测] 正在自动触发增量同步...");
-                BtnRunSyncNow_Click(this, new RoutedEventArgs());
-            });
-        }
-
-        private void OnSyncTimerTick(object? sender, EventArgs e)
-        {
-            if (_syncEngine.CurrentState == SyncState.Idle || _syncEngine.CurrentState == SyncState.Completed)
-            {
-                AppendLog("INFO", "[定时自动轮询] 触发例行增量备份检查...");
-                BtnRunSyncNow_Click(this, new RoutedEventArgs());
-            }
-        }
-
-        #endregion
-
-        #region TAB 3: 恢复中心 (异机恢复与完整性校验)
-
-        private void BtnBrowseRestoreLocal_Click(object sender, RoutedEventArgs e)
-        {
-            using var dialog = new WinForms.FolderBrowserDialog
-            {
-                Description = "选择用于恢复文件的本地文件夹",
-                UseDescriptionForTitle = true
-            };
-            if (dialog.ShowDialog() == WinForms.DialogResult.OK)
-            {
-                TxtRestoreLocalDest.Text = dialog.SelectedPath;
-            }
-        }
-
-        private async void BtnPreviewRestore_Click(object sender, RoutedEventArgs e)
-        {
-            string nasPath = TxtRestoreNasPath.Text.Trim();
-            if (string.IsNullOrEmpty(nasPath) || !Directory.Exists(nasPath))
-            {
-                WpfMessageBox.Show("请指定有效的 NAS 备份目录（如 \\\\192.168.1.100\\backup）", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            try
-            {
-                TxtRestoreStatus.Text = "正在读取 NAS 备份元数据清单 (.fnsync/manifest.json)...";
-                var items = await _restoreEngine.PreviewBackupAsync(nasPath);
-                GridRestorePreview.ItemsSource = items;
-                TxtRestoreStatus.Text = $"清单读取成功！共包含 {items.Count} 个文件记录，其中 {items.Count(i => i.IsLongName)} 个超长文件名映射。点击【开始一键完整恢复】可无损还原。";
-            }
-            catch (Exception ex)
-            {
-                TxtRestoreStatus.Text = $"读取清单失败: {ex.Message}";
-                WpfMessageBox.Show($"读取备份元数据出现错误: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        }
-
-        private async void BtnStartRestore_Click(object sender, RoutedEventArgs e)
-        {
-            string nas = TxtRestoreNasPath.Text.Trim();
-            string local = TxtRestoreLocalDest.Text.Trim();
-
-            if (!Directory.Exists(nas))
-            {
-                WpfMessageBox.Show("NAS 备份目录无法访问", "错误", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-            if (string.IsNullOrEmpty(local))
-            {
-                WpfMessageBox.Show("请选择本地恢复目标文件夹", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            if (PathHelper.ArePathsSameOrNested(nas, local, out string nestErr))
-            {
-                WpfMessageBox.Show(nestErr, "安全阻止", MessageBoxButton.OK, MessageBoxImage.Error);
-                return;
-            }
-
-            var policy = CmbConflictPolicy.SelectedIndex switch
-            {
-                1 => ConflictResolution.Overwrite,
-                2 => ConflictResolution.RenameWithTimestamp,
-                _ => ConflictResolution.SkipExisting
-            };
-
-            BtnStartRestore.IsEnabled = false;
-            BtnStartRestore.Content = "⏳ 正在恢复中...";
-
-            try
-            {
-                var report = await _restoreEngine.RunRestoreAsync(nas, local, policy);
-                WpfMessageBox.Show(report.StatusMessage, "恢复完成报告", MessageBoxButton.OK, MessageBoxImage.Information);
-            }
-            catch (Exception ex)
-            {
-                WpfMessageBox.Show($"恢复操作中断: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-            finally
-            {
-                BtnStartRestore.IsEnabled = true;
-                BtnStartRestore.Content = "🚀 开始一键完整恢复";
-            }
-        }
-
-        private void OnRestoreProgressChanged(RestoreProgressReport rep)
-        {
-            Dispatcher.InvokeAsync(() =>
-            {
-                TxtRestoreStatus.Text = $"正在恢复 ({rep.RestoredFiles}/{rep.TotalFiles}): {rep.CurrentFile}";
-                if (rep.TotalFiles > 0)
-                {
-                    ProgressRestore.Value = (double)rep.RestoredFiles / rep.TotalFiles * 100.0;
-                }
-            });
-        }
-
-        #endregion
-
-        #region TAB 4: 设置与重试
-
-        private void BtnRetryFailed_Click(object sender, RoutedEventArgs e)
-        {
-            if (_syncEngine.FailedItems.Count == 0)
-            {
-                WpfMessageBox.Show("当前没有失败的文件项目", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
-
-            AppendLog("INFO", "正在重试失败的文件项目...");
-            BtnRunSyncNow_Click(this, new RoutedEventArgs());
-        }
-
-        private void BtnClearCredentials_Click(object sender, RoutedEventArgs e)
+        private void BtnClearSavedCredentials_Click(object sender, RoutedEventArgs e)
         {
             if (WpfMessageBox.Show("确认清除本机保存的 NAS 密码凭据吗？", "确认", MessageBoxButton.YesNo, MessageBoxImage.Question) == MessageBoxResult.Yes)
             {
                 SmbAuthService.ClearSavedCredentials();
-                TxtNasPassword.Clear();
+                TxtDevicePassword.Clear();
                 WpfMessageBox.Show("已成功清除本机保存的凭据", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
             }
         }
 
-        private void BtnExportLog_Click(object sender, RoutedEventArgs e)
+        private void BtnSaveGlobalSettings_Click(object sender, RoutedEventArgs e)
         {
-            using var sfd = new WinForms.SaveFileDialog
+            _settings.StartWithWindows = ChkGlobalAutoStart.IsChecked == true;
+            _settings.MinimizeToTray = ChkGlobalMinimizeToTray.IsChecked == true;
+            _settings.MaxConcurrentSyncs = CmbMaxConcurrent.SelectedIndex switch
             {
-                Filter = "文本日志文件 (*.txt)|*.txt",
-                FileName = $"FN_Sync_Log_{DateTime.Now:yyyyMMdd_HHmmss}.txt"
+                0 => 1,
+                1 => 2,
+                2 => 3,
+                3 => 4,
+                _ => 2
             };
-            if (sfd.ShowDialog() == WinForms.DialogResult.OK)
+            _settings.Save();
+            WpfMessageBox.Show("全局设置已成功保存！", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        private void BtnThemeToggle_Click(object sender, RoutedEventArgs e)
+        {
+            bool isDark = _settings.AppTheme.Equals("Dark", StringComparison.OrdinalIgnoreCase);
+            _settings.AppTheme = isDark ? "Light" : "Dark";
+            _settings.Save();
+            ApplyAppTheme(_settings.AppTheme);
+        }
+
+        private void ApplyAppTheme(string theme)
+        {
+            bool isDark = theme.Equals("Dark", StringComparison.OrdinalIgnoreCase);
+            BtnThemeToggle.Content = isDark ? "🌙" : "☀️";
+
+            if (isDark)
             {
-                File.WriteAllText(sfd.FileName, TxtRealtimeLog.Text, System.Text.Encoding.UTF8);
-                WpfMessageBox.Show("日志导出成功！", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                Resources["AppBgBrush"] = new SolidColorBrush(Color.FromRgb(15, 23, 42));       // #0F172A
+                Resources["HeaderBgBrush"] = new SolidColorBrush(Color.FromRgb(30, 41, 59));     // #1E293B
+                Resources["CardBgBrush"] = new SolidColorBrush(Color.FromRgb(30, 41, 59));       // #1E293B
+                Resources["CardBorderBrush"] = new SolidColorBrush(Color.FromRgb(51, 65, 85));   // #334155
+                Resources["TextMainBrush"] = new SolidColorBrush(Color.FromRgb(248, 250, 252));   // #F8FAFC
+                Resources["TextMutedBrush"] = new SolidColorBrush(Color.FromRgb(148, 163, 184)); // #94A3B8
+            }
+            else
+            {
+                Resources["AppBgBrush"] = new SolidColorBrush(Color.FromRgb(243, 244, 246));     // #F3F4F6
+                Resources["HeaderBgBrush"] = new SolidColorBrush(Color.FromRgb(255, 255, 255));
+                Resources["CardBgBrush"] = new SolidColorBrush(Color.FromRgb(255, 255, 255));
+                Resources["CardBorderBrush"] = new SolidColorBrush(Color.FromRgb(229, 231, 235)); // #E5E7EB
+                Resources["TextMainBrush"] = new SolidColorBrush(Color.FromRgb(15, 23, 42));      // #0F172A
+                Resources["TextMutedBrush"] = new SolidColorBrush(Color.FromRgb(100, 116, 139));  // #64748B
             }
         }
 
         private void LoadUiFromSettings()
         {
-            TxtNasAddress.Text = _settings.NasServer;
-            TxtNasUsername.Text = _settings.Username;
-            ChkRememberPassword.IsChecked = _settings.RememberCredentials;
-            TxtSourceFolder.Text = _settings.SourceFolder;
-            TxtNasTargetUnc.Text = _settings.TargetShare;
-            TxtRestoreNasPath.Text = _settings.TargetShare;
-
-            ChkRealtimeWatch.IsChecked = _settings.RealtimeWatchEnabled;
-            ChkAutoInterval.IsChecked = _settings.AutoSyncEnabled;
-            ChkStartWithWindows.IsChecked = _settings.StartWithWindows;
-            ChkMinimizeToTray.IsChecked = _settings.MinimizeToTray;
-
-            CmbIntervalMinutes.SelectedIndex = _settings.SyncIntervalMinutes switch
+            ChkGlobalAutoStart.IsChecked = _settings.StartWithWindows;
+            ChkGlobalMinimizeToTray.IsChecked = _settings.MinimizeToTray;
+            CmbMaxConcurrent.SelectedIndex = _settings.MaxConcurrentSyncs switch
             {
                 1 => 0,
-                5 => 1,
-                15 => 2,
-                30 => 3,
-                60 => 4,
+                2 => 1,
+                3 => 2,
+                4 => 3,
                 _ => 1
             };
+            ApplyAppTheme(_settings.AppTheme);
         }
 
         #endregion

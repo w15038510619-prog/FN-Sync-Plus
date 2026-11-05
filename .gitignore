@@ -25,6 +25,9 @@ credentials.dat
 *.bak
 *.log
 .sync_temp_dir/
+FN_Sync_Test/.fnsync/
+FN_Sync_Test/_FN_LONG_*
+v2.1_ui_screenshot.png
 
 # OS metadata
 Thumbs.db

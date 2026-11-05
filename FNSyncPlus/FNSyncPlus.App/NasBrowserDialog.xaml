@@ -1,0 +1,114 @@
+<Window x:Class="FNSyncPlus.App.NasBrowserDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="选择 NAS 文件夹 - 飞牛同步增强版"
+        Height="620" Width="820"
+        MinHeight="500" MinWidth="680"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource AppBgBrush}"
+        FontFamily="Microsoft YaHei UI, Segoe UI Variable, sans-serif">
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- HEADER -->
+        <Grid Grid.Row="0" Margin="0,0,0,12">
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <Path Data="{StaticResource GeoCloud}" Fill="{StaticResource PrimaryAccentBrush}" Width="20" Height="20" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                <TextBlock Text="浏览与选择 NAS 文件夹" FontSize="17" FontWeight="Bold" Foreground="{StaticResource TextMainBrush}"/>
+                <Border x:Name="BadgePermission" Background="#DCFCE7" CornerRadius="10" Padding="8,2" Margin="14,0,0,0" VerticalAlignment="Center">
+                    <TextBlock x:Name="TxtPermissionStatus" Text="● 正在检测权限" FontSize="11" Foreground="#15803D" FontWeight="Medium"/>
+                </Border>
+            </StackPanel>
+            <Button Content="✕" Click="BtnCancel_Click" Style="{StaticResource FluentIconBtn}" HorizontalAlignment="Right" Width="28" Height="28"/>
+        </Grid>
+
+        <!-- CATEGORY FILTER CHIPS -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
+            <RadioButton x:Name="RadioFilterAll" Content="全部共享" IsChecked="True" Checked="FilterRadio_Checked" Margin="0,0,12,0" FontSize="12" FontWeight="Medium"/>
+            <RadioButton x:Name="RadioFilterPersonal" Content="👤 仅看私人空间 (推荐)" Checked="FilterRadio_Checked" Margin="0,0,12,0" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource PrimaryAccentBrush}"/>
+            <RadioButton x:Name="RadioFilterTeam" Content="👥 团队共享文件" Checked="FilterRadio_Checked" FontSize="12" FontWeight="Medium"/>
+        </StackPanel>
+
+        <!-- NAVIGATION & SEARCH BAR -->
+        <Grid Grid.Row="2" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="180"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <Button Content="⬆ 返回上一级" Click="BtnNasBrowserUp_Click" Style="{StaticResource FluentSecondaryBtn}" Grid.Column="0" Margin="0,0,6,0" Height="32"/>
+            <Button Content="🔄 刷新" Click="BtnNasBrowserRefresh_Click" Style="{StaticResource FluentSecondaryBtn}" Grid.Column="1" Margin="0,0,6,0" Height="32"/>
+            <TextBox x:Name="TxtNasBrowserCurrentPath" Text="\\" Grid.Column="2" IsReadOnly="True" Background="#FFFFFF" Height="32" Margin="0,0,8,0"/>
+
+            <!-- Realtime Search Box -->
+            <Grid Grid.Column="3" Margin="0,0,8,0">
+                <TextBox x:Name="TxtSearchBox" Height="32" Padding="26,6,8,6" TextChanged="TxtSearchBox_TextChanged"/>
+                <Path Data="{StaticResource GeoSearch}" Fill="#94A3B8" Width="14" Height="14" Stretch="Uniform" VerticalAlignment="Center" HorizontalAlignment="Left" Margin="8,0,0,0" IsHitTestVisible="False"/>
+            </Grid>
+
+            <Button Content="➕ 新建文件夹" Click="BtnNasBrowserNewFolder_Click" Style="{StaticResource FluentPrimaryBtn}" Grid.Column="4" Height="32"/>
+        </Grid>
+
+        <!-- FOLDER LIST -->
+        <Border Grid.Row="3" Style="{StaticResource FluentCard}" Padding="4">
+            <ListBox x:Name="ListNasBrowserItems" BorderThickness="0" Background="Transparent"
+                     MouseDoubleClick="ListNasBrowserItems_MouseDoubleClick" SelectionChanged="ListNasBrowserItems_SelectionChanged">
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Border Padding="10,8" Margin="1" Background="Transparent" CornerRadius="6">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <Path Data="{StaticResource GeoFolder}" Fill="#38BDF8" Width="20" Height="20" Stretch="Uniform" Grid.Column="0" Margin="0,0,12,0" VerticalAlignment="Center"/>
+
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding Name}" FontWeight="Bold" FontSize="13" Foreground="{StaticResource TextMainBrush}"/>
+                                    <TextBlock Text="{Binding FullUncPath}" Foreground="{StaticResource TextSubtleBrush}" FontSize="11" Margin="0,2,0,0"/>
+                                </StackPanel>
+
+                                <Border Grid.Column="2" Background="#F1F5F9" CornerRadius="4" Padding="6,2" Margin="10,0" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding DisplayCategory}" Foreground="{StaticResource TextMutedBrush}" FontSize="11"/>
+                                </Border>
+
+                                <StackPanel Grid.Column="3" VerticalAlignment="Center" HorizontalAlignment="Right">
+                                    <TextBlock Text="双击进入" Foreground="{StaticResource PrimaryAccentBrush}" FontSize="11" HorizontalAlignment="Right"/>
+                                    <TextBlock Text="{Binding LastModified, StringFormat='{}修改: {0:yyyy-MM-dd}'}" Foreground="{StaticResource TextSubtleBrush}" FontSize="10" Margin="0,2,0,0"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Border>
+
+        <!-- GUIDANCE CALLOUT (IF NO PERSONAL SHARE) -->
+        <Border x:Name="BorderPersonalGuidance" Grid.Row="4" Background="#EFF6FF" BorderBrush="#BFDBFE" BorderThickness="1" CornerRadius="6" Padding="12,8" Margin="0,8,0,0" Visibility="Collapsed">
+            <TextBlock x:Name="TxtPersonalGuidance" Text="" FontSize="11" Foreground="#1E40AF" TextWrapping="Wrap"/>
+        </Border>
+
+        <!-- BOTTOM ACTIONS -->
+        <Grid Grid.Row="5" Margin="0,14,0,0">
+            <TextBlock x:Name="TxtNasBrowserSelectionHint" Text="提示: 选中或双击进入文件夹，然后点击【选择当前文件夹】确认" FontSize="12" Foreground="{StaticResource TextMutedBrush}" VerticalAlignment="Center"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="取消" Click="BtnCancel_Click" Style="{StaticResource FluentSecondaryBtn}" Width="80" Height="36"/>
+                <Button Content="✔ 选择当前文件夹" Click="BtnSelectFolder_Click" Style="{StaticResource FluentPrimaryBtn}" Margin="10,0,0,0" Width="150" Height="36"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

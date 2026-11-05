@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
@@ -36,6 +37,11 @@ namespace FNSyncPlus.Tests
                 await TestEmptyDirectoryRestorationAsync();
                 await TestEndToEndIncrementalSyncAndRestoreAsync();
                 await TestSyncWithRealTestFilesAsync();
+                TestMultiTaskModelAndSettingsMigration();
+                TestPersonalSpaceAndCategorizedShares();
+                await TestAutoPlanTargetSubFolderAndDeduplicationAsync();
+                await TestTaskManagerConcurrencyAndMultiTaskIsolationAsync();
+                await TestRestoreEngineDiscoverBackupPackagesAsync();
             }
             catch (Exception ex)
             {
@@ -606,6 +612,292 @@ namespace FNSyncPlus.Tests
                 }
                 catch { }
             }
+        }
+        static void TestMultiTaskModelAndSettingsMigration()
+        {
+            Console.WriteLine("\n--- 15. 多任务数据模型与旧版单任务配置迁移测试 ---");
+            var task = new SyncTask
+            {
+                TaskId = "task_test_101",
+                TaskName = "工程图纸",
+                SourceFolder = @"D:\Projects\CAD",
+                NasDeviceId = "192.168.8.120",
+                DestinationRoot = @"\\192.168.8.120\home",
+                DestinationFolder = @"\\192.168.8.120\home\工程图纸",
+                AutoSyncEnabled = true,
+                RealtimeWatchEnabled = true,
+                IntervalMinutes = 15,
+                LastSyncStatus = "待同步"
+            };
+
+            var settings = new AppSettings();
+            settings.Tasks.Add(task);
+            settings.PreferredBackupRoot = @"\\192.168.8.120\home";
+            settings.MaxConcurrentSyncs = 3;
+            settings.AppTheme = "Dark";
+
+            string json = settings.ToJson();
+            var deserialized = AppSettings.FromJson(json);
+
+            Assert(deserialized.Tasks.Count == 1, "多任务模型序列化并正确反序列化");
+            Assert(deserialized.Tasks[0].TaskName == "工程图纸", "任务名称正确还原");
+            Assert(deserialized.Tasks[0].DestinationFolder == @"\\192.168.8.120\home\工程图纸", "NAS目标路径正确还原");
+            Assert(deserialized.MaxConcurrentSyncs == 3, "并发任务数参数正确保留");
+            Assert(deserialized.AppTheme == "Dark", "应用主题正确保留");
+
+            // 模拟 v1.0/v2.0 遗留配置迁移
+            string legacyJson = @"{
+                ""NasServer"": ""192.168.8.120"",
+                ""Username"": ""admin"",
+                ""SourceFolder"": ""D:\\重要财务数据"",
+                ""TargetShare"": ""\\\\192.168.8.120\\团队文件-cenco-public\\财务"",
+                ""AutoSyncEnabled"": true,
+                ""SyncIntervalMinutes"": 10,
+                ""RealtimeWatchEnabled"": true
+            }";
+
+            var legacySettings = AppSettings.FromJson(legacyJson);
+            bool migrated = AppSettings.MigrateLegacySettings(legacySettings);
+            Assert(migrated, "成功检测并触发旧版单任务配置自动迁移");
+            Assert(legacySettings.Tasks.Count == 1, "迁移后自动生成任务列表项");
+            Assert(legacySettings.Tasks[0].SourceFolder == @"D:\重要财务数据", "旧版源目录正确迁移为任务源目录");
+            Assert(legacySettings.Tasks[0].TaskName == "重要财务数据", "根据源目录自动推导出有意义的任务名称");
+            Assert(legacySettings.Tasks[0].DestinationFolder == @"\\192.168.8.120\团队文件-cenco-public\财务", "旧版目标共享正确迁移");
+            Assert(legacySettings.Tasks[0].IntervalMinutes == 10, "旧版同步间隔参数正确继承");
+        }
+
+        static void TestPersonalSpaceAndCategorizedShares()
+        {
+            Console.WriteLine("\n--- 16. NAS 私人空间 (我的文件) 与团队共享分类及优先级测试 ---");
+
+            Assert(SmbAuthService.CategorizeShare("admin", "admin") == NasShareCategory.PersonalSpace, "同名用户名共享(admin)识别为私人空间");
+            Assert(SmbAuthService.CategorizeShare("cenco", "cenco") == NasShareCategory.PersonalSpace, "用户名同名共享(cenco)识别为私人空间");
+            Assert(SmbAuthService.CategorizeShare("home", "user1") == NasShareCategory.PersonalSpace, "home 共享识别为私人空间");
+            Assert(SmbAuthService.CategorizeShare("homes", "user1") == NasShareCategory.PersonalSpace, "homes 共享识别为私人空间");
+            Assert(SmbAuthService.CategorizeShare("我的文件", "user1") == NasShareCategory.PersonalSpace, "『我的文件』识别为私人空间");
+            Assert(SmbAuthService.CategorizeShare("私人备份空间", "user1") == NasShareCategory.PersonalSpace, "『私人备份空间』识别为私人空间");
+            Assert(SmbAuthService.CategorizeShare("个人文档", "user1") == NasShareCategory.PersonalSpace, "『个人文档』识别为私人空间");
+
+            Assert(SmbAuthService.CategorizeShare("团队文件-cenco-public", "cenco") == NasShareCategory.TeamShare, "团队文件识别为团队共享");
+            Assert(SmbAuthService.CategorizeShare("public_docs", "cenco") == NasShareCategory.TeamShare, "public 目录识别为团队共享");
+            Assert(SmbAuthService.CategorizeShare("company_share", "cenco") == NasShareCategory.TeamShare, "share 目录识别为团队共享");
+        }
+
+        static async Task TestAutoPlanTargetSubFolderAndDeduplicationAsync()
+        {
+            Console.WriteLine("\n--- 17. 自动创建同名文件夹、去重建议与历史复用测试 ---");
+            string testRoot = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Test_AutoPlan_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(testRoot);
+
+            try
+            {
+                var smbService = new SmbAuthService();
+
+                // 1. 目标目录不存在：直接规划为原名
+                var (sub1, exist1, conflict1) = await smbService.PlanTargetSubFolderAsync(testRoot, "工作资料", @"D:\工作资料");
+                Assert(sub1 == "工作资料" && !exist1 && !conflict1, "首次规划未创建过的目录，保持原名无冲突");
+
+                // 2. 目标目录已存在，但含有其他非空文件或属于其他任务 -> 自动产生 _2 去重建议
+                string existingDir = Path.Combine(testRoot, "工作资料");
+                Directory.CreateDirectory(existingDir);
+                File.WriteAllText(Path.Combine(existingDir, "other_file.txt"), "foreign data");
+
+                var (sub2, exist2, conflict2) = await smbService.PlanTargetSubFolderAsync(testRoot, "工作资料", @"D:\另一个源文件夹");
+                Assert(sub2 == "工作资料_2" && exist2 && conflict2, "目标已存在外来数据时，自动规划去重后缀并提示冲突", $"规划结果: {sub2}");
+
+                // 3. 目标目录已存在，且包含相同的任务源清单 -> 智能复用，不产生冲突
+                string taskDir = Path.Combine(testRoot, "财务报表");
+                Directory.CreateDirectory(taskDir);
+                var manifestMgr = new ManifestManager();
+                var m = new Manifest
+                {
+                    SourceRoot = @"D:\财务报表",
+                    UpdatedAt = DateTimeOffset.UtcNow
+                };
+                await manifestMgr.SaveManifestAtomicAsync(taskDir, m);
+
+                var (sub3, exist3, conflict3) = await smbService.PlanTargetSubFolderAsync(testRoot, "财务报表", @"D:\财务报表");
+                Assert(sub3 == "财务报表" && exist3 && !conflict3, "已存在且清单归属于相同任务源时，智能复用现有目录无需加后缀");
+            }
+            finally
+            {
+                try { if (Directory.Exists(testRoot)) Directory.Delete(testRoot, true); } catch { }
+            }
+        }
+
+        static async Task TestTaskManagerConcurrencyAndMultiTaskIsolationAsync()
+        {
+            Console.WriteLine("\n--- 18. 多任务管理器并发控制、路径防冲突与多文件夹完全隔离测试 ---");
+            string testBase = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Test_TaskManager_" + Guid.NewGuid().ToString("N"));
+            string srcA = Path.Combine(testBase, "Local_Folder_A");
+            string srcB = Path.Combine(testBase, "Local_Folder_B");
+            string nasRoot = Path.Combine(testBase, "Nas_Root");
+            string dstA = Path.Combine(nasRoot, "Backup_A");
+            string dstB = Path.Combine(nasRoot, "Backup_B");
+
+            Directory.CreateDirectory(srcA);
+            Directory.CreateDirectory(srcB);
+            Directory.CreateDirectory(dstA);
+            Directory.CreateDirectory(dstB);
+
+            File.WriteAllText(Path.Combine(srcA, "file_a.txt"), "Content A");
+            File.WriteAllText(Path.Combine(srcB, "file_b.txt"), "Content B");
+
+            var settings = new AppSettings
+            {
+                MaxConcurrentSyncs = 1 // 强制并发数为 1 验证队列调度
+            };
+
+            var longEngine = new LongNameEngine(maxUtf8Bytes: 255);
+            var manifestMgr = new ManifestManager();
+            var smbAuth = new SmbAuthService();
+
+            using var taskManager = new TaskManager(settings, longEngine, manifestMgr, smbAuth);
+
+            var taskA = new SyncTask
+            {
+                TaskId = "task_a",
+                TaskName = "任务A",
+                SourceFolder = srcA,
+                DestinationFolder = dstA,
+                AutoSyncEnabled = false,
+                RealtimeWatchEnabled = false
+            };
+
+            var taskB = new SyncTask
+            {
+                TaskId = "task_b",
+                TaskName = "任务B",
+                SourceFolder = srcB,
+                DestinationFolder = dstB,
+                AutoSyncEnabled = false,
+                RealtimeWatchEnabled = false
+            };
+
+            taskManager.AddTask(taskA);
+            taskManager.AddTask(taskB);
+
+            // 验证防冲突与嵌套检查
+            bool caughtOverlap = false;
+            try
+            {
+                var invalidTask = new SyncTask
+                {
+                    TaskId = "task_invalid",
+                    TaskName = "非法任务",
+                    SourceFolder = Path.Combine(srcA, "SubChild"),
+                    DestinationFolder = Path.Combine(nasRoot, "Other")
+                };
+                taskManager.AddTask(invalidTask);
+            }
+            catch (InvalidOperationException)
+            {
+                caughtOverlap = true;
+            }
+            Assert(caughtOverlap, "任务管理器成功拒绝嵌套源路径的非法任务添加");
+
+            // 同时触发两个任务入队
+            var tcsA = new TaskCompletionSource<bool>();
+            var tcsB = new TaskCompletionSource<bool>();
+
+            taskManager.TaskStateChanged += t =>
+            {
+                if (t.TaskId == "task_a" && t.State == TaskSyncState.Completed) tcsA.TrySetResult(true);
+                if (t.TaskId == "task_b" && t.State == TaskSyncState.Completed) tcsB.TrySetResult(true);
+            };
+
+            taskManager.TriggerSync("task_a");
+            taskManager.TriggerSync("task_b");
+
+            var completedA = await Task.WhenAny(tcsA.Task, Task.Delay(10000));
+            var completedB = await Task.WhenAny(tcsB.Task, Task.Delay(10000));
+
+            Assert(tcsA.Task.IsCompletedSuccessfully, "队列中的任务 A 顺利完成备份");
+            Assert(tcsB.Task.IsCompletedSuccessfully, "队列中的任务 B 顺利完成备份");
+
+            // 检查数据隔离性
+            Assert(File.Exists(Path.Combine(dstA, "file_a.txt")), "任务 A 目标目录包含其自身文件");
+            Assert(!File.Exists(Path.Combine(dstA, "file_b.txt")), "任务 A 目标目录未被任务 B 文件污染");
+            Assert(File.Exists(Path.Combine(dstB, "file_b.txt")), "任务 B 目标目录包含其自身文件");
+            Assert(!File.Exists(Path.Combine(dstB, "file_a.txt")), "任务 B 目标目录未被任务 A 文件污染");
+
+            // 检查独立元数据
+            Assert(File.Exists(Path.Combine(dstA, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName)), "任务 A 拥有独立 .fnsync/manifest.json");
+            Assert(File.Exists(Path.Combine(dstB, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName)), "任务 B 拥有独立 .fnsync/manifest.json");
+
+            // 检查独立日志缓冲
+            var logsA = taskManager.GetTaskLogs("task_a");
+            var logsB = taskManager.GetTaskLogs("task_b");
+            Assert(logsA.Count > 0 && logsB.Count > 0, "多任务分别具备独立的内存日志流");
+
+            try { Directory.Delete(testBase, true); } catch { }
+        }
+
+        static async Task TestRestoreEngineDiscoverBackupPackagesAsync()
+        {
+            Console.WriteLine("\n--- 19. NAS 恢复中心多任务备份包智能发现与无损恢复测试 ---");
+            string testBase = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Test_RestoreDiscovery_" + Guid.NewGuid().ToString("N"));
+            string nasRoot = Path.Combine(testBase, "Nas_Root");
+            string pkg1 = Path.Combine(nasRoot, "工作工程资料");
+            string pkg2 = Path.Combine(nasRoot, "家庭照片与影集");
+            string nonPkg = Path.Combine(nasRoot, "随机未知文件夹");
+            string restoreTarget = Path.Combine(testBase, "Local_Restored");
+
+            Directory.CreateDirectory(pkg1);
+            Directory.CreateDirectory(pkg2);
+            Directory.CreateDirectory(nonPkg);
+            Directory.CreateDirectory(restoreTarget);
+
+            File.WriteAllText(Path.Combine(pkg1, "drawing.dwg"), "DWG DATA");
+            File.WriteAllText(Path.Combine(pkg2, "photo.jpg"), "PHOTO DATA");
+            File.WriteAllText(Path.Combine(nonPkg, "temp.log"), "TEMP DATA");
+
+            var manifestMgr = new ManifestManager();
+            var m1 = new Manifest
+            {
+                SourceRoot = @"C:\Users\Cenco\Projects",
+                UpdatedAt = DateTimeOffset.UtcNow
+            };
+            m1.Files.Add(new ManifestFileEntry
+            {
+                OriginalRel = "drawing.dwg",
+                StoredRel = "drawing.dwg",
+                Sha256 = HashHelper.ComputeFileSha256(Path.Combine(pkg1, "drawing.dwg")),
+                Size = 8
+            });
+            await manifestMgr.SaveManifestAtomicAsync(pkg1, m1);
+
+            var m2 = new Manifest
+            {
+                SourceRoot = @"D:\Media\Photos",
+                UpdatedAt = DateTimeOffset.UtcNow
+            };
+            m2.Files.Add(new ManifestFileEntry
+            {
+                OriginalRel = "photo.jpg",
+                StoredRel = "photo.jpg",
+                Sha256 = HashHelper.ComputeFileSha256(Path.Combine(pkg2, "photo.jpg")),
+                Size = 10
+            });
+            await manifestMgr.SaveManifestAtomicAsync(pkg2, m2);
+
+            var restoreEngine = new RestoreEngine(manifestMgr);
+            var packages = await restoreEngine.DiscoverBackupPackagesAsync(nasRoot);
+
+            Assert(packages.Count == 2, $"成功从 NAS 根目录扫描发现 2 个合法备份包 (非备份目录被自动过滤)，实际发现: {packages.Count}");
+            var p1 = packages.FirstOrDefault(p => p.PackageName == "工作工程资料");
+            var p2 = packages.FirstOrDefault(p => p.PackageName == "家庭照片与影集");
+
+            Assert(p1 != null && p1.FileCount == 1 && p1.OriginalSourceRoot == @"C:\Users\Cenco\Projects", "备份包1元信息解析正确");
+            Assert(p2 != null && p2.FileCount == 1 && p2.OriginalSourceRoot == @"D:\Media\Photos", "备份包2元信息解析正确");
+
+            // 模拟新电脑恢复选中的备份包 1
+            var rep = await restoreEngine.RunRestoreAsync(p1!.NasFolderUnc, restoreTarget, ConflictResolution.Overwrite);
+            Assert(rep.RestoredFiles == 1 && rep.FailedFiles == 0, "新电脑一键恢复备份包成功无报错");
+            Assert(File.Exists(Path.Combine(restoreTarget, "drawing.dwg")), "恢复目标目录正确还原原始文件");
+            Assert(rep.IntegrityVerifiedFiles == 1, "恢复文件完整性 SHA-256 校验 100% 通过");
+
+            try { Directory.Delete(testBase, true); } catch { }
         }
     }
 }

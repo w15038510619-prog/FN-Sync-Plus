@@ -2,19 +2,38 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
+using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.Core.Services
 {
+    public enum NasShareCategory
+    {
+        PersonalSpace,   // 私人空间 / 个人主目录 (我的文件) - 优先级最高
+        TeamShare,       // 团队共享 / 公共文件 (团队文件)
+        SystemOrOther    // 其他系统共享
+    }
+
     public class SmbShareItem
     {
         public string Name { get; set; } = string.Empty;
         public string Remark { get; set; } = string.Empty;
         public string UncPath { get; set; } = string.Empty;
+        public NasShareCategory Category { get; set; } = NasShareCategory.TeamShare;
+
+        public bool IsPersonal => Category == NasShareCategory.PersonalSpace;
+
+        public string CategoryDisplayName => Category switch
+        {
+            NasShareCategory.PersonalSpace => "👤 私人空间 (我的文件)",
+            NasShareCategory.TeamShare => "👥 团队文件 (团队共享)",
+            _ => "📁 其他共享"
+        };
     }
 
     public class NasFolderItem
@@ -24,6 +43,18 @@ namespace FNSyncPlus.Core.Services
         public string RelativeSubPath { get; set; } = string.Empty;
         public DateTime LastModified { get; set; }
         public bool IsShareRoot { get; set; }
+        public NasShareCategory Category { get; set; } = NasShareCategory.PersonalSpace;
+
+        public string DisplayCategory => IsShareRoot
+            ? (Category == NasShareCategory.PersonalSpace ? "👤 私人共享根" : "👥 团队共享根")
+            : "📁 文件夹";
+    }
+
+    public class NasSharesResult
+    {
+        public List<SmbShareItem> Shares { get; set; } = new();
+        public bool HasPersonalShare { get; set; }
+        public string GuidanceMessage { get; set; } = string.Empty;
     }
 
     public class SmbAuthService
@@ -152,10 +183,7 @@ namespace FNSyncPlus.Core.Services
                             }
                         }
                     }
-                    catch
-                    {
-                        // 无法直接访问
-                    }
+                    catch { }
 
                     // 仅断开临时的 IPC$ 连接尝试重试一次，绝不断开用户的其他现有盘符或正常会话
                     WNetCancelConnection2($@"\\{serverAddress}\IPC$", 0, bForce: false);
@@ -187,12 +215,13 @@ namespace FNSyncPlus.Core.Services
         }
 
         /// <summary>
-        /// 列出 NAS 上所有可访问的 SMB 共享目录（排除 IPC$ 等隐藏管理共享）
+        /// 列出 NAS 上所有可访问的 SMB 共享目录，并智能区分为【私人空间 (我的文件)】与【团队共享 (团队文件)】，优先推荐私人备份
         /// </summary>
-        public async Task<List<SmbShareItem>> EnumerateSharesAsync(string serverAddress)
+        public async Task<NasSharesResult> EnumerateCategorizedSharesAsync(string serverAddress, string? currentUsername = null)
         {
             return await Task.Run(() =>
             {
+                var result = new NasSharesResult();
                 var list = new List<SmbShareItem>();
                 serverAddress = serverAddress.Trim().Trim('\\', '/');
                 if (serverAddress.Contains(':')) serverAddress = serverAddress.Split(':')[0];
@@ -218,11 +247,13 @@ namespace FNSyncPlus.Core.Services
                             if (shareName.EndsWith("$", StringComparison.OrdinalIgnoreCase)) continue;
                             if ((info.shi1_type & STYPE_SPECIAL) != 0) continue;
 
+                            var cat = CategorizeShare(shareName, currentUsername);
                             list.Add(new SmbShareItem
                             {
                                 Name = shareName,
                                 Remark = info.shi1_remark ?? "",
-                                UncPath = $@"\\{serverAddress}\{shareName}"
+                                UncPath = $@"\\{serverAddress}\{shareName}",
+                                Category = cat
                             });
                         }
                     }
@@ -231,31 +262,99 @@ namespace FNSyncPlus.Core.Services
                         NetApiBufferFree(bufPtr);
                     }
                 }
-                else
+
+                // 2. 主动探测当前用户的个人私人目录候选（解决部分 fnOS/Linux 环境下 NetShareEnum 隐藏个人主目录的问题）
+                if (!string.IsNullOrEmpty(currentUsername))
                 {
-                    // 在部分限制 NetShareEnum 的环境中，探测常用共享名称
-                    string[] commonShares = { "public", "data", "homes", "backup", "files" };
-                    foreach (var sh in commonShares)
+                    string[] personalCandidates = new[]
                     {
-                        string testUnc = $@"\\{serverAddress}\{sh}";
-                        try
+                        currentUsername,                  // \\server\<username>
+                        "home",                           // \\server\home
+                        $"homes\\{currentUsername}",       // \\server\homes\<username>
+                        "我的文件",                        // \\server\我的文件
+                        "个人空间",                        // \\server\个人空间
+                        "私人备份"                         // \\server\私人备份
+                    };
+
+                    foreach (var cand in personalCandidates)
+                    {
+                        string testUnc = $@"\\{serverAddress}\{cand}";
+                        // 如果列表中尚未包含该项
+                        if (!list.Any(s => s.UncPath.Equals(testUnc, StringComparison.OrdinalIgnoreCase)))
                         {
-                            if (Directory.Exists(testUnc))
+                            try
                             {
-                                list.Add(new SmbShareItem
+                                if (Directory.Exists(testUnc))
                                 {
-                                    Name = sh,
-                                    Remark = "已探测共享",
-                                    UncPath = testUnc
-                                });
+                                    list.Add(new SmbShareItem
+                                    {
+                                        Name = cand,
+                                        Remark = "用户个人私人主目录",
+                                        UncPath = testUnc,
+                                        Category = NasShareCategory.PersonalSpace
+                                    });
+                                }
                             }
+                            catch { }
                         }
-                        catch { }
                     }
                 }
 
-                return list;
+                // 3. 排序：将私人空间排在最前，团队共享排在后面
+                result.Shares = list
+                    .OrderByDescending(s => s.Category == NasShareCategory.PersonalSpace)
+                    .ThenBy(s => s.Category == NasShareCategory.TeamShare)
+                    .ThenBy(s => s.Name)
+                    .ToList();
+
+                result.HasPersonalShare = result.Shares.Any(s => s.Category == NasShareCategory.PersonalSpace);
+
+                if (!result.HasPersonalShare)
+                {
+                    result.GuidanceMessage =
+                        "💡 提示：当前 NAS 用户账号尚未发现独立的 SMB 私人主目录共享。\n" +
+                        "建议在飞牛 fnOS 管理后台 ->【文件服务】/【共享文件夹】中，开启『用户个人主目录』或为您的账号新建一个专属的个人私有共享文件夹（如『私人备份』并仅对您的账号授权），即可在列表中优先选择。您也可以直接在上方自定义输入备份路径。";
+                }
+
+                return result;
             });
+        }
+
+        public static NasShareCategory CategorizeShare(string shareName, string? username)
+        {
+            if (!string.IsNullOrEmpty(username))
+            {
+                if (string.Equals(shareName, username, StringComparison.OrdinalIgnoreCase))
+                    return NasShareCategory.PersonalSpace;
+            }
+
+            if (string.Equals(shareName, "home", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(shareName, "homes", StringComparison.OrdinalIgnoreCase) ||
+                shareName.Contains("我的文件") ||
+                shareName.Contains("私人") ||
+                shareName.Contains("个人"))
+            {
+                return NasShareCategory.PersonalSpace;
+            }
+
+            if (shareName.Contains("团队") ||
+                shareName.Contains("public", StringComparison.OrdinalIgnoreCase) ||
+                shareName.Contains("share", StringComparison.OrdinalIgnoreCase) ||
+                shareName.Contains("cenco", StringComparison.OrdinalIgnoreCase))
+            {
+                return NasShareCategory.TeamShare;
+            }
+
+            return NasShareCategory.TeamShare;
+        }
+
+        /// <summary>
+        /// 兼容旧版调用的共享列出方法
+        /// </summary>
+        public async Task<List<SmbShareItem>> EnumerateSharesAsync(string serverAddress)
+        {
+            var res = await EnumerateCategorizedSharesAsync(serverAddress);
+            return res.Shares;
         }
 
         /// <summary>
@@ -276,10 +375,9 @@ namespace FNSyncPlus.Core.Services
                 var di = new DirectoryInfo(longPath);
                 foreach (var sub in di.EnumerateDirectories())
                 {
-                    // 忽略隐藏系统目录如 .recycle、.fnsync
                     if (sub.Name.StartsWith("$") ||
                         sub.Name.Equals(".recycle", StringComparison.OrdinalIgnoreCase) ||
-                        sub.Name.Equals(FNSyncPlus.Core.Models.Manifest.MetadataDirName, StringComparison.OrdinalIgnoreCase))
+                        sub.Name.Equals(Manifest.MetadataDirName, StringComparison.OrdinalIgnoreCase))
                     {
                         continue;
                     }
@@ -297,7 +395,8 @@ namespace FNSyncPlus.Core.Services
                         FullUncPath = subUnc,
                         RelativeSubPath = relSub,
                         LastModified = sub.LastWriteTime,
-                        IsShareRoot = false
+                        IsShareRoot = false,
+                        Category = NasShareCategory.PersonalSpace
                     });
                 }
 
@@ -371,13 +470,67 @@ namespace FNSyncPlus.Core.Services
                         FullUncPath = fullUnc,
                         RelativeSubPath = relSub,
                         LastModified = di.LastWriteTime,
-                        IsShareRoot = false
+                        IsShareRoot = false,
+                        Category = NasShareCategory.PersonalSpace
                     };
                 }
                 catch (UnauthorizedAccessException)
                 {
                     throw new UnauthorizedAccessException($"创建文件夹被拒绝：当前 NAS 账号在【{parentUncPath}】缺少写入权限。请在飞牛系统管理中开放该共享的写权限。");
                 }
+            });
+        }
+
+        /// <summary>
+        /// 检查目标目录是否已存在以及是否与其他任务冲突，自动规划去重建议名称
+        /// </summary>
+        public async Task<(string FinalSubFolder, bool IsExisting, bool HasForeignConflict)> PlanTargetSubFolderAsync(
+            string destinationRootUnc,
+            string desiredFolderName,
+            string sourceFolderPath)
+        {
+            return await Task.Run(async () =>
+            {
+                string candidateName = desiredFolderName.Trim();
+                string targetUnc = Path.Combine(destinationRootUnc, candidateName);
+
+                if (!Directory.Exists(targetUnc))
+                {
+                    return (candidateName, false, false);
+                }
+
+                // 目标目录已存在：检查是否包含当前任务的历史元数据
+                var manifestMgr = new ManifestManager();
+                try
+                {
+                    var manifest = await manifestMgr.LoadManifestAsync(targetUnc);
+                    // 如果清单中的 SourceRoot 与当前源目录一致，则说明是当前任务的原有备份目录，直接复用
+                    if (string.Equals(PathHelper.GetCanonicalPath(manifest.SourceRoot), PathHelper.GetCanonicalPath(sourceFolderPath), StringComparison.OrdinalIgnoreCase))
+                    {
+                        return (candidateName, true, false);
+                    }
+
+                    // 如果清单属于其他源文件夹，或者已存在非空文件，为防止数据混杂，自动生成去重后缀建议
+                    if (manifest.Files.Count > 0 || Directory.EnumerateFileSystemEntries(targetUnc).Any())
+                    {
+                        int suffix = 2;
+                        string dedupName;
+                        while (true)
+                        {
+                            dedupName = $"{candidateName}_{suffix}";
+                            string testUnc = Path.Combine(destinationRootUnc, dedupName);
+                            if (!Directory.Exists(testUnc))
+                            {
+                                break;
+                            }
+                            suffix++;
+                        }
+                        return (dedupName, true, true);
+                    }
+                }
+                catch { }
+
+                return (candidateName, true, false);
             });
         }
 
