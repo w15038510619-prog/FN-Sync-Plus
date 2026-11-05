@@ -41,6 +41,9 @@ namespace FNSyncPlus.WinUI.Services
             var testLabEngine = new TestLabEngine(longNameEngine, manifestManager, smbService);
             services.AddSingleton(testLabEngine);
 
+            var fnOsService = new FnOsIntegrationService(smbService);
+            services.AddSingleton(fnOsService);
+
             // 2. ViewModels
             services.AddSingleton<MainViewModel>();
             services.AddSingleton<TasksViewModel>();

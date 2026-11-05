@@ -20,16 +20,19 @@ namespace FNSyncPlus.WinUI.ViewModels
     public class CategoryItem
     {
         public string Title { get; set; } = string.Empty;
+        public string Subtitle { get; set; } = string.Empty;
         public string UncPath { get; set; } = string.Empty;
         public string IconGlyph { get; set; } = "\uE8B7";
         public NasShareCategory Category { get; set; }
         public bool IsPersonal { get; set; }
+        public bool IsConfigured { get; set; } = true;
     }
 
     public partial class NasBrowserViewModel : ObservableObject
     {
         private readonly SmbAuthService _smbService;
         private readonly AppSettings _settings;
+        private readonly FnOsIntegrationService _fnOsService;
 
         public ObservableCollection<BreadcrumbItem> BreadcrumbItems { get; } = new();
         public ObservableCollection<CategoryItem> Categories { get; } = new();
@@ -84,12 +87,31 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private bool _isLoading = false;
 
+        [ObservableProperty]
+        private bool _isPersonalSpaceGuidanceActive = false;
+
+        [ObservableProperty]
+        private string _personalSpaceTitle = "未发现可访问的 fnOS 个人专属 SMB 共享";
+
+        [ObservableProperty]
+        private string _personalSpaceExplanation = string.Empty;
+
+        [ObservableProperty]
+        private string _personalSpaceSetupSteps = string.Empty;
+
+        [ObservableProperty]
+        private string _officialClientInfoText = string.Empty;
+
+        [ObservableProperty]
+        private string _customPathErrorMessage = string.Empty;
+
         public string ConfirmedSelectedPath { get; private set; } = string.Empty;
 
-        public NasBrowserViewModel(SmbAuthService smbService, AppSettings settings)
+        public NasBrowserViewModel(SmbAuthService smbService, AppSettings settings, FnOsIntegrationService fnOsService)
         {
             _smbService = smbService;
             _settings = settings;
+            _fnOsService = fnOsService;
 
             _ = InitializeAsync();
         }
@@ -102,52 +124,154 @@ namespace FNSyncPlus.WinUI.ViewModels
             IsLoading = true;
             try
             {
+                var status = await _fnOsService.EvaluatePersonalSpaceAsync(server, _settings.Username, _settings.PreferredBackupRoot);
+                PersonalSpaceTitle = status.DisplayTitle;
+                PersonalSpaceExplanation = status.Explanation;
+                PersonalSpaceSetupSteps = status.SetupGuidance;
+                OfficialClientInfoText = status.OfficialClientInfo?.SummaryText ?? string.Empty;
+
                 var categorized = await _smbService.EnumerateCategorizedSharesAsync(server, _settings.Username);
 
                 Categories.Clear();
+
+                // 1. 首选置顶项：👤 我的文件 (个人空间)
+                if (status.HasPersonalSpaceTarget)
+                {
+                    Categories.Add(new CategoryItem
+                    {
+                        Title = "👤 我的文件 (个人空间)",
+                        Subtitle = "已就绪 · 具备专属读写权限",
+                        UncPath = status.PersonalSpaceRootUnc,
+                        Category = NasShareCategory.PersonalSpace,
+                        IsPersonal = true,
+                        IsConfigured = true,
+                        IconGlyph = "\uE77B"
+                    });
+                }
+                else
+                {
+                    Categories.Add(new CategoryItem
+                    {
+                        Title = "👤 我的文件 (个人空间)",
+                        Subtitle = "未发现专属 SMB 共享 · 点击配置",
+                        UncPath = "FN_PERSONAL_SPACE_GUIDANCE",
+                        Category = NasShareCategory.PersonalSpace,
+                        IsPersonal = true,
+                        IsConfigured = false,
+                        IconGlyph = "\uE77B"
+                    });
+                }
+
+                // 2. 团队共享与其它共享
                 foreach (var share in categorized.Shares)
                 {
+                    // 若该共享已被指定为个人空间，避免在下方重复
+                    if (status.HasPersonalSpaceTarget && string.Equals(share.UncPath, status.PersonalSpaceRootUnc, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
                     bool isPers = share.Category == NasShareCategory.PersonalSpace;
                     Categories.Add(new CategoryItem
                     {
-                        Title = share.Name,
+                        Title = isPers ? $"👤 {share.Name}" : $"👥 {share.Name}",
+                        Subtitle = isPers ? "私人共享" : "团队文件 (公共协作)",
                         UncPath = share.UncPath,
                         Category = share.Category,
                         IsPersonal = isPers,
+                        IsConfigured = true,
                         IconGlyph = isPers ? "\uE77B" : "\uE716"
                     });
                 }
 
-                if (Categories.Count == 0)
+                // 3. 默认导航策略：
+                // 如果个人空间已就绪，优先直接进入个人空间！
+                if (status.HasPersonalSpaceTarget)
                 {
-                    PermissionStatusText = "未在 NAS 检测到可用共享";
-                    SecurityTitle = "无可用共享目录";
-                    SecurityDescription = "当前 NAS 账号未被授权访问任何 SMB 共享，或共享未开放。请在飞牛 fnOS 控制面板检查共享权限。";
-                    SecurityBadgeBg = "#FEE2E2";
-                    SecurityBadgeColor = "#B91C1C";
-                    HasWritePermission = false;
-                    FolderItems.Clear();
-                    EmptyFolderNotice = "未在 NAS 检测到可用共享目录";
-                    return;
-                }
-
-                // 仅当存在已验证的私人空间时才默认选中；如果没有私人空间，绝不自动选择团队共享！
-                var personalShare = Categories.FirstOrDefault(s => s.Category == NasShareCategory.PersonalSpace);
-
-                if (personalShare != null)
-                {
-                    await NavigateToFolderAsync(personalShare.UncPath, personalShare.UncPath);
+                    IsPersonalSpaceGuidanceActive = false;
+                    await NavigateToFolderAsync(status.PersonalSpaceRootUnc, status.PersonalSpaceRootUnc);
                 }
                 else
                 {
-                    // 处于服务器根目录，要求用户明确选择共享
-                    await NavigateToFolderAsync($@"\\{server}", "");
+                    // 默认停留在「我的文件 (个人空间)」指引页面，绝不自动使用团队共享！
+                    IsPersonalSpaceGuidanceActive = true;
+                    CurrentUncPath = "我的文件 (个人空间)";
+                    UpdateBreadcrumbs("我的文件 (个人空间)");
+                    FolderItems.Clear();
+                    HasWritePermission = false;
+                    PermissionStatusText = "未配置个人专属共享";
+                    SecurityTitle = status.DisplayTitle;
+                    SecurityDescription = "为防止私人数据泄露，系统已阻止默认使用团队共享。请按指引开启个人共享或指定路径。";
+                    SecurityBadgeBg = "#FEF3C7";
+                    SecurityBadgeColor = "#D97706";
+                    IsTeamShare = false;
                 }
             }
             finally
             {
                 IsLoading = false;
             }
+        }
+
+        public async Task SelectCategoryAsync(CategoryItem category)
+        {
+            if (category == null) return;
+
+            if (category.UncPath == "FN_PERSONAL_SPACE_GUIDANCE")
+            {
+                IsPersonalSpaceGuidanceActive = true;
+                CurrentUncPath = "我的文件 (个人空间)";
+                UpdateBreadcrumbs("我的文件 (个人空间)");
+                FolderItems.Clear();
+                HasWritePermission = false;
+                PermissionStatusText = "未配置个人专属共享";
+                SecurityTitle = PersonalSpaceTitle;
+                SecurityDescription = "请根据右侧指引在飞牛 fnOS 开通个人专属 SMB 共享或手动指定路径。";
+                SecurityBadgeBg = "#FEF3C7";
+                SecurityBadgeColor = "#D97706";
+                IsTeamShare = false;
+            }
+            else
+            {
+                IsPersonalSpaceGuidanceActive = false;
+                await NavigateToFolderAsync(category.UncPath, category.UncPath);
+            }
+        }
+
+        public async Task<bool> ApplyCustomPersonalPathAsync(string customPath)
+        {
+            if (string.IsNullOrWhiteSpace(customPath))
+            {
+                CustomPathErrorMessage = "路径不能为空。请输入如 \\\\192.168.8.120\\个人备份 的完整 UNC 路径。";
+                return false;
+            }
+
+            var (server, share, baseShareUnc, isServerRoot) = PathHelper.ParseUncShare(customPath);
+            if (isServerRoot || string.IsNullOrEmpty(share))
+            {
+                CustomPathErrorMessage = "不能直接使用服务器根路径，必须指定具体的共享文件夹。";
+                return false;
+            }
+
+            var validation = await _smbService.ValidateDirectoryAccessStateAsync(customPath, _settings.NasServer);
+            if (!validation.DoesShareExist)
+            {
+                CustomPathErrorMessage = $"指定的共享不存在 (Win32 Error 67: 找不到网络名)。请确认在飞牛 fnOS 中已开启该共享名称。";
+                return false;
+            }
+
+            if (!validation.IsDirectoryWritable)
+            {
+                CustomPathErrorMessage = $"指定路径不可写 (Win32 Error 5: 拒绝访问)。请确认当前账号具备读写权限。";
+                return false;
+            }
+
+            _settings.PreferredBackupRoot = customPath;
+            _settings.Save();
+            CustomPathErrorMessage = string.Empty;
+
+            await InitializeAsync();
+            return true;
         }
 
         public async Task NavigateToFolderAsync(string uncPath, string? baseShare = null)
@@ -334,12 +458,25 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         public bool ConfirmSelection()
         {
+            if (IsPersonalSpaceGuidanceActive)
+            {
+                LastErrorMessage = "当前尚未配置个人专属 SMB 共享，无法作为备份存储位置。请根据指引配置后再确认。";
+                return false;
+            }
+
             string candidate = SelectedFolder != null ? SelectedFolder.FullUncPath : CurrentUncPath;
-            if (string.IsNullOrWhiteSpace(candidate)) return false;
+            if (string.IsNullOrWhiteSpace(candidate) || candidate.Contains("FN_PERSONAL_SPACE_GUIDANCE")) return false;
 
             var (server, share, baseShareUnc, isServerRoot) = PathHelper.ParseUncShare(candidate);
             if (isServerRoot || string.IsNullOrEmpty(share))
             {
+                LastErrorMessage = "无法直接使用服务器根目录，必须选择具体的共享或其子文件夹。";
+                return false;
+            }
+
+            if (!HasWritePermission)
+            {
+                LastErrorMessage = "所选目录无写入权限。";
                 return false;
             }
 

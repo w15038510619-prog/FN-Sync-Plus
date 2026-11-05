@@ -21,9 +21,31 @@ namespace FNSyncPlus.WinUI.Dialogs
         {
             if (e.AddedItems.Count > 0 && e.AddedItems[0] is CategoryItem category)
             {
-                await ViewModel.NavigateToFolderAsync(category.UncPath, category.UncPath);
+                await ViewModel.SelectCategoryAsync(category);
             }
         }
+
+        private async void BtnApplyCustomPersonalRoot_Click(object sender, RoutedEventArgs e)
+        {
+            string path = TxtCustomPersonalRoot.Text.Trim();
+            if (string.IsNullOrWhiteSpace(path)) return;
+
+            bool ok = await ViewModel.ApplyCustomPersonalPathAsync(path);
+            if (ok)
+            {
+                TxtCustomPersonalRoot.Text = string.Empty;
+            }
+        }
+
+        private async void BtnRefreshPersonalDetection_Click(object sender, RoutedEventArgs e)
+        {
+            await ViewModel.InitializeAsync();
+        }
+
+        public Visibility GetExplorerVisibility(bool isGuidance) => isGuidance ? Visibility.Collapsed : Visibility.Visible;
+        public Visibility GetGuidanceVisibility(bool isGuidance) => isGuidance ? Visibility.Visible : Visibility.Collapsed;
+        public Visibility GetOfficialInfoVisibility(string? text) => !string.IsNullOrWhiteSpace(text) ? Visibility.Visible : Visibility.Collapsed;
+        public Visibility GetErrorNoticeVisibility(string? error) => !string.IsNullOrWhiteSpace(error) ? Visibility.Visible : Visibility.Collapsed;
 
         private async void BreadcrumbBar_ItemClicked(BreadcrumbBar sender, BreadcrumbBarItemClickedEventArgs args)
         {

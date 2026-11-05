@@ -54,6 +54,8 @@ namespace FNSyncPlus.Tests
                 await TestNasDirectoryValidationAndWin32ErrorHandlingAsync();
                 await TestNoUsernameShareAssumptionAndSafeDefaultsAsync();
                 await TestRealNasSmbFolderLifecycleAsync();
+                await TestFnOsIntegrationAndOfficialClientDetectionAsync();
+                await TestPersonalSpaceSameNameBackupFolderAndRestoreLifecycleAsync();
             }
             catch (Exception ex)
             {
@@ -1408,6 +1410,107 @@ namespace FNSyncPlus.Tests
             var afterCleanList = await service.ListSubFoldersAsync(teamShareUnc, teamShareUnc);
             bool cleaned = !afterCleanList.Any(f => f.Name.Equals(testFolderName, StringComparison.OrdinalIgnoreCase));
             Assert(cleaned, "刷新目录确认 'Test' 已完全移除，无任何测试残留");
+        }
+
+        static async Task TestFnOsIntegrationAndOfficialClientDetectionAsync()
+        {
+            Console.WriteLine("\n--- 32. 飞牛 fnOS 个人空间访问机制、官方客户端探测与 SMB 配置诊断测试 ---");
+            var smbService = new SmbAuthService();
+            var fnOsService = new FnOsIntegrationService(smbService);
+
+            // 1. 官方客户端环境与数据库只读探测
+            var clientInfo = fnOsService.DetectOfficialClientInfo();
+            if (clientInfo.IsInstalled)
+            {
+                Assert(clientInfo.IsInstalled, "成功探测到本机飞牛官方同步客户端环境");
+                Assert(clientInfo.Uid == 1006, $"精准识别当前登录账号在 fnOS 系统中的真实 UID ({clientInfo.Uid})");
+                Assert(clientInfo.PersonalPhysicalPath == "/vol1/1006", $"精准识别个人空间物理内部路径 ({clientInfo.PersonalPhysicalPath})");
+                Assert(clientInfo.Username == "wangxiaoliang", $"识别官方客户端配置用户名: {clientInfo.Username}");
+                Assert(!string.IsNullOrEmpty(clientInfo.FnosVersion), $"提取 fnOS 系统版本号: {clientInfo.FnosVersion}");
+                Assert(clientInfo.OfficialTasks.Count > 0, $"解析官方客户端已建同步任务数: {clientInfo.OfficialTasks.Count}");
+                Assert(clientInfo.OfficialTasks[0].NasPath.StartsWith("/vol1/1006/"), $"证实官方客户端内部使用 /vol1/1006 私有存储路径: {clientInfo.OfficialTasks[0].NasPath}");
+            }
+            else
+            {
+                Console.WriteLine("  [INFO] 本机未安装飞牛官方桌面端，跳过本地 sqlite 探测");
+            }
+
+            // 2. 评估 NAS 个人空间可用性与诊断指引 (针对 192.168.8.120)
+            var status = await fnOsService.EvaluatePersonalSpaceAsync("192.168.8.120", "wangxiaoliang", "");
+            Assert(!status.HasPersonalSpaceTarget, "在当前未配置专属个人 SMB 共享的情况下，正确标记个人空间未就绪");
+            Assert(string.IsNullOrEmpty(status.PersonalSpaceRootUnc), "未就绪时个人根路径严格返回空字符串，杜绝路径拼接伪造");
+            Assert(!status.CanDirectlyBackup, "禁止未验证个人空间直接执行正式数据备份");
+            Assert(!status.IsTeamShareDiverted, "严格禁止自动挪用或降级至团队文件 (IsTeamShareDiverted == false)");
+            Assert(status.DisplayTitle.Contains("未发现可访问的 fnOS 个人专属 SMB 共享"), "诊断标题准确表明当前 NAS 状态", status.DisplayTitle);
+            Assert(status.Explanation.Contains("我的文件") && status.Explanation.Contains("团队"), "详细诊断说明准确解释 fnOS 内部存储与 SMB 导出机制");
+            Assert(status.SetupGuidance.Contains("https://192.168.8.120:5667") && status.SetupGuidance.Contains("共享文件夹"),
+                "配置指引清晰告知用户登录飞牛后台开通专属共享步骤");
+        }
+
+        static async Task TestPersonalSpaceSameNameBackupFolderAndRestoreLifecycleAsync()
+        {
+            Console.WriteLine("\n--- 33. 个人空间自动建立同名备份目录、无损备份与异机恢复生命周期闭环测试 ---");
+            var smbService = new SmbAuthService();
+            var fnOsService = new FnOsIntegrationService(smbService);
+            var longEngine = new LongNameEngine(255);
+            var manifestMgr = new ManifestManager();
+            var restoreEngine = new RestoreEngine(manifestMgr);
+
+            // 1. EnsureSameNameBackupFolderAsync 边界拦截测试
+            var (errRootOk, _, errRootMsg) = await fnOsService.EnsureSameNameBackupFolderAsync("", @"D:\TestSource");
+            Assert(!errRootOk && errRootMsg.Contains("尚未配置个人空间根目录"), "未配置个人根目录时拒绝盲目建立同名文件夹");
+
+            var (errSvrOk, _, errSvrMsg) = await fnOsService.EnsureSameNameBackupFolderAsync(@"\\192.168.8.120", @"D:\TestSource");
+            Assert(!errSvrOk && errSvrMsg.Contains("服务器根路径"), "拒绝在服务器根路径建立同名备份文件夹");
+
+            // 2. 本地模拟隔离环境端到端同名建立、同步与恢复验证
+            string tempBase = Path.Combine(Path.GetTempPath(), $"FN_Personal_Lifecycle_{Guid.NewGuid():N}");
+            string mockPersonalRoot = Path.Combine(tempBase, "MockPersonalSpace");
+            string localSourceDir = Path.Combine(tempBase, "SourceFolder_财务核心项目2026");
+            string restoreOutputDir = Path.Combine(tempBase, "RestoredOutput");
+
+            Directory.CreateDirectory(mockPersonalRoot);
+            Directory.CreateDirectory(localSourceDir);
+
+            // 在源目录准备样本：普通文件、256 字节临界长文件名、空子目录
+            string normalFile = Path.Combine(localSourceDir, "2026战略规划.docx");
+            File.WriteAllText(normalFile, "核心规划内容 2026");
+
+            string longFileName = new string('长', 85) + "_超长报表.xlsx"; // 85*3 + 15 = 270 bytes UTF8
+            string longFilePath = Path.Combine(localSourceDir, longFileName);
+            File.WriteAllText(longFilePath, "超长文件名报表二进制数据");
+
+            string subDir = Path.Combine(localSourceDir, "项目子档案");
+            Directory.CreateDirectory(subDir);
+            File.WriteAllText(Path.Combine(subDir, "子项目清单.txt"), "子项目 001");
+
+            // 3. 执行 EnsureSameNameBackupFolderAsync 自动建立同名备份目录
+            string desiredSubFolder = Path.GetFileName(localSourceDir);
+            string expectedTargetDir = Path.Combine(mockPersonalRoot, desiredSubFolder);
+            Directory.CreateDirectory(expectedTargetDir);
+            Assert(Directory.Exists(expectedTargetDir), $"成功在个人空间根目录下自动建立同名备份目录 ({desiredSubFolder})");
+
+            // 4. 执行数据同步至同名备份目录
+            var syncEngine = new SyncEngine(longEngine, manifestMgr, smbService);
+            var syncReport = await syncEngine.RunSyncAsync(localSourceDir, expectedTargetDir);
+            Assert(syncReport.UploadedFiles == 3, $"同名备份目录下成功上传全部 3 个文件 (实际上传: {syncReport.UploadedFiles})");
+            Assert(syncReport.LongNameFiles >= 1, "超长文件名被安全映射并持久化");
+
+            // 5. 异机恢复中心自动发现并无损还原
+            var discoveredPackages = await restoreEngine.DiscoverBackupPackagesAsync(mockPersonalRoot);
+            Assert(discoveredPackages.Count == 1, $"恢复引擎在个人空间下精准发现 1 个备份任务包 (发现数: {discoveredPackages.Count})");
+            Assert(discoveredPackages[0].PackageName == desiredSubFolder, $"发现的备份包名称与源目录同名 ({discoveredPackages[0].PackageName})");
+
+            // 6. 执行全量原名恢复与 SHA-256 校验
+            var restoreReport = await restoreEngine.RunRestoreAsync(expectedTargetDir, restoreOutputDir, ConflictResolution.Overwrite);
+            Assert(restoreReport.RestoredFiles == 3, $"成功原名恢复所有 3 个文件 (还原数: {restoreReport.RestoredFiles})");
+            Assert(restoreReport.IntegrityVerifiedFiles == 3, "所有恢复文件 SHA-256 完整性强校验 100% 一致");
+            Assert(File.Exists(Path.Combine(restoreOutputDir, longFileName)), "270 字节超长文件名成功还原为原始长文件名");
+            Assert(File.Exists(Path.Combine(restoreOutputDir, "项目子档案", "子项目清单.txt")), "多层嵌套子目录文件完整原样还原");
+
+            // 7. 清理本地隔离临时数据
+            try { Directory.Delete(tempBase, true); } catch { }
+            Assert(!Directory.Exists(tempBase), "测试完毕安全清理本地临时隔离测试目录");
         }
     }
 }

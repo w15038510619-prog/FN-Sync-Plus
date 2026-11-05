@@ -26,6 +26,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private readonly TaskManager _taskManager;
         private readonly SmbAuthService _smbService;
         private readonly AppSettings _settings;
+        private readonly FnOsIntegrationService _fnOsService;
 
         public NasBrowserViewModel NasBrowser { get; }
 
@@ -77,17 +78,19 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private string _statusMessage = string.Empty;
 
-        public AddFolderWizardViewModel(TaskManager taskManager, SmbAuthService smbService, AppSettings settings, NasBrowserViewModel nasBrowser)
+        public AddFolderWizardViewModel(TaskManager taskManager, SmbAuthService smbService, AppSettings settings, NasBrowserViewModel nasBrowser, FnOsIntegrationService fnOsService)
         {
             _taskManager = taskManager;
             _smbService = smbService;
             _settings = settings;
             NasBrowser = nasBrowser;
+            _fnOsService = fnOsService;
 
             NasBrowser.PropertyChanged += (s, e) =>
             {
                 if (e.PropertyName == nameof(NasBrowser.CurrentUncPath) || 
-                    e.PropertyName == nameof(NasBrowser.HasWritePermission))
+                    e.PropertyName == nameof(NasBrowser.HasWritePermission) ||
+                    e.PropertyName == nameof(NasBrowser.IsPersonalSpaceGuidanceActive))
                 {
                     UpdateStepState();
                 }
@@ -112,19 +115,32 @@ namespace FNSyncPlus.WinUI.ViewModels
                 return;
             }
 
-            var (defaultRoot, eval, hasPersonal) = await _smbService.ResolveDefaultBackupRootAsync(server, user, _settings.PreferredBackupRoot);
-            NasDestinationRoot = defaultRoot;
-            SecurityTitle = eval.Title;
-            SecurityDescription = eval.Description;
-            SecurityBadgeBg = eval.BadgeBgHex;
-            SecurityBadgeColor = eval.BadgeColorHex;
-            IsTeamShareWarning = eval.State == NasShareSecurityState.TeamShare;
-            CanCreate = !string.IsNullOrWhiteSpace(NasDestinationRoot);
-
-            if (!string.IsNullOrWhiteSpace(NasDestinationRoot))
+            var status = await _fnOsService.EvaluatePersonalSpaceAsync(server, user, _settings.PreferredBackupRoot);
+            if (status.HasPersonalSpaceTarget)
             {
-                await RecomputePlannedTasksAsync();
+                NasDestinationRoot = status.PersonalSpaceRootUnc;
+                SecurityTitle = status.DisplayTitle;
+                SecurityDescription = status.Explanation;
+                SecurityBadgeBg = "#DCFCE7";
+                SecurityBadgeColor = "#15803D";
+                IsTeamShareWarning = false;
+                CanCreate = true;
+                if (!string.IsNullOrWhiteSpace(NasDestinationRoot))
+                {
+                    await RecomputePlannedTasksAsync();
+                }
             }
+            else
+            {
+                NasDestinationRoot = string.Empty;
+                SecurityTitle = status.DisplayTitle;
+                SecurityDescription = status.Explanation;
+                SecurityBadgeBg = "#FEF3C7";
+                SecurityBadgeColor = "#D97706";
+                IsTeamShareWarning = false;
+                CanCreate = false;
+            }
+
             UpdateStepState();
         }
 
@@ -193,10 +209,22 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
             else if (CurrentStep == 2)
             {
+                if (NasBrowser.IsPersonalSpaceGuidanceActive)
+                {
+                    StatusMessage = "当前尚未配置个人专属 SMB 共享，无法继续。请根据指引配置或在左侧选择其他有效共享。";
+                    return;
+                }
+
                 NasBrowser.ConfirmSelection();
                 string selected = !string.IsNullOrWhiteSpace(NasBrowser.ConfirmedSelectedPath)
                     ? NasBrowser.ConfirmedSelectedPath
                     : NasBrowser.CurrentUncPath;
+
+                if (string.IsNullOrWhiteSpace(selected) || selected.Contains("FN_PERSONAL_SPACE_GUIDANCE"))
+                {
+                    StatusMessage = "请先选择有效的 NAS 共享目录后再继续。";
+                    return;
+                }
 
                 var (server, share, baseShareUnc, isServerRoot) = PathHelper.ParseUncShare(selected);
                 if (isServerRoot || string.IsNullOrEmpty(share))
@@ -246,7 +274,8 @@ namespace FNSyncPlus.WinUI.ViewModels
             CanGoNext = CurrentStep switch
             {
                 1 => SelectedLocalFolders.Count > 0,
-                2 => !string.IsNullOrWhiteSpace(NasBrowser.CurrentUncPath) 
+                2 => !NasBrowser.IsPersonalSpaceGuidanceActive 
+                     && !string.IsNullOrWhiteSpace(NasBrowser.CurrentUncPath) 
                      && !NasBrowser.IsServerRoot 
                      && NasBrowser.HasWritePermission,
                 3 => CanCreate && PlannedTasks.Count > 0,
@@ -325,13 +354,17 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             foreach (var item in PlannedTasks)
             {
+                // 确保在 NAS 个人空间根目录下自动建立同名备份子目录
+                var (ensureOk, ensuredPath, _) = await _fnOsService.EnsureSameNameBackupFolderAsync(NasDestinationRoot, item.SourcePath);
+                string finalTarget = ensureOk ? ensuredPath : item.FullTargetUnc;
+
                 var task = new SyncTask
                 {
                     TaskId = Guid.NewGuid().ToString("N"),
                     TaskName = item.SourceFolderName,
                     SourceFolder = item.SourcePath,
                     DestinationRoot = NasDestinationRoot,
-                    DestinationFolder = item.FullTargetUnc,
+                    DestinationFolder = finalTarget,
                     Enabled = true,
                     AutoSyncEnabled = true,
                     RealtimeWatchEnabled = true,

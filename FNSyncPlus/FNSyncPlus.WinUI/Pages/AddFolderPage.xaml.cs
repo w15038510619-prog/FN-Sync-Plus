@@ -52,9 +52,30 @@ namespace FNSyncPlus.WinUI.Pages
         {
             if (e.AddedItems.Count > 0 && e.AddedItems[0] is CategoryItem category)
             {
-                await ViewModel.NasBrowser.NavigateToFolderAsync(category.UncPath);
+                await ViewModel.NasBrowser.SelectCategoryAsync(category);
             }
         }
+
+        private async void BtnApplyCustomPersonalRoot_Click(object sender, RoutedEventArgs e)
+        {
+            string path = TxtCustomPersonalRoot.Text.Trim();
+            if (string.IsNullOrWhiteSpace(path)) return;
+
+            bool ok = await ViewModel.NasBrowser.ApplyCustomPersonalPathAsync(path);
+            if (ok)
+            {
+                TxtCustomPersonalRoot.Text = string.Empty;
+            }
+        }
+
+        private async void BtnRefreshPersonalDetection_Click(object sender, RoutedEventArgs e)
+        {
+            await ViewModel.NasBrowser.InitializeAsync();
+        }
+
+        public Visibility GetExplorerVisibility(bool isGuidance) => isGuidance ? Visibility.Collapsed : Visibility.Visible;
+        public Visibility GetGuidanceVisibility(bool isGuidance) => isGuidance ? Visibility.Visible : Visibility.Collapsed;
+        public Visibility GetOfficialInfoVisibility(string? text) => !string.IsNullOrWhiteSpace(text) ? Visibility.Visible : Visibility.Collapsed;
 
         private async void BreadcrumbBar_ItemClicked(BreadcrumbBar sender, BreadcrumbBarItemClickedEventArgs args)
         {
