@@ -72,6 +72,23 @@ namespace FNSyncPlus.WinUI.Pages
             }
         }
 
+        private async void BtnRefreshFolder_Click(object sender, RoutedEventArgs e)
+        {
+            await ViewModel.NasBrowser.RefreshCurrentFolderAsync();
+        }
+
+        private async void BtnNavigateUp_Click(object sender, RoutedEventArgs e)
+        {
+            await ViewModel.NasBrowser.NavigateUpAsync();
+        }
+
+        private void BtnInlineCancel_Click(object sender, RoutedEventArgs e)
+        {
+            TxtInlineNewFolderName.Text = string.Empty;
+            ViewModel.NasBrowser.LastErrorMessage = string.Empty;
+            InlineNewFolderFlyout.Hide();
+        }
+
         private async void BtnInlineCreateFolder_Click(object sender, RoutedEventArgs e)
         {
             string name = TxtInlineNewFolderName.Text.Trim();
@@ -81,6 +98,7 @@ namespace FNSyncPlus.WinUI.Pages
             if (success)
             {
                 TxtInlineNewFolderName.Text = string.Empty;
+                ViewModel.NasBrowser.LastErrorMessage = string.Empty;
                 InlineNewFolderFlyout.Hide();
             }
         }
@@ -114,6 +132,7 @@ namespace FNSyncPlus.WinUI.Pages
         public Visibility GetEmptyStateVisibility(int count) => count == 0 ? Visibility.Visible : Visibility.Collapsed;
         public Visibility GetListStateVisibility(int count) => count > 0 ? Visibility.Visible : Visibility.Collapsed;
         public Visibility GetEmptyNoticeVisibility(int count) => count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        public Visibility GetErrorNoticeVisibility(string? error) => !string.IsNullOrWhiteSpace(error) ? Visibility.Visible : Visibility.Collapsed;
 
         public InfoBarSeverity GetStep1NoticeSeverity(int count) => count > 0 ? InfoBarSeverity.Informational : InfoBarSeverity.Warning;
 

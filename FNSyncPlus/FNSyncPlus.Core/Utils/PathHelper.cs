@@ -164,6 +164,41 @@ namespace FNSyncPlus.Core.Utils
         }
 
         /// <summary>
+        /// 解析 UNC 路径，提取服务器名称、共享名称、共享根 UNC 与是否仅为服务器根路径
+        /// 例如: "\\192.168.8.120\share\sub" -> (ServerName: "192.168.8.120", ShareName: "share", BaseShareUnc: "\\192.168.8.120\share", IsServerRoot: false)
+        ///       "\\192.168.8.120" -> (ServerName: "192.168.8.120", ShareName: "", BaseShareUnc: "\\192.168.8.120", IsServerRoot: true)
+        /// </summary>
+        public static (string ServerName, string ShareName, string BaseShareUnc, bool IsServerRoot) ParseUncShare(string uncPath)
+        {
+            if (string.IsNullOrWhiteSpace(uncPath)) return (string.Empty, string.Empty, string.Empty, true);
+            string clean = RemoveLongPathPrefix(uncPath).Trim().Replace('/', '\\').Trim('\\');
+            var parts = clean.Split('\\', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0) return (string.Empty, string.Empty, string.Empty, true);
+            if (parts.Length == 1) return (parts[0], string.Empty, $@"\\{parts[0]}", true);
+            return (parts[0], parts[1], $@"\\{parts[0]}\{parts[1]}", false);
+        }
+
+        /// <summary>
+        /// 获取 UNC 路径的父级路径。
+        /// 如 \\192.168.8.120\share\sub -> \\192.168.8.120\share
+        /// 如 \\192.168.8.120\share -> \\192.168.8.120
+        /// 如 \\192.168.8.120 -> \\192.168.8.120
+        /// </summary>
+        public static string GetParentUncPath(string uncPath)
+        {
+            if (string.IsNullOrWhiteSpace(uncPath)) return string.Empty;
+            string clean = RemoveLongPathPrefix(uncPath).Trim().Replace('/', '\\').TrimEnd('\\');
+            var parts = clean.TrimStart('\\').Split('\\', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length <= 1)
+            {
+                return parts.Length == 1 ? $@"\\{parts[0]}" : string.Empty;
+            }
+
+            var parentParts = parts.Take(parts.Length - 1);
+            return $@"\\{string.Join('\\', parentParts)}";
+        }
+
+        /// <summary>
         /// 组合 Windows 本地或 UNC 路径，并使用反斜杠
         /// </summary>
         public static string CombineWindowsPath(string basePath, string relativePath)

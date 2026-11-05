@@ -61,10 +61,9 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 TargetNasShare = settings.PreferredBackupRoot;
             }
-            else if (!string.IsNullOrEmpty(settings.NasServer))
+            else
             {
-                string user = !string.IsNullOrEmpty(settings.Username) ? settings.Username : "cenco";
-                TargetNasShare = $@"\\{settings.NasServer}\{user}";
+                TargetNasShare = string.Empty;
             }
         }
 
@@ -120,8 +119,14 @@ namespace FNSyncPlus.WinUI.ViewModels
                 TestLabReport report;
                 if (SelectedModeIndex == 1)
                 {
-                    StatusText = "正在执行真实飞牛 NAS 端到端测试 (自动创建隔离目录 FN_TEST_*)...";
                     string target = !string.IsNullOrWhiteSpace(TargetNasShare) ? TargetNasShare : _settings.PreferredBackupRoot;
+                    if (string.IsNullOrWhiteSpace(target))
+                    {
+                        StatusText = "测试失败：未配置有效的真实 NAS 共享路径。请先在上方输入或选择有效的 NAS 共享。";
+                        ExecutionLogs.Add($"[{DateTime.Now:HH:mm:ss}] 错误：未指定目标 NAS 共享，无法执行网络端到端测试。");
+                        return;
+                    }
+                    StatusText = "正在执行真实飞牛 NAS 端到端测试 (自动创建隔离目录 FN_TEST_*)...";
                     report = await _engine.RunNasSmbTestAsync(target, progress);
                 }
                 else

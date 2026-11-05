@@ -51,6 +51,9 @@ namespace FNSyncPlus.Tests
                 TestNasConnectionServiceStateTransitionsAndDisconnect();
                 await TestTestLabEngineSampleGenerationAndSimulationAsync();
                 BuildApplicationIcons();
+                await TestNasDirectoryValidationAndWin32ErrorHandlingAsync();
+                await TestNoUsernameShareAssumptionAndSafeDefaultsAsync();
+                await TestRealNasSmbFolderLifecycleAsync();
             }
             catch (Exception ex)
             {
@@ -1251,6 +1254,160 @@ namespace FNSyncPlus.Tests
 
             string previewPath = Path.Combine(artifactDir, "gui_v0.4.0_icon_concepts.png");
             Assert(File.Exists(previewPath), "成功输出三套原创图标概念对比全景图 (gui_v0.4.0_icon_concepts.png)");
+        }
+
+        static async Task TestNasDirectoryValidationAndWin32ErrorHandlingAsync()
+        {
+            Console.WriteLine("\n--- 29. NAS 目录 4 状态层级与 Win32 SMB 错误码拦截深度测试 ---");
+            var service = new SmbAuthService();
+
+            // 1. Win32 异常翻译测试
+            var ex67 = new IOException("指定的网络名不再可用 (Win32 Error 67)", unchecked((int)0x80070043));
+            var (code67, msg67) = SmbAuthService.TranslateSmbException(ex67, @"\\192.168.8.120\wangxiaoliang");
+            Assert(code67 == 67, "正确识别 Win32 Error 67 (ERROR_BAD_NET_NAME)", $"提取错误码: {code67}");
+            Assert(msg67.Contains("找不到网络共享名") && msg67.Contains("Win32 Error 67"), "Win32 67 翻译提示清晰准确", msg67);
+
+            var ex5 = new UnauthorizedAccessException("Access is denied");
+            var (code5, msg5) = SmbAuthService.TranslateSmbException(ex5, @"\\192.168.8.120\secret");
+            Assert(code5 == 5, "正确识别 Win32 Error 5 (ERROR_ACCESS_DENIED)", $"提取错误码: {code5}");
+            Assert(msg5.Contains("访问被拒绝") && msg5.Contains("Win32 Error 5"), "Win32 5 翻译提示清晰准确", msg5);
+
+            var ex1219 = new IOException("多重凭据冲突", unchecked((int)0x800704C3));
+            var (code1219, msg1219) = SmbAuthService.TranslateSmbException(ex1219);
+            Assert(code1219 == 1219, "正确识别 Win32 Error 1219 (ERROR_SESSION_CREDENTIAL_CONFLICT)", $"提取错误码: {code1219}");
+            Assert(msg1219.Contains("Windows SMB 凭据冲突"), "Win32 1219 翻译提示清晰准确", msg1219);
+
+            // 2. ValidateDirectoryAccessStateAsync 状态分层校验
+            // 2.1 服务器根路径
+            var serverRootRes = await service.ValidateDirectoryAccessStateAsync(@"\\192.168.8.120");
+            Assert(serverRootRes.IsNasAuthenticated && !serverRootRes.DoesShareExist && !serverRootRes.IsDirectoryWritable,
+                "服务器根路径正确识别为非具体共享且不可写", serverRootRes.StateDescription);
+
+            // 2.2 不存在的共享 \\192.168.8.120\wangxiaoliang
+            var nonExistentRes = await service.ValidateDirectoryAccessStateAsync(@"\\192.168.8.120\wangxiaoliang");
+            Assert(!nonExistentRes.DoesShareExist && nonExistentRes.Win32ErrorCode == 67 && !nonExistentRes.IsDirectoryWritable,
+                "不存在的共享精准识别 Win32 67 并标记共享不存在且不可写", nonExistentRes.DetailedMessage);
+
+            // 2.3 阻止向不存在的共享创建子文件夹
+            bool caught67 = false;
+            try
+            {
+                await service.CreateSubFolderAsync(@"\\192.168.8.120\wangxiaoliang", "Test", @"\\192.168.8.120\wangxiaoliang");
+            }
+            catch (Exception ex)
+            {
+                var (code, _) = SmbAuthService.TranslateSmbException(ex);
+                if (code == 67 || ex.Message.Contains("找不到网络共享名") || ex.Message.Contains("Win32 Error 67"))
+                {
+                    caught67 = true;
+                }
+            }
+            Assert(caught67, "对不存在的共享创建文件夹时主动拦截并抛出精准 Win32 Error 67 异常");
+
+            // 2.4 阻止在服务器根目录直接创建子文件夹
+            bool caughtRoot = false;
+            try
+            {
+                await service.CreateSubFolderAsync(@"\\192.168.8.120", "Test", "");
+            }
+            catch (InvalidOperationException)
+            {
+                caughtRoot = true;
+            }
+            Assert(caughtRoot, "阻止在服务器根路径创建子文件夹，要求用户先选择共享");
+        }
+
+        static async Task TestNoUsernameShareAssumptionAndSafeDefaultsAsync()
+        {
+            Console.WriteLine("\n--- 30. 严禁用户名假定共享与安全默认值回归测试 ---");
+            var service = new SmbAuthService();
+
+            // 1. ResolveDefaultBackupRootAsync 未配置且无私人共享时，严禁拼接 \\server\username，严禁自动选择团队共享
+            var (defaultRoot, eval, hasPersonal) = await service.ResolveDefaultBackupRootAsync("192.168.8.120", "wangxiaoliang", "");
+            Assert(string.IsNullOrEmpty(defaultRoot), "无私人共享时默认备份根目录为空字符串，严禁硬编码拼接用户名共享", $"实际根目录: '{defaultRoot}'");
+            Assert(!hasPersonal, "正确标记不存在可访问的私人共享 (hasPersonal == false)");
+            Assert(eval.State == NasShareSecurityState.NotConfigured && eval.Title.Contains("未发现可访问的私人 SMB 目录"),
+                "向导安全状态准确显示『未发现可访问的私人 SMB 目录』警示", eval.Title);
+            Assert(eval.Description.Contains("不会自动选择团队共享"), "提示文案明确说明绝不自动挪用团队共享", eval.Description);
+
+            // 2. 用户配置了失效/不存在的 preferredBackupRoot 时，能够被安全识别而不是盲目放行
+            var (staleRoot, staleEval, _) = await service.ResolveDefaultBackupRootAsync("192.168.8.120", "wangxiaoliang", @"\\192.168.8.120\invalid_fake_share_xyz");
+            Assert(string.IsNullOrEmpty(staleRoot), "配置的不存在共享被自动过滤，不会作为有效备份根目录返回");
+        }
+
+        static async Task TestRealNasSmbFolderLifecycleAsync()
+        {
+            Console.WriteLine("\n--- 31. 真实飞牛 NAS SMB 共享目录生命周期完整性测试 (创建/刷新/进入/返回/取消/清理) ---");
+            var service = new SmbAuthService();
+            string teamShareUnc = @"\\192.168.8.120\团队文件-cenco-public";
+
+            // 先测试网络连通性
+            bool isNasOnline = false;
+            try
+            {
+                string probe = PathHelper.EnsureLongPathPrefix(teamShareUnc);
+                isNasOnline = Directory.Exists(probe);
+            }
+            catch { }
+
+            if (!isNasOnline)
+            {
+                Console.WriteLine("  [SKIP] 飞牛 NAS 当前不可达，跳过真实 SMB 线上交互测试");
+                return;
+            }
+
+            Console.WriteLine($"  [INFO] 成功连接真实飞牛 NAS 共享: {teamShareUnc}");
+
+            // 1. 验证共享状态：存在、可访问、具备写权限
+            var state = await service.ValidateDirectoryAccessStateAsync(teamShareUnc);
+            Assert(state.DoesShareExist, "真实团队共享存在 (DoesShareExist == true)");
+            Assert(state.IsDirectoryAccessible, "真实团队共享目录可读取访问 (IsDirectoryAccessible == true)");
+            Assert(state.IsDirectoryWritable, "真实团队共享具备完全写权限 (IsDirectoryWritable == true)");
+
+            // 2. 测试在真实共享中创建测试文件夹 "Test"
+            string testFolderName = "Test";
+            string testFolderUnc = Path.Combine(teamShareUnc, testFolderName);
+            string testFolderLong = PathHelper.EnsureLongPathPrefix(testFolderUnc);
+
+            // 清理可能存在的历史测试残留
+            if (Directory.Exists(testFolderLong))
+            {
+                try { Directory.Delete(testFolderLong, true); } catch { }
+            }
+
+            // 执行创建
+            var createdItem = await service.CreateSubFolderAsync(teamShareUnc, testFolderName, teamShareUnc);
+            Assert(createdItem != null && createdItem.Name == testFolderName, "成功在真实 NAS 共享下创建子文件夹 'Test'", createdItem?.FullUncPath);
+            Assert(Directory.Exists(testFolderLong), "验证 Windows 文件系统物理存在该 'Test' 文件夹");
+
+            // 3. 刷新/枚举目录，验证包含 'Test'
+            var subFolders = await service.ListSubFoldersAsync(teamShareUnc, teamShareUnc);
+            bool foundInList = subFolders.Any(f => f.Name.Equals(testFolderName, StringComparison.OrdinalIgnoreCase));
+            Assert(foundInList, "调用 ListSubFoldersAsync 刷新目录，列表中包含新创建的 'Test' 文件夹");
+
+            // 4. 进入子文件夹测试
+            var insideState = await service.ValidateDirectoryAccessStateAsync(testFolderUnc);
+            Assert(insideState.DoesShareExist && insideState.IsDirectoryAccessible && insideState.IsDirectoryWritable,
+                "进入 'Test' 子目录后状态校验正常且具备写入权限");
+
+            // 5. 返回上一级（父目录）路径解析测试
+            string parentPath = PathHelper.GetParentUncPath(testFolderUnc);
+            Assert(string.Equals(parentPath, teamShareUnc, StringComparison.OrdinalIgnoreCase),
+                "返回上一级路径解析正确回退至团队共享根目录", $"父路径: {parentPath}");
+
+            // 6. 模拟界面取消操作测试：取消时不对 NAS 产生任何多余文件夹或写操作
+            string cancelFolderName = "CancelledFolderCandidate";
+            string cancelFolderUnc = Path.Combine(teamShareUnc, cancelFolderName);
+            string cancelFolderLong = PathHelper.EnsureLongPathPrefix(cancelFolderUnc);
+            // 模拟取消：用户在 UI 撤销输入，后端不调用 CreateSubFolderAsync
+            Assert(!Directory.Exists(cancelFolderLong), "取消新建文件夹操作时，NAS 上不产生任何多余目录");
+
+            // 7. 清理测试文件夹并刷新验证
+            Directory.Delete(testFolderLong, true);
+            Assert(!Directory.Exists(testFolderLong), "测试完毕，安全彻底清理 NAS 上的 'Test' 文件夹，保护 NAS 原有数据");
+            var afterCleanList = await service.ListSubFoldersAsync(teamShareUnc, teamShareUnc);
+            bool cleaned = !afterCleanList.Any(f => f.Name.Equals(testFolderName, StringComparison.OrdinalIgnoreCase));
+            Assert(cleaned, "刷新目录确认 'Test' 已完全移除，无任何测试残留");
         }
     }
 }

@@ -41,6 +41,23 @@ namespace FNSyncPlus.WinUI.Dialogs
             }
         }
 
+        private async void BtnRefreshFolder_Click(object sender, RoutedEventArgs e)
+        {
+            await ViewModel.RefreshCurrentFolderAsync();
+        }
+
+        private async void BtnNavigateUp_Click(object sender, RoutedEventArgs e)
+        {
+            await ViewModel.NavigateUpAsync();
+        }
+
+        private void BtnCancelNewFolder_Click(object sender, RoutedEventArgs e)
+        {
+            TxtNewFolderName.Text = string.Empty;
+            ViewModel.LastErrorMessage = string.Empty;
+            NewFolderFlyout.Hide();
+        }
+
         private async void BtnConfirmCreateFolder_Click(object sender, RoutedEventArgs e)
         {
             string name = TxtNewFolderName.Text.Trim();
@@ -50,6 +67,7 @@ namespace FNSyncPlus.WinUI.Dialogs
             if (success)
             {
                 TxtNewFolderName.Text = string.Empty;
+                ViewModel.LastErrorMessage = string.Empty;
                 NewFolderFlyout.Hide();
             }
         }

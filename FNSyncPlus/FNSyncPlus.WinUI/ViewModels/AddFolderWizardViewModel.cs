@@ -7,6 +7,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
+using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.WinUI.ViewModels
 {
@@ -106,19 +107,25 @@ namespace FNSyncPlus.WinUI.ViewModels
                 NasDestinationRoot = string.Empty;
                 SecurityTitle = "尚未连接 NAS";
                 SecurityDescription = "请先在【NAS 设备】页面完成登录认证。";
+                CanCreate = false;
+                UpdateStepState();
                 return;
             }
 
-            if (!string.IsNullOrEmpty(_settings.PreferredBackupRoot))
-            {
-                NasDestinationRoot = _settings.PreferredBackupRoot;
-            }
-            else
-            {
-                NasDestinationRoot = $@"\\{server}\{user}";
-            }
+            var (defaultRoot, eval, hasPersonal) = await _smbService.ResolveDefaultBackupRootAsync(server, user, _settings.PreferredBackupRoot);
+            NasDestinationRoot = defaultRoot;
+            SecurityTitle = eval.Title;
+            SecurityDescription = eval.Description;
+            SecurityBadgeBg = eval.BadgeBgHex;
+            SecurityBadgeColor = eval.BadgeColorHex;
+            IsTeamShareWarning = eval.State == NasShareSecurityState.TeamShare;
+            CanCreate = !string.IsNullOrWhiteSpace(NasDestinationRoot);
 
-            await EvaluateNasRootSecurityAsync();
+            if (!string.IsNullOrWhiteSpace(NasDestinationRoot))
+            {
+                await RecomputePlannedTasksAsync();
+            }
+            UpdateStepState();
         }
 
         public async Task EvaluateNasRootSecurityAsync()
@@ -175,7 +182,14 @@ namespace FNSyncPlus.WinUI.ViewModels
                 if (SelectedLocalFolders.Count == 0) return;
                 CurrentStep = 2;
                 StepIndicatorText = "步骤 2 / 3：选择 NAS 备份位置";
-                _ = NasBrowser.NavigateToFolderAsync(NasDestinationRoot);
+                if (!string.IsNullOrWhiteSpace(NasDestinationRoot))
+                {
+                    _ = NasBrowser.NavigateToFolderAsync(NasDestinationRoot);
+                }
+                else
+                {
+                    await NasBrowser.InitializeAsync();
+                }
             }
             else if (CurrentStep == 2)
             {
@@ -184,11 +198,20 @@ namespace FNSyncPlus.WinUI.ViewModels
                     ? NasBrowser.ConfirmedSelectedPath
                     : NasBrowser.CurrentUncPath;
 
-                if (!string.IsNullOrWhiteSpace(selected))
+                var (server, share, baseShareUnc, isServerRoot) = PathHelper.ParseUncShare(selected);
+                if (isServerRoot || string.IsNullOrEmpty(share))
                 {
-                    NasDestinationRoot = selected;
+                    StatusMessage = "请先在下方列表中点击进入具体的 NAS 共享文件夹后再进入下一步。";
+                    return;
                 }
 
+                if (!NasBrowser.HasWritePermission)
+                {
+                    StatusMessage = "所选目录没有写入权限，无法作为备份存储位置。";
+                    return;
+                }
+
+                NasDestinationRoot = selected;
                 await EvaluateNasRootSecurityAsync();
                 await RecomputePlannedTasksAsync();
 
@@ -223,7 +246,9 @@ namespace FNSyncPlus.WinUI.ViewModels
             CanGoNext = CurrentStep switch
             {
                 1 => SelectedLocalFolders.Count > 0,
-                2 => !string.IsNullOrWhiteSpace(NasBrowser.CurrentUncPath) && NasBrowser.HasWritePermission,
+                2 => !string.IsNullOrWhiteSpace(NasBrowser.CurrentUncPath) 
+                     && !NasBrowser.IsServerRoot 
+                     && NasBrowser.HasWritePermission,
                 3 => CanCreate && PlannedTasks.Count > 0,
                 _ => false
             };
@@ -233,6 +258,21 @@ namespace FNSyncPlus.WinUI.ViewModels
                 StatusMessage = SelectedLocalFolders.Count == 0 
                     ? "请先添加至少一个本地待备份文件夹以继续下一步。" 
                     : $"已选择 {SelectedLocalFolders.Count} 个待备份文件夹。";
+            }
+            else if (CurrentStep == 2)
+            {
+                if (NasBrowser.IsServerRoot)
+                {
+                    StatusMessage = "当前处于 NAS 服务器根目录，请在下方点击进入具体的共享文件夹后继续。";
+                }
+                else if (!NasBrowser.HasWritePermission)
+                {
+                    StatusMessage = "当前所选目录只读或无写入权限，请选择其他具备写入权限的文件夹。";
+                }
+                else
+                {
+                    StatusMessage = $"已选定 NAS 存储位置: {NasBrowser.CurrentUncPath}";
+                }
             }
         }
 

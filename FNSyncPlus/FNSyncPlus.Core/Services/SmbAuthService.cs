@@ -25,7 +25,8 @@ namespace FNSyncPlus.Core.Services
         VerifiedPersonalSpace, // 已验证的私人备份位置 (绿色盾牌)
         UnverifiedSmbShare,    // 普通 SMB 共享，私人属性未验证 (蓝色)
         TeamShare,             // 团队共享 (黄色警告，可能被其他成员查看)
-        NoPermission           // 无权限 (红色)
+        NoPermission,          // 无写入权限 (红色)
+        ShareNotFound          // 目标共享不存在 (找不到网络名 Win32 Error 67，红色)
     }
 
     public class ShareSecurityEvaluation
@@ -33,7 +34,7 @@ namespace FNSyncPlus.Core.Services
         public NasShareSecurityState State { get; set; } = NasShareSecurityState.NotConfigured;
         public string Title { get; set; } = "尚未配置";
         public string Description { get; set; } = "";
-        public bool IsDangerousForPersonalUse => State == NasShareSecurityState.TeamShare || State == NasShareSecurityState.NoPermission;
+        public bool IsDangerousForPersonalUse => State == NasShareSecurityState.TeamShare || State == NasShareSecurityState.NoPermission || State == NasShareSecurityState.ShareNotFound;
 
         public string BadgeColorHex => State switch
         {
@@ -41,6 +42,7 @@ namespace FNSyncPlus.Core.Services
             NasShareSecurityState.TeamShare => "#B45309",             // Amber
             NasShareSecurityState.UnverifiedSmbShare => "#2563EB",    // Blue
             NasShareSecurityState.NoPermission => "#B91C1C",          // Red
+            NasShareSecurityState.ShareNotFound => "#B91C1C",         // Red
             _ => "#64748B"                                           // Slate
         };
 
@@ -50,8 +52,25 @@ namespace FNSyncPlus.Core.Services
             NasShareSecurityState.TeamShare => "#FEF3C7",             // Light Amber
             NasShareSecurityState.UnverifiedSmbShare => "#DBEAFE",    // Light Blue
             NasShareSecurityState.NoPermission => "#FEE2E2",          // Light Red
+            NasShareSecurityState.ShareNotFound => "#FEE2E2",         // Light Red
             _ => "#F1F5F9"                                           // Light Slate
         };
+    }
+
+    /// <summary>
+    /// 区分 NAS 访问的四个状态层级：认证存在、共享存在、目录可读访问、目录可写
+    /// </summary>
+    public class NasDirectoryValidationResult
+    {
+        public bool IsNasAuthenticated { get; set; }
+        public bool DoesShareExist { get; set; }
+        public bool IsDirectoryAccessible { get; set; }
+        public bool IsDirectoryWritable { get; set; }
+        public int Win32ErrorCode { get; set; }
+        public string ServerName { get; set; } = string.Empty;
+        public string ShareName { get; set; } = string.Empty;
+        public string StateDescription { get; set; } = string.Empty;
+        public string DetailedMessage { get; set; } = string.Empty;
     }
 
     public class SmbShareItem
@@ -430,6 +449,179 @@ namespace FNSyncPlus.Core.Services
         }
 
         /// <summary>
+        /// 解析并翻译 Windows SMB Win32 异常，精准提取 Win32 错误码（Error 67 找不到网络名、Error 5 拒绝访问、Error 1219 凭据冲突等）
+        /// </summary>
+        public static (int ErrorCode, string FriendlyMessage) TranslateSmbException(Exception ex, string? targetPath = null)
+        {
+            int win32Code = 0;
+            if (ex is Win32Exception w32ex)
+            {
+                win32Code = w32ex.NativeErrorCode;
+            }
+            else if (ex.HResult != 0)
+            {
+                win32Code = ex.HResult & 0xFFFF;
+            }
+
+            // 如果异常消息中直接包含特定错误特征
+            string msg = ex.Message ?? string.Empty;
+            if (win32Code == 0)
+            {
+                if (msg.Contains("找不到网络名") || msg.Contains("network name cannot be found") || msg.Contains("BAD_NET_NAME"))
+                {
+                    win32Code = 67;
+                }
+                else if (msg.Contains("拒绝访问") || msg.Contains("Access is denied") || ex is UnauthorizedAccessException)
+                {
+                    win32Code = 5;
+                }
+                else if (msg.Contains("1219") || msg.Contains("SESSION_CREDENTIAL_CONFLICT"))
+                {
+                    win32Code = 1219;
+                }
+            }
+
+            string pathInfo = !string.IsNullOrEmpty(targetPath) ? $"【{targetPath}】" : "";
+
+            string friendly = win32Code switch
+            {
+                67 => $"找不到网络共享名{pathInfo} (Win32 Error 67: ERROR_BAD_NET_NAME)。该共享在 NAS 上不存在或未对外开放。系统已阻止向不存在的共享执行操作。",
+                5 => $"访问被拒绝{pathInfo} (Win32 Error 5: ERROR_ACCESS_DENIED)。当前 NAS 账号缺少访问或写入权限。请在飞牛 fnOS 控制面板分配权限。",
+                1219 => $"Windows SMB 凭据冲突 (Win32 Error 1219: ERROR_SESSION_CREDENTIAL_CONFLICT)。已存在使用其他账号连接到该 NAS 的会话。请断开现有连接后重试。",
+                53 => $"找不到网络路径{pathInfo} (Win32 Error 53: ERROR_BAD_NETPATH)。无法连接到目标 NAS 服务器，请检查局域网连接与 NAS IP 地址。",
+                1326 => $"登录身份验证失败 (Win32 Error 1326: ERROR_LOGON_FAILURE)。用户名或密码错误，请检查 NAS 账号密码。",
+                _ => $"操作失败{pathInfo}: {ex.Message} (Win32 Code: {win32Code})"
+            };
+
+            return (win32Code, friendly);
+        }
+
+        /// <summary>
+        /// 深度校验指定 NAS 路径，严格区分「NAS 已认证」「共享存在」「目录可访问」「目录可写」四种状态
+        /// </summary>
+        public async Task<NasDirectoryValidationResult> ValidateDirectoryAccessStateAsync(string uncPath, string? fallbackServer = null)
+        {
+            return await Task.Run(() =>
+            {
+                var result = new NasDirectoryValidationResult();
+                if (string.IsNullOrWhiteSpace(uncPath))
+                {
+                    result.StateDescription = "未配置路径";
+                    result.DetailedMessage = "尚未指定 NAS 备份根目录。";
+                    return result;
+                }
+
+                var (server, share, baseShareUnc, isServerRoot) = PathHelper.ParseUncShare(uncPath);
+                if (string.IsNullOrEmpty(server)) server = fallbackServer ?? string.Empty;
+                result.ServerName = server;
+                result.ShareName = share;
+
+                if (isServerRoot || string.IsNullOrEmpty(share))
+                {
+                    result.IsNasAuthenticated = true;
+                    result.DoesShareExist = false;
+                    result.StateDescription = "处于服务器根路径 (尚未选择具体共享)";
+                    result.DetailedMessage = "请在共享列表中点击进入具体的共享文件夹。";
+                    return result;
+                }
+
+                string shareLongPath = PathHelper.EnsureLongPathPrefix(baseShareUnc);
+                string targetLongPath = PathHelper.EnsureLongPathPrefix(uncPath);
+
+                // 1. 验证目标共享是否存在 (排除 Win32 Error 67)
+                try
+                {
+                    if (!Directory.Exists(shareLongPath))
+                    {
+                        result.IsNasAuthenticated = true;
+                        result.DoesShareExist = false;
+                        result.Win32ErrorCode = 67; // ERROR_BAD_NET_NAME
+                        result.StateDescription = "共享不存在 (找不到网络名)";
+                        result.DetailedMessage = $"找不到网络共享名【{share}】(Win32 Error 67: ERROR_BAD_NET_NAME)。该共享在 NAS 上不存在，请先选择有效共享。";
+                        return result;
+                    }
+                    result.DoesShareExist = true;
+                }
+                catch (Exception ex)
+                {
+                    var (code, msg) = TranslateSmbException(ex, baseShareUnc);
+                    result.Win32ErrorCode = code;
+                    result.DoesShareExist = false;
+                    result.StateDescription = code == 67 ? "共享不存在 (找不到网络名)" : "共享验证失败";
+                    result.DetailedMessage = msg;
+                    return result;
+                }
+
+                // 2. 验证目录是否可访问/列出 (排除 Win32 Error 5)
+                try
+                {
+                    if (Directory.Exists(targetLongPath))
+                    {
+                        var di = new DirectoryInfo(targetLongPath);
+                        _ = di.EnumerateDirectories().Take(1).ToList();
+                        result.IsDirectoryAccessible = true;
+                    }
+                    else
+                    {
+                        result.IsDirectoryAccessible = true;
+                    }
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    result.IsDirectoryAccessible = false;
+                    result.Win32ErrorCode = 5; // ERROR_ACCESS_DENIED
+                    result.StateDescription = "目录拒绝访问 (权限不足)";
+                    result.DetailedMessage = $"访问被拒绝 (Win32 Error 5: ERROR_ACCESS_DENIED)。当前账号没有读取目录【{uncPath}】的权限。";
+                    return result;
+                }
+                catch (Exception ex)
+                {
+                    var (code, msg) = TranslateSmbException(ex, uncPath);
+                    result.IsDirectoryAccessible = false;
+                    result.Win32ErrorCode = code;
+                    result.StateDescription = "目录无法访问";
+                    result.DetailedMessage = msg;
+                    return result;
+                }
+
+                // 3. 验证目录是否具备写入权限
+                string probeBase = Directory.Exists(targetLongPath) ? uncPath : baseShareUnc;
+                string testFile = Path.Combine(probeBase, $".fn_perm_test_{Guid.NewGuid():N}.tmp");
+                string testFileLong = PathHelper.EnsureLongPathPrefix(testFile);
+
+                try
+                {
+                    using (var fs = new FileStream(testFileLong, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    {
+                        byte[] testBytes = Encoding.UTF8.GetBytes("probe");
+                        fs.Write(testBytes, 0, testBytes.Length);
+                    }
+                    try { File.Delete(testFileLong); } catch { }
+                    result.IsDirectoryWritable = true;
+                    result.StateDescription = "就绪且具备读写权限";
+                    result.DetailedMessage = $"目录【{uncPath}】有效，且当前账号具备完整的读写权限。";
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    result.IsDirectoryWritable = false;
+                    result.Win32ErrorCode = 5;
+                    result.StateDescription = "目录只读 (无写入权限)";
+                    result.DetailedMessage = $"当前账号在【{uncPath}】缺少写入权限 (Win32 Error 5: ERROR_ACCESS_DENIED)。请在飞牛后台开放写权限。";
+                }
+                catch (Exception ex)
+                {
+                    var (code, msg) = TranslateSmbException(ex, uncPath);
+                    result.IsDirectoryWritable = false;
+                    result.Win32ErrorCode = code;
+                    result.StateDescription = "无法写入";
+                    result.DetailedMessage = msg;
+                }
+
+                return result;
+            });
+        }
+
+        /// <summary>
         /// 深度评估指定 NAS 路径的安全与隐私级别，明确区分私人空间、团队共享、未验证共享及无权限
         /// </summary>
         public static ShareSecurityEvaluation EvaluateShareSecurity(string? uncPath, string? username, bool canWrite = true, string? writeError = null)
@@ -444,6 +636,24 @@ namespace FNSyncPlus.Core.Services
                 return eval;
             }
 
+            var (server, share, baseShareUnc, isServerRoot) = PathHelper.ParseUncShare(uncPath);
+            if (isServerRoot || string.IsNullOrEmpty(share))
+            {
+                eval.State = NasShareSecurityState.NotConfigured;
+                eval.Title = "处于 NAS 服务器根目录";
+                eval.Description = "请在共享列表中选择具体的共享文件夹作为备份存储位置。";
+                return eval;
+            }
+
+            // 检查是否为共享不存在 (Error 67: 找不到网络名)
+            if (writeError != null && (writeError.Contains("67") || writeError.Contains("找不到网络名") || writeError.Contains("network name cannot be found") || writeError.Contains("BAD_NET_NAME")))
+            {
+                eval.State = NasShareSecurityState.ShareNotFound;
+                eval.Title = "找不到网络共享名 (Win32 Error 67)";
+                eval.Description = $"NAS 上未找到指定的共享文件夹【{share}】。该共享不存在或已被管理员关闭。系统已阻止向不存在的共享创建任务。";
+                return eval;
+            }
+
             if (!canWrite)
             {
                 eval.State = NasShareSecurityState.NoPermission;
@@ -451,10 +661,6 @@ namespace FNSyncPlus.Core.Services
                 eval.Description = $"当前账号无法向此目录写入文件: {writeError ?? "拒绝访问"}。请在 fnOS 管理后台为此账号开通读写权限。";
                 return eval;
             }
-
-            string trimmed = uncPath.Trim().TrimEnd('\\', '/');
-            string[] parts = trimmed.Split(new[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
-            string share = parts.Length >= 2 ? parts[1] : (parts.Length == 1 ? parts[0] : "");
 
             // 1. 优先检查是否为已验证的私人主目录
             bool isPersonal = false;
@@ -496,6 +702,61 @@ namespace FNSyncPlus.Core.Services
             eval.Title = "普通 SMB 共享 (私人属性未验证)";
             eval.Description = $"目录【{share}】为标准网络共享，未验证是否具备多用户隐私隔离。如需绝对隐私，请使用个人主目录。";
             return eval;
+        }
+
+        /// <summary>
+        /// 解析默认备份根目录：优先使用有效且可写的 PreferredBackupRoot，其次从真实枚举共享中选择已验证的私人空间。
+        /// 严禁根据用户名盲目拼接共享名！若未发现可访问的私人共享，严格返回空并提示未配置，绝不自动选择团队文件。
+        /// </summary>
+        public async Task<(string DefaultRootUnc, ShareSecurityEvaluation Security, bool HasAccessiblePersonalShare)> ResolveDefaultBackupRootAsync(
+            string serverAddress,
+            string? currentUsername,
+            string? preferredBackupRoot)
+        {
+            if (string.IsNullOrWhiteSpace(serverAddress))
+            {
+                return (string.Empty, new ShareSecurityEvaluation 
+                { 
+                    State = NasShareSecurityState.NotConfigured, 
+                    Title = "尚未连接 NAS", 
+                    Description = "请先在【NAS 设备】页面完成登录认证。" 
+                }, false);
+            }
+
+            // 1. 如果已配置 PreferredBackupRoot，测试其真实有效性与写入权限
+            if (!string.IsNullOrWhiteSpace(preferredBackupRoot))
+            {
+                var (canWrite, writeErr) = await TestDirectoryWritePermissionAsync(preferredBackupRoot);
+                if (canWrite)
+                {
+                    var eval = EvaluateShareSecurity(preferredBackupRoot, currentUsername, canWrite, writeErr);
+                    return (preferredBackupRoot, eval, eval.State == NasShareSecurityState.VerifiedPersonalSpace);
+                }
+            }
+
+            // 2. 从真实枚举的共享列表中寻找已验证且可写的私人共享 (严禁根据用户名盲目拼接共享名)
+            var categorized = await EnumerateCategorizedSharesAsync(serverAddress, currentUsername);
+            var personalCandidates = categorized.Shares.Where(s => s.Category == NasShareCategory.PersonalSpace).ToList();
+
+            foreach (var personal in personalCandidates)
+            {
+                var (canWrite, writeErr) = await TestDirectoryWritePermissionAsync(personal.UncPath);
+                if (canWrite)
+                {
+                    var eval = EvaluateShareSecurity(personal.UncPath, currentUsername, canWrite, writeErr);
+                    return (personal.UncPath, eval, true);
+                }
+            }
+
+            // 3. 未发现可访问的私人共享：严格返回空，严禁自动选择团队共享或伪造路径
+            var emptyEval = new ShareSecurityEvaluation
+            {
+                State = NasShareSecurityState.NotConfigured,
+                Title = "未发现可访问的私人 SMB 目录",
+                Description = "当前 NAS 账号未发现可访问的专属私人 SMB 共享。为保护您的数据隐私，系统不会自动选择团队共享。请点击下一步在 NAS 浏览器中手动选择，或在飞牛 fnOS 控制面板开启个人主目录。"
+            };
+
+            return (string.Empty, emptyEval, false);
         }
 
         /// <summary>
@@ -561,6 +822,32 @@ namespace FNSyncPlus.Core.Services
         {
             return await Task.Run(() =>
             {
+                if (string.IsNullOrWhiteSpace(uncPath))
+                {
+                    return (false, "未指定测试路径");
+                }
+
+                var (server, share, baseShareUnc, isServerRoot) = PathHelper.ParseUncShare(uncPath);
+                if (isServerRoot || string.IsNullOrEmpty(share))
+                {
+                    return (false, "当前处于 NAS 服务器根路径，未选择具体共享");
+                }
+
+                // 优先检查共享本身是否存在，避免无意义的异常 (Win32 Error 67: 找不到网络名)
+                string shareLongPath = PathHelper.EnsureLongPathPrefix(baseShareUnc);
+                try
+                {
+                    if (!Directory.Exists(shareLongPath))
+                    {
+                        return (false, $"找不到网络共享名【{share}】(Win32 Error 67: ERROR_BAD_NET_NAME)。共享不存在。");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    var (code, friendlyMsg) = TranslateSmbException(ex, baseShareUnc);
+                    return (false, friendlyMsg);
+                }
+
                 string testFile = Path.Combine(uncPath, $".fn_perm_test_{Guid.NewGuid():N}.tmp");
                 string longPath = PathHelper.EnsureLongPathPrefix(testFile);
 
@@ -577,11 +864,12 @@ namespace FNSyncPlus.Core.Services
                 }
                 catch (UnauthorizedAccessException)
                 {
-                    return (false, "当前登录账号在此 NAS 文件夹没有写入权限。请联系管理员或在飞牛 NAS 管理面板为该账号分配【读写】权限。");
+                    return (false, "当前登录账号在此 NAS 文件夹没有写入权限 (Win32 Error 5: ERROR_ACCESS_DENIED)。请联系管理员或在飞牛 NAS 管理面板为该账号分配【读写】权限。");
                 }
                 catch (Exception ex)
                 {
-                    return (false, $"无法写入 NAS 文件夹: {ex.Message}");
+                    var (code, friendlyMsg) = TranslateSmbException(ex, uncPath);
+                    return (false, friendlyMsg);
                 }
             });
         }
@@ -596,6 +884,24 @@ namespace FNSyncPlus.Core.Services
                 if (!PathHelper.IsValidDirectoryName(newFolderName, out string validationError))
                 {
                     throw new ArgumentException(validationError, nameof(newFolderName));
+                }
+
+                if (string.IsNullOrWhiteSpace(parentUncPath))
+                {
+                    throw new ArgumentException("创建文件夹失败：目标父目录路径不能为空。", nameof(parentUncPath));
+                }
+
+                var (server, share, shareBase, isServerRoot) = PathHelper.ParseUncShare(parentUncPath);
+                if (isServerRoot || string.IsNullOrEmpty(share))
+                {
+                    throw new InvalidOperationException($"创建文件夹失败：无法直接在 NAS 服务器根路径【{parentUncPath}】创建文件夹，必须先选择具体的共享目录。");
+                }
+
+                // 严格验证父共享是否存在，杜绝向不存在的共享创建文件夹 (Error 67)
+                string shareLongPath = PathHelper.EnsureLongPathPrefix(shareBase);
+                if (!Directory.Exists(shareLongPath))
+                {
+                    throw new IOException($"创建文件夹失败：找不到网络共享名【{share}】(Win32 Error 67: ERROR_BAD_NET_NAME)。该共享在 NAS 上不存在，请先选择有效共享。");
                 }
 
                 string newUnc = Path.Combine(parentUncPath, newFolderName.Trim());
@@ -624,9 +930,22 @@ namespace FNSyncPlus.Core.Services
                         Category = NasShareCategory.PersonalSpace
                     };
                 }
-                catch (UnauthorizedAccessException)
+                catch (Exception ex)
                 {
-                    throw new UnauthorizedAccessException($"创建文件夹被拒绝：当前 NAS 账号在【{parentUncPath}】缺少写入权限。请在飞牛系统管理中开放该共享的写权限。");
+                    var (code, friendlyMsg) = TranslateSmbException(ex, newUnc);
+                    if (code == 67)
+                    {
+                        throw new IOException($"创建文件夹失败：找不到网络共享名【{newUnc}】(Win32 Error 67: ERROR_BAD_NET_NAME)。该共享在 NAS 上不存在。", ex);
+                    }
+                    if (code == 5 || ex is UnauthorizedAccessException)
+                    {
+                        throw new UnauthorizedAccessException($"创建文件夹失败：当前 NAS 账号在【{parentUncPath}】缺少写入权限 (Win32 Error 5: ERROR_ACCESS_DENIED)。请在飞牛系统管理中开放该共享的写权限。", ex);
+                    }
+                    if (code == 1219)
+                    {
+                        throw new IOException($"创建文件夹失败：Windows SMB 会话凭据冲突 (Win32 Error 1219)。", ex);
+                    }
+                    throw new IOException(friendlyMsg, ex);
                 }
             });
         }
