@@ -21,6 +21,8 @@ namespace FNSyncPlus.Core.Utils
             return Convert.ToHexString(hash).ToLowerInvariant();
         }
 
+        public static string ComputeStringSha256(string input) => ComputeSha256String(input);
+
         /// <summary>
         /// 计算文件的完整 SHA-256 哈希值
         /// </summary>

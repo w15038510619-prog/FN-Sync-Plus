@@ -1,11 +1,21 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace FNSyncPlus.Core.Utils
 {
     public static class PathHelper
     {
+        private static readonly char[] InvalidFileNameChars = Path.GetInvalidFileNameChars();
+
+        private static readonly string[] ReservedDeviceNames = new[]
+        {
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+        };
+
         /// <summary>
         /// 将相对路径标准化为统一正斜杠格式 (如 "folder/subfolder/file.txt")
         /// </summary>
@@ -21,14 +31,79 @@ namespace FNSyncPlus.Core.Utils
         }
 
         /// <summary>
-        /// 检验相对路径是否安全（防止目录遍历如 .. 或绝对路径）
+        /// 检验相对路径是否安全（防止目录遍历如 .. 或绝对路径、盘符冒号）
         /// </summary>
         public static bool IsSafeRelativePath(string relativePath)
         {
             if (string.IsNullOrWhiteSpace(relativePath)) return false;
             string norm = NormalizeRelPath(relativePath);
+            if (string.IsNullOrWhiteSpace(norm)) return false;
+
+            // 禁止以 / 开头、禁止包含 ..
             if (norm.StartsWith("/") || norm.Contains("..")) return false;
-            if (norm.Contains(":") || Path.IsPathRooted(relativePath)) return false;
+
+            // 分割各段进行严格检查
+            string[] segments = norm.Split('/');
+            foreach (var segment in segments)
+            {
+                if (string.IsNullOrWhiteSpace(segment)) return false;
+                if (segment == "." || segment == "..") return false;
+                if (segment.Contains(':')) return false;
+            }
+
+            // 禁止带 Windows 盘符根或根路径
+            if (relativePath.Contains(':') || Path.IsPathRooted(relativePath)) return false;
+
+            return true;
+        }
+
+        /// <summary>
+        /// 校验文件夹名称是否合法（检查非法字符、UTF-8 字节限制、结尾空格/句点、Windows 保留字）
+        /// </summary>
+        public static bool IsValidDirectoryName(string folderName, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+
+            if (string.IsNullOrWhiteSpace(folderName))
+            {
+                errorMessage = "文件夹名称不能为空或纯空白字符";
+                return false;
+            }
+
+            if (folderName.EndsWith(".") || folderName.EndsWith(" "))
+            {
+                errorMessage = "文件夹名称结尾不能包含空格或句点 (.)";
+                return false;
+            }
+
+            folderName = folderName.Trim();
+
+            if (folderName == "." || folderName == "..")
+            {
+                errorMessage = "文件夹名称不能为 '.' 或 '..'";
+                return false;
+            }
+
+            if (folderName.IndexOfAny(InvalidFileNameChars) >= 0)
+            {
+                errorMessage = "文件夹名称包含非法字符，不能包含以下字符: \\ / : * ? \" < > |";
+                return false;
+            }
+
+            int byteCount = Encoding.UTF8.GetByteCount(folderName);
+            if (byteCount > 255)
+            {
+                errorMessage = $"文件夹名称 UTF-8 字节数达到 {byteCount} 字节，超过了 Linux / NAS 单个目录名 255 字节的上限";
+                return false;
+            }
+
+            string upper = folderName.ToUpperInvariant();
+            if (ReservedDeviceNames.Contains(upper))
+            {
+                errorMessage = $"'{folderName}' 是 Windows 系统保留设备名，不能用作文件夹名称";
+                return false;
+            }
+
             return true;
         }
 
@@ -104,8 +179,70 @@ namespace FNSyncPlus.Core.Utils
         /// </summary>
         public static bool ContainsInvalidFileNameChars(string fileName)
         {
-            char[] invalid = Path.GetInvalidFileNameChars();
-            return fileName.IndexOfAny(invalid) >= 0;
+            return fileName.IndexOfAny(InvalidFileNameChars) >= 0;
+        }
+
+        /// <summary>
+        /// 规范化路径用于对比判定（解析长路径前缀、统一大小写、统一尾部分隔符）
+        /// </summary>
+        public static string GetCanonicalPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+            string clean = RemoveLongPathPrefix(path).Trim();
+            clean = clean.Replace('/', '\\').TrimEnd('\\');
+
+            try
+            {
+                // 如果是本地路径，尝试获取完整绝对路径以解析相对符号如 . 或 ..
+                if (clean.Length >= 2 && clean[1] == ':')
+                {
+                    clean = Path.GetFullPath(clean).TrimEnd('\\');
+                }
+            }
+            catch
+            {
+                // 忽略解析异常
+            }
+
+            return clean;
+        }
+
+        /// <summary>
+        /// 检查源路径和目标路径是否相同、或者互相嵌套包含，防止死循环无限备份与灾难性数据污染
+        /// </summary>
+        public static bool ArePathsSameOrNested(string pathA, string pathB, out string reason)
+        {
+            reason = string.Empty;
+            if (string.IsNullOrWhiteSpace(pathA) || string.IsNullOrWhiteSpace(pathB))
+            {
+                return false;
+            }
+
+            string canonA = GetCanonicalPath(pathA);
+            string canonB = GetCanonicalPath(pathB);
+
+            if (string.Equals(canonA, canonB, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "源文件夹与目标文件夹路径相同，无法执行同步";
+                return true;
+            }
+
+            string prefixA = canonA + "\\";
+            string prefixB = canonB + "\\";
+
+            if (canonB.StartsWith(prefixA, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = $"目标备份目录位于源文件夹内部（嵌套包含），会导致递归循环扫描自身备份产生严重数据污染！\n源: {canonA}\n目标: {canonB}";
+                return true;
+            }
+
+            if (canonA.StartsWith(prefixB, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = $"源文件夹位于目标备份目录内部，会导致同步死循环！\n源: {canonA}\n目标: {canonB}";
+                return true;
+            }
+
+            return false;
         }
     }
 }

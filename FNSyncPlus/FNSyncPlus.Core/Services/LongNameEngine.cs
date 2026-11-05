@@ -158,8 +158,9 @@ namespace FNSyncPlus.Core.Services
         {
             int byteCount = PathHelper.GetUtf8ByteCount(componentName);
 
-            // 如果不超长，且不是清单保留名称，优先尝试使用原始名称
+            // 如果不超长，且不是内部元数据与清单保留名称，优先尝试使用原始名称
             if (byteCount <= _maxUtf8Bytes &&
+                !string.Equals(componentName, Manifest.MetadataDirName, StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(componentName, Manifest.CurrentManifestFileName, StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(componentName, Manifest.LegacyManifestFileName, StringComparison.OrdinalIgnoreCase))
             {

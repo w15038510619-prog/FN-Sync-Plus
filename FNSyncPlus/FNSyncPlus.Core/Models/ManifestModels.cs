@@ -5,14 +5,22 @@ using System.Text.Json.Serialization;
 namespace FNSyncPlus.Core.Models
 {
     /// <summary>
-    /// 备份清单元数据，保存在 NAS 目标备份根目录下
+    /// 备份清单元数据，隔离保存在 NAS 目标备份根目录下的 .fnsync/ 专用目录中
     /// 包含所有长文件名与常规文件映射、目录映射、时间戳与 SHA-256 校验和
     /// </summary>
     public class Manifest
     {
-        public const string CurrentManifestFileName = "__FN_SYNC_MANIFEST__.json";
-        public const string LegacyManifestFileName = "__FN_ORIGINAL_NAMES__.json";
-        public const int CurrentVersion = 2;
+        public const string MetadataDirName = ".fnsync";
+        public const string IsolatedManifestFileName = "manifest.json";
+        public const string CurrentManifestFileName = "manifest.json";
+        public const string StagingDirName = "staging";
+        public const string LockFileName = "sync.lock";
+
+        // 旧版本兼容文件名
+        public const string LegacyManifestFileName = "__FN_SYNC_MANIFEST__.json";
+        public const string LegacyGoManifestFileName = "__FN_ORIGINAL_NAMES__.json";
+
+        public const int CurrentVersion = 3;
 
         [JsonPropertyName("version")]
         public int Version { get; set; } = CurrentVersion;
@@ -24,7 +32,7 @@ namespace FNSyncPlus.Core.Models
         public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 
         [JsonPropertyName("note")]
-        public string Note { get; set; } = "飞牛同步元数据清单文件，请随备份保留，切勿删除，用于异机一键恢复原始文件名与目录结构。";
+        public string Note { get; set; } = "飞牛同步元数据清单文件，保存在 .fnsync 专用命名空间，切勿删除，用于异机一键还原原始长文件名与目录结构。";
 
         [JsonPropertyName("source_root")]
         public string SourceRoot { get; set; } = string.Empty;
@@ -67,7 +75,7 @@ namespace FNSyncPlus.Core.Models
     }
 
     /// <summary>
-    /// 目录映射项
+    /// 目录映射项 (支持空目录还原)
     /// </summary>
     public class ManifestDirEntry
     {

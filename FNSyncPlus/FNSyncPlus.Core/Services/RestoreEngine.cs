@@ -25,6 +25,7 @@ namespace FNSyncPlus.Core.Services
         public int LongNameRestoredFiles { get; set; }
         public int IntegrityVerifiedFiles { get; set; }
         public int FailedFiles { get; set; }
+        public int RestoredDirectories { get; set; }
         public string CurrentFile { get; set; } = string.Empty;
         public string StatusMessage { get; set; } = string.Empty;
     }
@@ -57,7 +58,7 @@ namespace FNSyncPlus.Core.Services
         }
 
         /// <summary>
-        /// 预览备份目录中的文件清单与原始文件名映射关系（无需开始恢复）
+        /// 预览备份目录中的文件清单与原始长文件名映射（无需开始恢复）
         /// </summary>
         public async Task<List<RestorePreviewItem>> PreviewBackupAsync(string targetNasFolder, CancellationToken cancellationToken = default)
         {
@@ -82,7 +83,7 @@ namespace FNSyncPlus.Core.Services
 
         /// <summary>
         /// 执行异机一键还原：将 NAS 上的备份恢复到本地目录，自动将超长短别名还原为完整原始名称与目录结构
-        /// 并逐一进行 SHA-256 完整性检验
+        /// 并逐一执行 SHA-256 完整性强校验。若校验不一致，自动删除损坏临时文件并记为失败，坚决杜绝损坏数据污染恢复环境。
         /// </summary>
         public async Task<RestoreProgressReport> RunRestoreAsync(
             string nasBackupFolder,
@@ -99,6 +100,11 @@ namespace FNSyncPlus.Core.Services
                 throw new ArgumentException("本地恢复目标路径不能为空", nameof(localDestinationFolder));
             }
 
+            if (PathHelper.ArePathsSameOrNested(nasBackupFolder, localDestinationFolder, out string nestReason))
+            {
+                throw new InvalidOperationException($"恢复路径安全校验失败: {nestReason}");
+            }
+
             var report = new RestoreProgressReport();
             Log("INFO", $"开始恢复任务: NAS【{nasBackupFolder}】 -> 本地【{localDestinationFolder}】");
 
@@ -111,12 +117,43 @@ namespace FNSyncPlus.Core.Services
             }
 
             // 1. 读取 NAS 上的清单文件
-            Log("INFO", "正在读取 NAS 备份元数据清单...");
+            Log("INFO", "正在读取 NAS 备份元数据清单 (.fnsync/manifest.json)...");
             var manifest = await _manifestManager.LoadManifestAsync(nasBackupFolder, cancellationToken).ConfigureAwait(false);
 
             if (manifest.Files.Count == 0)
             {
                 Log("WARN", "在 NAS 备份目录中未发现清单文件或记录为空，将尝试直接按物理文件名恢复。");
+            }
+
+            // 2. 先行恢复目录结构（包含空目录）
+            int restoredDirsCount = 0;
+            if (manifest.Directories != null && manifest.Directories.Count > 0)
+            {
+                Log("INFO", $"正在恢复 {manifest.Directories.Count} 个原始目录结构（包含空目录）...");
+                foreach (var d in manifest.Directories)
+                {
+                    if (string.IsNullOrWhiteSpace(d.OriginalRel)) continue;
+                    if (!PathHelper.IsSafeRelativePath(d.OriginalRel))
+                    {
+                        Log("WARN", $"[安全拦截] 忽略潜在目录遍历风险的清单目录: {d.OriginalRel}");
+                        continue;
+                    }
+
+                    string dirTarget = Path.Combine(longLocal, d.OriginalRel.Replace('/', '\\'));
+                    if (!Directory.Exists(dirTarget))
+                    {
+                        try
+                        {
+                            Directory.CreateDirectory(dirTarget);
+                            restoredDirsCount++;
+                        }
+                        catch (Exception ex)
+                        {
+                            Log("WARN", $"创建目录失败: {d.OriginalRel} ({ex.Message})");
+                        }
+                    }
+                }
+                report.RestoredDirectories = restoredDirsCount;
             }
 
             // 建立 stored_rel -> ManifestFileEntry 的反向映射字典
@@ -126,17 +163,26 @@ namespace FNSyncPlus.Core.Services
                 storedToEntry[PathHelper.NormalizeRelPath(f.StoredRel)] = f;
             }
 
-            // 2. 扫描 NAS 备份目录中的物理文件
+            // 3. 扫描 NAS 备份目录中的物理文件，严格排除 .fnsync 专用目录及其他元数据文件
             var nasFiles = new List<FileInfo>();
             var nasDi = new DirectoryInfo(longNas);
             foreach (var fi in nasDi.EnumerateFiles("*", SearchOption.AllDirectories))
             {
+                // 排除 .fnsync 内部元数据及 staging 临时文件
+                string relToNas = PathHelper.NormalizeRelPath(Path.GetRelativePath(longNas, fi.FullName));
+                if (relToNas.StartsWith(Manifest.MetadataDirName + "/", StringComparison.OrdinalIgnoreCase) ||
+                    relToNas.Equals(Manifest.MetadataDirName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 string fn = fi.Name;
-                if (fn.Equals(Manifest.CurrentManifestFileName, StringComparison.OrdinalIgnoreCase) ||
-                    fn.Equals(Manifest.LegacyManifestFileName, StringComparison.OrdinalIgnoreCase) ||
+                if (fn.Equals(Manifest.LegacyManifestFileName, StringComparison.OrdinalIgnoreCase) ||
+                    fn.Equals(Manifest.LegacyGoManifestFileName, StringComparison.OrdinalIgnoreCase) ||
                     fn.EndsWith(".bak", StringComparison.OrdinalIgnoreCase) ||
                     fn.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) ||
-                    fn.Contains(".fn_part_"))
+                    fn.Contains(".fn_part_") ||
+                    fn.Contains(".restore_tmp_"))
                 {
                     continue;
                 }
@@ -144,7 +190,7 @@ namespace FNSyncPlus.Core.Services
             }
 
             report.TotalFiles = nasFiles.Count;
-            Log("INFO", $"NAS 上共扫描到 {report.TotalFiles} 个有效备份文件，开始执行还原...");
+            Log("INFO", $"NAS 上共扫描到 {report.TotalFiles} 个有效备份文件，开始执行完整性还原...");
 
             int restoredCount = 0;
             int skippedCount = 0;
@@ -164,7 +210,7 @@ namespace FNSyncPlus.Core.Services
                 string storedRel = PathHelper.NormalizeRelPath(Path.GetRelativePath(longNas, nasFi.FullName));
                 report.CurrentFile = storedRel;
 
-                // 确定目标本地文件相对路径（若清单中有记录则恢复原名，否则保留存储名）
+                // 确定目标本地文件相对路径
                 string targetRel = storedRel;
                 string expectedSha256 = "";
                 long expectedModTimeTicks = 0;
@@ -176,6 +222,15 @@ namespace FNSyncPlus.Core.Services
                     expectedSha256 = entry.Sha256;
                     expectedModTimeTicks = entry.ModTimeUtcTicks;
                     isLong = entry.IsLongName;
+                }
+
+                // 路径安全性检查（严格防止跨目录越界）
+                if (!PathHelper.IsSafeRelativePath(targetRel))
+                {
+                    failedCount++;
+                    report.FailedFiles = failedCount;
+                    Log("ERROR", $"[安全拦截] 文件相对路径不安全（含路径遍历字符）: {targetRel}");
+                    continue;
                 }
 
                 if (isLong)
@@ -207,6 +262,8 @@ namespace FNSyncPlus.Core.Services
                     }
                 }
 
+                string tempRestorePath = targetLocalFull + ".restore_tmp_" + Guid.NewGuid().ToString("N");
+
                 try
                 {
                     if (!Directory.Exists(targetDir))
@@ -214,10 +271,10 @@ namespace FNSyncPlus.Core.Services
                         Directory.CreateDirectory(targetDir);
                     }
 
-                    // 复制并实时计算 SHA-256
+                    // 1. 先恢复到临时文件并实时计算 SHA-256
                     string computedHash = "";
                     using (var src = new FileStream(nasFi.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, 128 * 1024, useAsync: true))
-                    using (var dest = new FileStream(targetLocalFull, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, FileOptions.WriteThrough | FileOptions.Asynchronous))
+                    using (var dest = new FileStream(tempRestorePath, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, FileOptions.WriteThrough | FileOptions.Asynchronous))
                     using (var sha = SHA256.Create())
                     {
                         byte[] buf = new byte[128 * 1024];
@@ -232,28 +289,41 @@ namespace FNSyncPlus.Core.Services
                         await dest.FlushAsync(cancellationToken).ConfigureAwait(false);
                     }
 
-                    // 还原修改时间
-                    if (expectedModTimeTicks > 0)
-                    {
-                        File.SetLastWriteTimeUtc(targetLocalFull, new DateTime(expectedModTimeTicks, DateTimeKind.Utc));
-                    }
-                    else
-                    {
-                        File.SetLastWriteTimeUtc(targetLocalFull, nasFi.LastWriteTimeUtc);
-                    }
-
-                    // 完整性校验
+                    // 2. SHA-256 完整性强校验
                     if (!string.IsNullOrEmpty(expectedSha256))
                     {
-                        if (string.Equals(expectedSha256, computedHash, StringComparison.OrdinalIgnoreCase))
+                        if (!string.Equals(expectedSha256, computedHash, StringComparison.OrdinalIgnoreCase))
                         {
-                            integrityOkCount++;
+                            // 校验失败：坚决删除损坏的临时文件，绝不计入成功！
+                            if (File.Exists(tempRestorePath))
+                            {
+                                try { File.Delete(tempRestorePath); } catch { }
+                            }
+
+                            failedCount++;
+                            report.FailedFiles = failedCount;
+                            Log("ERROR", $"[SHA-256 校验失败] 恢复文件与原始数据哈希不一致！文件: {targetRel}\n  预期: {expectedSha256}\n  实际: {computedHash}。已自动删除损坏文件！");
+                            ProgressChanged?.Invoke(report);
+                            continue;
                         }
                         else
                         {
-                            Log("WARN", $"[完整性警告] 文件 {targetRel} SHA-256 不一致！预期: {expectedSha256}, 实际: {computedHash}");
+                            integrityOkCount++;
                         }
                     }
+
+                    // 3. 还原修改时间
+                    if (expectedModTimeTicks > 0)
+                    {
+                        File.SetLastWriteTimeUtc(tempRestorePath, new DateTime(expectedModTimeTicks, DateTimeKind.Utc));
+                    }
+                    else
+                    {
+                        File.SetLastWriteTimeUtc(tempRestorePath, nasFi.LastWriteTimeUtc);
+                    }
+
+                    // 4. 原子移动到最终目标位置
+                    File.Move(tempRestorePath, targetLocalFull, overwrite: true);
 
                     restoredCount++;
                     report.RestoredFiles = restoredCount;
@@ -262,6 +332,12 @@ namespace FNSyncPlus.Core.Services
                 }
                 catch (Exception ex)
                 {
+                    // 发生异常时清理残留的临时文件
+                    if (File.Exists(tempRestorePath))
+                    {
+                        try { File.Delete(tempRestorePath); } catch { }
+                    }
+
                     failedCount++;
                     report.FailedFiles = failedCount;
                     Log("ERROR", $"[恢复失败] {targetRel} : {ex.Message}");
@@ -270,7 +346,7 @@ namespace FNSyncPlus.Core.Services
                 ProgressChanged?.Invoke(report);
             }
 
-            report.StatusMessage = $"恢复操作完成！已成功恢复: {restoredCount}, 长文件名还原: {longNameRestoredCount}, 完整性校验通过: {integrityOkCount}, 跳过已存在: {skippedCount}, 失败: {failedCount}";
+            report.StatusMessage = $"恢复操作完成！已成功恢复: {restoredCount}, 长文件名还原: {longNameRestoredCount}, 完整性校验通过: {integrityOkCount}, 空目录恢复: {restoredDirsCount}, 跳过已存在: {skippedCount}, 失败: {failedCount}";
             Log("INFO", report.StatusMessage);
             return report;
         }

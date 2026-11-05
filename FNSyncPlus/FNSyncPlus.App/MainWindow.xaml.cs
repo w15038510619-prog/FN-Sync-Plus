@@ -78,7 +78,7 @@ namespace FNSyncPlus.App
                 TxtNasAddress.Text = creds.Value.Server;
                 TxtNasUsername.Text = creds.Value.Username;
                 TxtNasPassword.Password = creds.Value.Password;
-                AppendLog("INFO", $"已安全加载加密凭据: {creds.Value.Username}@{creds.Value.Server}");
+                AppendLog("INFO", $"已从本机安全环境加载加密凭据: {creds.Value.Username}@{creds.Value.Server}");
             }
 
             // 启动异步局域网 NAS 发现
@@ -308,7 +308,7 @@ namespace FNSyncPlus.App
 
         #endregion
 
-        #region TAB 1: 任务配置与 NAS 文件夹浏览器
+        #region TAB 1: 任务配置与 NAS 文件夹浏览器 (重点功能修复)
 
         private void BtnBrowseLocal_Click(object sender, RoutedEventArgs e)
         {
@@ -350,6 +350,7 @@ namespace FNSyncPlus.App
             _nasBrowserBaseShare = "";
             TxtNasBrowserCurrentPath.Text = _nasBrowserCurrentUnc;
             TxtNasBrowserSelectionHint.Text = "正在获取 NAS 共享列表...";
+            TxtNasBrowserPermissionStatus.Text = "";
 
             try
             {
@@ -358,11 +359,12 @@ namespace FNSyncPlus.App
                 {
                     Name = s.Name,
                     FullUncPath = s.UncPath,
-                    RelativeSubPath = ""
+                    RelativeSubPath = "",
+                    IsShareRoot = true
                 }).ToList();
 
                 ListNasBrowserItems.ItemsSource = items;
-                TxtNasBrowserSelectionHint.Text = $"找到 {items.Count} 个可用共享。双击共享名进入浏览。";
+                TxtNasBrowserSelectionHint.Text = $"找到 {items.Count} 个可用共享。点击选中共享即可在此新建文件夹，或双击进入浏览。";
             }
             catch (Exception ex)
             {
@@ -382,6 +384,21 @@ namespace FNSyncPlus.App
                 _nasBrowserCurrentUnc = selected.FullUncPath;
                 TxtNasBrowserCurrentPath.Text = _nasBrowserCurrentUnc;
                 await RefreshNasBrowserFolderAsync();
+            }
+        }
+
+        private void ListNasBrowserItems_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (ListNasBrowserItems.SelectedItem is NasFolderItem selected)
+            {
+                if (string.IsNullOrEmpty(_nasBrowserBaseShare))
+                {
+                    TxtNasBrowserSelectionHint.Text = $"已选中共享: 【{selected.Name}】。可双击进入，也可直接点击【➕ 新建文件夹】在其下创建，或点击【✔ 选择当前文件夹】。";
+                }
+                else
+                {
+                    TxtNasBrowserSelectionHint.Text = $"已选中目录: 【{selected.Name}】。双击可进入子目录，点击【➕ 新建文件夹】可创建同级/子文件夹。";
+                }
             }
         }
 
@@ -405,6 +422,18 @@ namespace FNSyncPlus.App
             }
         }
 
+        private async void BtnNasBrowserRefresh_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrEmpty(_nasBrowserBaseShare))
+            {
+                await LoadNasSharesIntoBrowserAsync(TxtNasAddress.Text.Trim());
+            }
+            else
+            {
+                await RefreshNasBrowserFolderAsync();
+            }
+        }
+
         private async Task RefreshNasBrowserFolderAsync()
         {
             TxtNasBrowserSelectionHint.Text = "正在读取文件夹列表...";
@@ -412,7 +441,14 @@ namespace FNSyncPlus.App
             {
                 var subFolders = await _smbService.ListSubFoldersAsync(_nasBrowserCurrentUnc, _nasBrowserBaseShare);
                 ListNasBrowserItems.ItemsSource = subFolders;
-                TxtNasBrowserSelectionHint.Text = $"当前目录有 {subFolders.Count} 个子文件夹。可双击进入，或点击【选择当前文件夹】。";
+                TxtNasBrowserSelectionHint.Text = $"当前目录有 {subFolders.Count} 个子文件夹。可继续双击进入，或点击【✔ 选择当前文件夹】作为备份目标。";
+
+                // 异步探测当前目录的写入权限
+                var (canWrite, _) = await _smbService.TestDirectoryWritePermissionAsync(_nasBrowserCurrentUnc);
+                TxtNasBrowserPermissionStatus.Text = canWrite ? "● 具备写入权限" : "▲ 只读或无写权限";
+                TxtNasBrowserPermissionStatus.Foreground = canWrite
+                    ? new SolidColorBrush(WpfColor.FromRgb(16, 185, 129))
+                    : new SolidColorBrush(WpfColor.FromRgb(239, 68, 68));
             }
             catch (Exception ex)
             {
@@ -420,11 +456,45 @@ namespace FNSyncPlus.App
             }
         }
 
+        /// <summary>
+        /// 新建 NAS 文件夹交互彻底修复：
+        /// 1. 选中共享目录时自动识别所选共享，不再弹出“请先双击进入”
+        /// 2. 校验文件夹名称合法性
+        /// 3. 检查 SMB 写入权限
+        /// 4. 创建成功后自动刷新并自动选中新文件夹
+        /// </summary>
         private async void BtnNasBrowserNewFolder_Click(object sender, RoutedEventArgs e)
         {
+            string targetParentUnc;
+
+            // 如果当前在服务器根层级
             if (string.IsNullOrEmpty(_nasBrowserBaseShare))
             {
-                WpfMessageBox.Show("请先双击进入具体的 NAS 共享目录后再新建子文件夹", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                if (ListNasBrowserItems.SelectedItem is NasFolderItem selectedShare)
+                {
+                    // 用户选中了某个共享目录，自动进入该共享作为基础路径
+                    _nasBrowserBaseShare = selectedShare.FullUncPath;
+                    _nasBrowserCurrentUnc = selectedShare.FullUncPath;
+                    _nasBrowserHistory.Push($@"\\{TxtNasAddress.Text.Trim()}");
+                    TxtNasBrowserCurrentPath.Text = _nasBrowserCurrentUnc;
+                    targetParentUnc = selectedShare.FullUncPath;
+                }
+                else
+                {
+                    WpfMessageBox.Show("请在列表中先单击选中一个共享目录（例如 团队文件-cenco-public），然后再点击【新建文件夹】。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                    return;
+                }
+            }
+            else
+            {
+                targetParentUnc = _nasBrowserCurrentUnc;
+            }
+
+            // 创建前检查写入权限
+            var (canWrite, permErr) = await _smbService.TestDirectoryWritePermissionAsync(targetParentUnc);
+            if (!canWrite)
+            {
+                WpfMessageBox.Show(permErr, "权限不足", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
@@ -434,9 +504,21 @@ namespace FNSyncPlus.App
                 string folderName = dlg.FolderName;
                 try
                 {
-                    var created = await _smbService.CreateSubFolderAsync(_nasBrowserCurrentUnc, folderName, _nasBrowserBaseShare);
-                    AppendLog("INFO", $"在 NAS 上新建文件夹成功: {created.FullUncPath}");
+                    var created = await _smbService.CreateSubFolderAsync(targetParentUnc, folderName, _nasBrowserBaseShare);
+                    AppendLog("INFO", $"在 NAS 上成功新建文件夹: {created.FullUncPath}");
+
                     await RefreshNasBrowserFolderAsync();
+
+                    // 自动选中新创建的文件夹
+                    if (ListNasBrowserItems.ItemsSource is List<NasFolderItem> items)
+                    {
+                        var createdItem = items.FirstOrDefault(i => i.Name.Equals(created.Name, StringComparison.OrdinalIgnoreCase));
+                        if (createdItem != null)
+                        {
+                            ListNasBrowserItems.SelectedItem = createdItem;
+                            ListNasBrowserItems.ScrollIntoView(createdItem);
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -453,15 +535,77 @@ namespace FNSyncPlus.App
                 {
                     TxtNasTargetUnc.Text = sel.FullUncPath;
                     ModalNasBrowser.Visibility = Visibility.Collapsed;
+                    AppendLog("INFO", $"已选择 NAS 备份目标共享: {TxtNasTargetUnc.Text}");
                     return;
                 }
-                WpfMessageBox.Show("请至少选择一个具体的 NAS 共享目录作为备份位置", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                WpfMessageBox.Show("请在列表中选中一个 NAS 共享文件夹作为备份位置", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
 
-            TxtNasTargetUnc.Text = _nasBrowserCurrentUnc;
+            // 如果在子目录层级中用户选中了某个子文件夹，优先使用所选子项；否则使用当前所在目录
+            if (ListNasBrowserItems.SelectedItem is NasFolderItem selSub)
+            {
+                TxtNasTargetUnc.Text = selSub.FullUncPath;
+            }
+            else
+            {
+                TxtNasTargetUnc.Text = _nasBrowserCurrentUnc;
+            }
+
             ModalNasBrowser.Visibility = Visibility.Collapsed;
             AppendLog("INFO", $"已选择 NAS 备份目标目录: {TxtNasTargetUnc.Text}");
+        }
+
+        private async void BtnAnalyzeSync_Click(object sender, RoutedEventArgs e)
+        {
+            string src = TxtSourceFolder.Text.Trim();
+            string dest = TxtNasTargetUnc.Text.Trim();
+
+            if (!Directory.Exists(src))
+            {
+                WpfMessageBox.Show("本地源文件夹不存在，请检查配置", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(dest))
+            {
+                WpfMessageBox.Show("请先选择 NAS 备份目标目录", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            BtnAnalyzeSync.IsEnabled = false;
+            BtnAnalyzeSync.Content = "⏳ 分析中...";
+
+            try
+            {
+                var analysis = await _syncEngine.AnalyzeSyncAsync(src, dest);
+                BorderPreSyncAnalysis.Visibility = Visibility.Visible;
+
+                TxtAnalysisTotalFiles.Text = analysis.TotalFiles.ToString();
+                TxtAnalysisNewFiles.Text = analysis.NewFiles.ToString();
+                TxtAnalysisModifiedFiles.Text = analysis.ModifiedFiles.ToString();
+                TxtAnalysisUnchangedFiles.Text = analysis.UnchangedFiles.ToString();
+                TxtAnalysisLongNameFiles.Text = analysis.LongNameFiles.ToString();
+
+                double sizeMb = analysis.TotalSizeBytes / (1024.0 * 1024.0);
+                string sizeStr = sizeMb > 1024 ? $"{sizeMb / 1024.0:F2} GB" : $"{sizeMb:F2} MB";
+
+                string detail = $"文件总体积: {sizeStr}。待增量上传/更新: {analysis.NewFiles + analysis.ModifiedFiles} 个文件，将跳过 {analysis.UnchangedFiles} 个未修改文件。";
+                if (analysis.LongNameFiles > 0)
+                {
+                    detail += $"\n其中 {analysis.LongNameFiles} 个文件触发长文件名兼容映射机制，将自动无损存储。";
+                }
+                TxtAnalysisDetail.Text = detail;
+                AppendLog("INFO", $"[变动分析完成] {detail}");
+            }
+            catch (Exception ex)
+            {
+                WpfMessageBox.Show($"分析失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                BtnAnalyzeSync.IsEnabled = true;
+                BtnAnalyzeSync.Content = "📊 分析变动";
+            }
         }
 
         private void BtnSaveSettings_Click(object sender, RoutedEventArgs e)
@@ -476,7 +620,7 @@ namespace FNSyncPlus.App
             _settings.Save();
 
             ApplyAutoSyncSettings();
-            WpfMessageBox.Show("设置已成功保存！", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+            WpfMessageBox.Show("配置已成功保存！", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
         private int GetIntervalMinutesFromComboBox() => CmbIntervalMinutes.SelectedIndex switch
@@ -532,6 +676,13 @@ namespace FNSyncPlus.App
             {
                 WpfMessageBox.Show("请先选择 NAS 备份目标目录", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
                 NavTask.IsChecked = true;
+                return;
+            }
+
+            // 检查源与目标路径是否相同或相互嵌套
+            if (PathHelper.ArePathsSameOrNested(src, dest, out string reason))
+            {
+                WpfMessageBox.Show(reason, "安全阻止", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
 
@@ -638,13 +789,13 @@ namespace FNSyncPlus.App
 
         #endregion
 
-        #region TAB 3: 恢复中心 (异机恢复)
+        #region TAB 3: 恢复中心 (异机恢复与完整性校验)
 
         private void BtnBrowseRestoreLocal_Click(object sender, RoutedEventArgs e)
         {
             using var dialog = new WinForms.FolderBrowserDialog
             {
-                Description = "选择用于恢复文件的本地空文件夹",
+                Description = "选择用于恢复文件的本地文件夹",
                 UseDescriptionForTitle = true
             };
             if (dialog.ShowDialog() == WinForms.DialogResult.OK)
@@ -658,13 +809,13 @@ namespace FNSyncPlus.App
             string nasPath = TxtRestoreNasPath.Text.Trim();
             if (string.IsNullOrEmpty(nasPath) || !Directory.Exists(nasPath))
             {
-                WpfMessageBox.Show("请指定有效的 NAS 备份目录（如 \\\\192.168.8.120\\FN_Sync_Test）", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                WpfMessageBox.Show("请指定有效的 NAS 备份目录（如 \\\\192.168.1.100\\backup）", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
             try
             {
-                TxtRestoreStatus.Text = "正在读取 NAS 备份元数据清单...";
+                TxtRestoreStatus.Text = "正在读取 NAS 备份元数据清单 (.fnsync/manifest.json)...";
                 var items = await _restoreEngine.PreviewBackupAsync(nasPath);
                 GridRestorePreview.ItemsSource = items;
                 TxtRestoreStatus.Text = $"清单读取成功！共包含 {items.Count} 个文件记录，其中 {items.Count(i => i.IsLongName)} 个超长文件名映射。点击【开始一键完整恢复】可无损还原。";
@@ -689,6 +840,12 @@ namespace FNSyncPlus.App
             if (string.IsNullOrEmpty(local))
             {
                 WpfMessageBox.Show("请选择本地恢复目标文件夹", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (PathHelper.ArePathsSameOrNested(nas, local, out string nestErr))
+            {
+                WpfMessageBox.Show(nestErr, "安全阻止", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
 
