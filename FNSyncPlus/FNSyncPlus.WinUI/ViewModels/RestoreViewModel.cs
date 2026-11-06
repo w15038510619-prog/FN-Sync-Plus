@@ -7,6 +7,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
+using FNSyncPlus.Core.Storage;
 
 namespace FNSyncPlus.WinUI.ViewModels
 {
@@ -24,6 +25,7 @@ namespace FNSyncPlus.WinUI.ViewModels
     {
         private readonly RestoreEngine _restoreEngine;
         private readonly AppSettings _settings;
+        private readonly NasConnectionService _connectionService;
 
         public ObservableCollection<DiscoveredBackupPackage> DiscoveredPackages { get; } = new();
         public ObservableCollection<RestoreFileDisplayItem> PackageFiles { get; } = new();
@@ -52,12 +54,17 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private bool _isScanning = false;
 
-        public RestoreViewModel(RestoreEngine restoreEngine, AppSettings settings)
+        public RestoreViewModel(RestoreEngine restoreEngine, AppSettings settings, NasConnectionService connectionService)
         {
             _restoreEngine = restoreEngine;
             _settings = settings;
+            _connectionService = connectionService;
 
-            if (!string.IsNullOrEmpty(_settings.PreferredBackupRoot))
+            if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
+            {
+                NasScanRoot = "我的文件";
+            }
+            else if (!string.IsNullOrEmpty(_settings.PreferredBackupRoot))
             {
                 NasScanRoot = _settings.PreferredBackupRoot;
             }
@@ -83,7 +90,17 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             try
             {
-                var packages = await _restoreEngine.DiscoverBackupPackagesAsync(NasScanRoot.Trim());
+                List<DiscoveredBackupPackage> packages;
+                if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
+                {
+                    string relScan = NasScanRoot == "我的文件" ? "" : NasScanRoot.TrimStart('/');
+                    packages = await _restoreEngine.DiscoverBackupPackagesAsync(fnProvider, relScan);
+                }
+                else
+                {
+                    packages = await _restoreEngine.DiscoverBackupPackagesAsync(NasScanRoot.Trim());
+                }
+
                 foreach (var p in packages)
                 {
                     DiscoveredPackages.Add(p);
@@ -121,7 +138,16 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             try
             {
-                var files = await _restoreEngine.PreviewBackupAsync(pkg.NasFolderUnc);
+                List<RestorePreviewItem> files;
+                if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
+                {
+                    files = await _restoreEngine.PreviewBackupAsync(fnProvider, pkg.NasFolderUnc);
+                }
+                else
+                {
+                    files = await _restoreEngine.PreviewBackupAsync(pkg.NasFolderUnc);
+                }
+
                 foreach (var f in files)
                 {
                     PackageFiles.Add(new RestoreFileDisplayItem
@@ -164,7 +190,15 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 _restoreEngine.ProgressChanged += OnProgress;
 
-                var report = await _restoreEngine.RunRestoreAsync(SelectedPackage.NasFolderUnc, LocalRestoreTarget, policy);
+                RestoreProgressReport report;
+                if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
+                {
+                    report = await _restoreEngine.RunRestoreAsync(fnProvider, SelectedPackage.NasFolderUnc, LocalRestoreTarget, policy);
+                }
+                else
+                {
+                    report = await _restoreEngine.RunRestoreAsync(SelectedPackage.NasFolderUnc, LocalRestoreTarget, policy);
+                }
 
                 RestoreProgress = 100;
                 RestoreStatusText = $"还原成功完成！共恢复 {report.RestoredFiles} 个文件，跳过 {report.SkippedFiles} 个，SHA-256 校验通过 {report.IntegrityVerifiedFiles} 个。";

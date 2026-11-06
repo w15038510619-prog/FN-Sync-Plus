@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -73,12 +74,18 @@ namespace FNSyncPlus.Core.Storage
                 {
                     if (loginResp.IsBindTwofaSecret == true)
                     {
+                        if (!string.IsNullOrEmpty(twoFactorCode) && !string.IsNullOrEmpty(loginResp.AccessToken))
+                        {
+                            // 若调用方已提供两步验证码，直接执行二次鉴权
+                            return await VerifyTwoFactorCodeAsync(loginResp.AccessToken, twoFactorCode, username, ct).ConfigureAwait(false);
+                        }
+
                         return new StorageAuthResult
                         {
                             Success = false,
                             TwoFactorRequired = true,
                             TwoFactorAccessToken = loginResp.AccessToken,
-                            ErrorMessage = "账号已启用两步验证 (2FA)，请输入验证码。"
+                            ErrorMessage = "账号已启用两步验证 (2FA)，请输入 6 位动态验证码。"
                         };
                     }
 
@@ -120,6 +127,49 @@ namespace FNSyncPlus.Core.Storage
                 {
                     Success = false,
                     ErrorMessage = $"连接飞牛个人空间异常: {ex.Message}"
+                };
+            }
+        }
+
+        /// <summary>
+        /// 验证并提交 TOTP 两步验证码
+        /// </summary>
+        public async Task<StorageAuthResult> VerifyTwoFactorCodeAsync(
+            string accessToken,
+            string twoFactorCode,
+            string username,
+            CancellationToken ct = default)
+        {
+            try
+            {
+                var loginResp = await _apiClient.LoginWithTwoFactorAsync(accessToken, twoFactorCode, username, ct).ConfigureAwait(false);
+                if (loginResp.Result != "succ")
+                {
+                    return new StorageAuthResult
+                    {
+                        Success = false,
+                        ErrorMessage = loginResp.ErrMsg ?? "两步验证失败，请确认验证码是否有效或已过期。"
+                    };
+                }
+
+                int uid = _apiClient.CurrentUid ?? throw new InvalidOperationException("两步验证登录成功但未能解析权威 UID。");
+                int vol = _apiClient.CurrentVolumeId ?? 1;
+                _personalRootPath = $"vol{vol}/{uid}";
+
+                return new StorageAuthResult
+                {
+                    Success = true,
+                    AuthenticatedUser = username,
+                    UserUid = uid,
+                    PersonalRootPath = _personalRootPath
+                };
+            }
+            catch (Exception ex)
+            {
+                return new StorageAuthResult
+                {
+                    Success = false,
+                    ErrorMessage = $"两步验证异常: {ex.Message}"
                 };
             }
         }
@@ -224,20 +274,51 @@ namespace FNSyncPlus.Core.Storage
 
             try
             {
+                // 1. 真正的分块流式上传并校验业务响应
                 bool success = await _apiClient.UploadStreamAsync(
                     fullPath,
                     sourceStream,
+                    fileSize,
                     lastWriteTimeUtc,
                     overwrite,
                     progress,
                     ct).ConfigureAwait(false);
 
-                if (success)
+                if (!success)
                 {
-                    return StorageOperationResult.Ok(fullPath);
+                    return StorageOperationResult.Fail("上传接口返回失败或业务校验未通过", path: fullPath);
                 }
 
-                return StorageOperationResult.Fail("上传未返回成功状态码", path: fullPath);
+                // 2. 上传完成后的物理存在与文件大小强校验，杜绝虚假成功
+                string parentRel = Path.GetDirectoryName(relativePath.Replace('\\', '/'))?.Replace('\\', '/') ?? "";
+                string fileName = Path.GetFileName(relativePath.Replace('\\', '/'));
+
+                bool verified = false;
+                for (int attempt = 0; attempt < 3; attempt++)
+                {
+                    if (attempt > 0) await Task.Delay(100, ct).ConfigureAwait(false);
+                    var entries = await ListEntriesAsync(parentRel, ct).ConfigureAwait(false);
+                    var found = entries.FirstOrDefault(e => !e.IsDirectory && string.Equals(e.Name, fileName, StringComparison.OrdinalIgnoreCase));
+                    if (found != null)
+                    {
+                        if (found.Size == fileSize)
+                        {
+                            verified = true;
+                            break;
+                        }
+                        else
+                        {
+                            return StorageOperationResult.Fail($"上传后远端物理大小不一致 (期望: {fileSize}, 实际: {found.Size})", path: fullPath);
+                        }
+                    }
+                }
+
+                if (!verified)
+                {
+                    return StorageOperationResult.Fail("上传请求已发送但在远端目录中未能在时限内检索到目标物理实体", path: fullPath);
+                }
+
+                return StorageOperationResult.Ok(fullPath);
             }
             catch (Exception ex)
             {
@@ -265,11 +346,6 @@ namespace FNSyncPlus.Core.Storage
             try
             {
                 using var stream = await OpenReadAsync(relativePath, ct).ConfigureAwait(false);
-                if (stream.Length != expectedSize)
-                {
-                    return false;
-                }
-
                 using var sha256 = SHA256.Create();
                 byte[] hashBytes = await Task.Run(() => sha256.ComputeHash(stream), ct).ConfigureAwait(false);
                 string actualHash = Convert.ToHexString(hashBytes).ToLowerInvariant();
@@ -282,37 +358,94 @@ namespace FNSyncPlus.Core.Storage
             }
         }
 
-        public async Task<StorageOperationResult> DeleteAsync(string relativePath, bool moveToTrash = true, CancellationToken ct = default)
+        public Task<StorageOperationResult> DeleteAsync(string relativePath, bool moveToTrash = true, CancellationToken ct = default)
         {
-            EnsureAuthenticated();
-
-            // 严格安全保护：严禁删除根目录或非法的上级跳跃
-            string clean = relativePath.Trim('/', '\\').Replace('\\', '/');
-            if (string.IsNullOrWhiteSpace(clean) || clean == "." || clean == ".." || clean.Contains("../") || clean.Contains("/.."))
+            if (string.IsNullOrWhiteSpace(relativePath) || relativePath.Contains("..") || relativePath.Contains(":"))
             {
-                throw new InvalidOperationException("安全保护激活：严禁删除个人空间根目录或越界访问！");
+                return Task.FromResult(StorageOperationResult.Fail("安全保护激活：严禁删除根目录或非法越界相对路径！", 403, relativePath));
+            }
+
+            if (!_apiClient.IsAuthenticated)
+            {
+                return Task.FromResult(StorageOperationResult.Fail("飞牛个人空间尚未认证，无法执行操作。"));
+            }
+
+            // 严格安全保护：正式个人空间暂时禁止物理删除，仅允许在用户明确授权的测试探测目录中清理
+            string clean = relativePath.Trim('/', '\\').Replace('\\', '/');
+            bool isAuthorizedTestFolder = clean.StartsWith("_FNSYNC_SAFETY_PROBE_", StringComparison.OrdinalIgnoreCase) ||
+                                         clean.StartsWith("FN_SYNC_POC_", StringComparison.OrdinalIgnoreCase) ||
+                                         clean.StartsWith("FN_TEST_", StringComparison.OrdinalIgnoreCase);
+
+            if (!isAuthorizedTestFolder)
+            {
+                return Task.FromResult(StorageOperationResult.Fail("安全保护拦截：正式个人空间暂禁止删除操作，确保用户数据绝对安全。"));
             }
 
             string fullPath = CombineWithPersonalRoot(relativePath);
-            var resp = await _apiClient.DeleteFileOrDirAsync(fullPath, moveToTrash, ct).ConfigureAwait(false);
-
-            if (resp.Result == "succ")
+            return Task.Run(async () =>
             {
-                return StorageOperationResult.Ok(fullPath);
-            }
-
-            return StorageOperationResult.Fail(resp.ErrMsg ?? "删除失败", resp.ErrNo, fullPath);
+                var resp = await _apiClient.DeleteFileOrDirAsync(fullPath, moveToTrash, ct).ConfigureAwait(false);
+                if (resp.Result == "succ")
+                {
+                    return StorageOperationResult.Ok(fullPath);
+                }
+                return StorageOperationResult.Fail(resp.ErrMsg ?? "删除失败", resp.ErrNo, fullPath);
+            });
         }
 
-        private string CombineWithPersonalRoot(string relativePath)
+        private string CombineWithPersonalRoot(string? relativePath)
         {
             string root = _personalRootPath ?? $"vol1/{_apiClient.CurrentUid ?? 1000}";
-            string cleanRel = relativePath.TrimStart('/', '\\').Replace('\\', '/');
-            if (string.IsNullOrEmpty(cleanRel))
+            if (string.IsNullOrWhiteSpace(relativePath))
             {
                 return root;
             }
-            return $"{root}/{cleanRel}";
+
+            string clean = relativePath.Trim().Replace('\\', '/');
+            if (clean.StartsWith("/"))
+            {
+                clean = clean.TrimStart('/');
+            }
+
+            // 支持兼容「我的文件」或「我的文件/...」的前缀
+            if (clean.Equals("我的文件", StringComparison.OrdinalIgnoreCase))
+            {
+                return root;
+            }
+            if (clean.StartsWith("我的文件/", StringComparison.OrdinalIgnoreCase))
+            {
+                clean = clean.Substring("我的文件/".Length).TrimStart('/');
+                if (string.IsNullOrEmpty(clean)) return root;
+            }
+
+            // 支持已包含 root 前缀 (例如 vol1/1006/...) 的路径
+            if (clean.Equals(root, StringComparison.OrdinalIgnoreCase))
+            {
+                return root;
+            }
+            if (clean.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase))
+            {
+                clean = clean.Substring(root.Length + 1).TrimStart('/');
+                if (string.IsNullOrEmpty(clean)) return root;
+            }
+
+            // 严格检查目录遍历与非法字符
+            string[] segments = clean.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            foreach (var seg in segments)
+            {
+                if (seg == ".." || seg == "." || seg.Contains(":") || seg.Contains("\\"))
+                {
+                    throw new ArgumentException($"安全拦截：检测到非法路径组件 '{seg}'，严禁目录遍历或越界访问！", nameof(relativePath));
+                }
+            }
+
+            string combined = $"{root}/{string.Join('/', segments)}";
+            if (!combined.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("安全拦截：解析后路径越出个人空间边界！");
+            }
+
+            return combined;
         }
 
         private void EnsureAuthenticated()

@@ -7,6 +7,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
+using FNSyncPlus.Core.Storage;
 using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.WinUI.ViewModels
@@ -47,6 +48,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private readonly SmbAuthService _smbService;
         private readonly AppSettings _settings;
         private readonly FnOsIntegrationService _fnOsService;
+        private readonly NasConnectionService _connectionService;
 
         public NasBrowserViewModel NasBrowser { get; }
 
@@ -98,13 +100,20 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private string _statusMessage = string.Empty;
 
-        public AddFolderWizardViewModel(TaskManager taskManager, SmbAuthService smbService, AppSettings settings, NasBrowserViewModel nasBrowser, FnOsIntegrationService fnOsService)
+        public AddFolderWizardViewModel(
+            TaskManager taskManager, 
+            SmbAuthService smbService, 
+            AppSettings settings, 
+            NasBrowserViewModel nasBrowser, 
+            FnOsIntegrationService fnOsService,
+            NasConnectionService connectionService)
         {
             _taskManager = taskManager;
             _smbService = smbService;
             _settings = settings;
             NasBrowser = nasBrowser;
             _fnOsService = fnOsService;
+            _connectionService = connectionService;
 
             NasBrowser.PropertyChanged += (s, e) =>
             {
@@ -122,6 +131,21 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         private async void InitializeDefaultNasRoot()
         {
+            // 优先支持飞牛官方「我的文件」原生个人空间
+            if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider && fnProvider.IsAuthenticated)
+            {
+                NasDestinationRoot = "我的文件";
+                SecurityTitle = "飞牛官方个人空间 [我的文件]";
+                SecurityDescription = "已直连飞牛官方「我的文件」原生存储，将自动为选中的本地文件夹建立同名备份目录。";
+                SecurityBadgeBg = "#DCFCE7";
+                SecurityBadgeColor = "#15803D";
+                IsTeamShareWarning = false;
+                CanCreate = true;
+                await RecomputePlannedTasksAsync();
+                UpdateStepState();
+                return;
+            }
+
             string server = _settings.NasServer.Trim();
             string user = _settings.Username.Trim();
 
@@ -178,6 +202,20 @@ namespace FNSyncPlus.WinUI.ViewModels
                 return;
             }
 
+            if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider && 
+                (NasDestinationRoot == "我的文件" || NasDestinationRoot.StartsWith("我的文件/") || !NasDestinationRoot.StartsWith(@"\\")))
+            {
+                SecurityTitle = "飞牛官方个人空间 [我的文件]";
+                SecurityDescription = $"选定存储位置: {NasDestinationRoot}，具备专属读写权限与隔离保护。";
+                SecurityBadgeBg = "#DCFCE7";
+                SecurityBadgeColor = "#15803D";
+                IsTeamShareWarning = false;
+                CanCreate = true;
+                await RecomputePlannedTasksAsync();
+                UpdateStepState();
+                return;
+            }
+
             var (canWrite, writeErr) = await _smbService.TestDirectoryWritePermissionAsync(NasDestinationRoot);
             var eval = SmbAuthService.EvaluateShareSecurity(NasDestinationRoot, _settings.Username, canWrite, writeErr);
 
@@ -229,6 +267,28 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
             else if (CurrentStep == 2)
             {
+                if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
+                {
+                    NasBrowser.ConfirmSelection();
+                    string sel = !string.IsNullOrWhiteSpace(NasBrowser.ConfirmedSelectedPath)
+                        ? NasBrowser.ConfirmedSelectedPath
+                        : NasBrowser.CurrentUncPath;
+
+                    if (string.IsNullOrWhiteSpace(sel) || sel.Contains("FN_PERSONAL_SPACE_GUIDANCE"))
+                    {
+                        sel = "我的文件";
+                    }
+
+                    NasDestinationRoot = sel;
+                    await EvaluateNasRootSecurityAsync();
+                    await RecomputePlannedTasksAsync();
+
+                    CurrentStep = 3;
+                    StepIndicatorText = "步骤 3 / 3：自动规划预览与确认";
+                    UpdateStepState();
+                    return;
+                }
+
                 if (NasBrowser.IsPersonalSpaceGuidanceActive)
                 {
                     StatusMessage = "当前尚未配置个人专属 SMB 共享，无法继续。请根据指引配置或在左侧选择其他有效共享。";
@@ -336,6 +396,47 @@ namespace FNSyncPlus.WinUI.ViewModels
                 return;
             }
 
+            // 1. 飞牛原生「我的文件」同名规划通道
+            if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
+            {
+                var allocatedFn = new System.Collections.Generic.List<string>();
+                foreach (var localPath in SelectedLocalFolders)
+                {
+                    string desiredName = Path.GetFileName(localPath.TrimEnd('/', '\\'));
+                    if (string.IsNullOrEmpty(desiredName)) desiredName = "备份数据";
+
+                    string uniqueName = desiredName;
+                    int counter = 1;
+                    while (allocatedFn.Contains(uniqueName, StringComparer.OrdinalIgnoreCase))
+                    {
+                        uniqueName = $"{desiredName} ({counter++})";
+                    }
+                    allocatedFn.Add(uniqueName);
+
+                    string rootPrefix = string.IsNullOrEmpty(NasDestinationRoot) || NasDestinationRoot == "我的文件"
+                        ? "我的文件"
+                        : NasDestinationRoot.TrimEnd('/', '\\');
+
+                    string fullTarget = $"{rootPrefix}/{uniqueName}";
+
+                    PlannedTasks.Add(new PlannedTaskItem
+                    {
+                        SourcePath = localPath,
+                        SourceFolderName = desiredName,
+                        TargetSubFolder = uniqueName,
+                        FullTargetUnc = fullTarget,
+                        FinalTargetUnc = fullTarget,
+                        StatusText = uniqueName != desiredName ? "▲ 批次同名去重规划" : "✔ 自动规划同名备份",
+                        IsConflict = uniqueName != desiredName
+                    });
+                }
+
+                CanCreate = PlannedTasks.Count > 0;
+                UpdateStepState();
+                return;
+            }
+
+            // 2. 传统 SMB 共享规划通道
             var allocated = new System.Collections.Generic.List<string>();
 
             foreach (var localPath in SelectedLocalFolders)
@@ -354,6 +455,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                     SourceFolderName = desiredName,
                     TargetSubFolder = plan.FinalSubFolder,
                     FullTargetUnc = fullTarget,
+                    FinalTargetUnc = fullTarget,
                     StatusText = plan.HasForeignConflict ? "▲ 批次同名去重规划" : (plan.IsExisting ? "✔ 复用现有目录" : "✔ 自动规划新建"),
                     IsConflict = plan.HasForeignConflict
                 });
@@ -368,7 +470,65 @@ namespace FNSyncPlus.WinUI.ViewModels
             await Task.Yield();
             if (!CanCreate || PlannedTasks.Count == 0) return 0;
 
-            // 1. 严格校验目标根路径是否真实存在且可写，禁止向无效根目录批量创建任务
+            int createdCount = 0;
+
+            // 1. 飞牛官方「我的文件」原生任务创建
+            if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
+            {
+                foreach (var item in PlannedTasks)
+                {
+                    string destSub = item.FullTargetUnc;
+                    if (destSub.StartsWith("我的文件/"))
+                    {
+                        destSub = destSub.Substring("我的文件/".Length);
+                    }
+                    else if (destSub == "我的文件")
+                    {
+                        destSub = item.TargetSubFolder;
+                    }
+
+                    var mkRes = await fnProvider.CreateDirectoryAsync(destSub);
+                    if (!mkRes.Success && mkRes.ErrorCode != 17)
+                    {
+                        item.IsFailed = true;
+                        item.StatusText = "❌ 创建个人空间目录失败";
+                        item.ErrorMessage = mkRes.ErrorMessage;
+                        continue;
+                    }
+
+                    item.FinalTargetUnc = item.FullTargetUnc;
+                    item.StatusText = "✔ 目标就绪，任务已建立";
+                    item.IsFailed = false;
+
+                    var task = new SyncTask
+                    {
+                        TaskId = Guid.NewGuid().ToString("N"),
+                        TaskName = $"{item.SourceFolderName} 备份",
+                        SourceFolder = item.SourcePath,
+                        DestinationRoot = NasDestinationRoot,
+                        DestinationFolder = item.FullTargetUnc,
+                        NasDeviceId = _settings.NasServer,
+                        Mode = SyncMode.OneWayBackup,
+                        AutoSyncEnabled = true,
+                        RealtimeWatchEnabled = true
+                    };
+
+                    _taskManager.AddTask(task);
+                    _taskManager.TriggerSync(task.TaskId);
+                    createdCount++;
+                }
+
+                if (createdCount > 0)
+                {
+                    _settings.PreferredBackupRoot = NasDestinationRoot;
+                    _settings.Save();
+                }
+
+                StatusMessage = $"全部 {createdCount} 个个人空间同步任务已成功建立并启动！";
+                return createdCount;
+            }
+
+            // 2. 传统 SMB 共享校验与创建通道
             var rootValidation = await _smbService.ValidateDirectoryAccessStateAsync(NasDestinationRoot, _settings.NasServer);
             if (!rootValidation.DoesShareExist || !rootValidation.IsDirectoryWritable)
             {
@@ -382,7 +542,6 @@ namespace FNSyncPlus.WinUI.ViewModels
                 return 0;
             }
 
-            int createdCount = 0;
             int failedCount = 0;
 
             foreach (var item in PlannedTasks)

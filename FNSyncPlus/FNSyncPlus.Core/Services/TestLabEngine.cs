@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
+using FNSyncPlus.Core.Storage;
 using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.Core.Services
@@ -490,6 +491,187 @@ namespace FNSyncPlus.Core.Services
                     {
                         Directory.Delete(isolatedNasTestDir, true);
                         Log($"已安全清理 NAS 端隔离测试目录: {isolatedNasTestDir}");
+                    }
+                }
+                catch { }
+
+                sw.Stop();
+                report.ElapsedSeconds = sw.Elapsed.TotalSeconds;
+            }
+
+            return report;
+        }
+
+        /// <summary>
+        /// 运行真实飞牛 NAS 「我的文件」原生个人空间端到端自动化测试
+        /// 包含：单级、多级嵌套子目录、特殊字符/Emoji、254/255/256/300 字节边界、典型二进制文件、分块流式上传验证、二次零传输跳过与 SHA-256 逐项比对强校验
+        /// </summary>
+        public async Task<TestLabReport> RunNasFnOsPersonalTestAsync(
+            INasStorageProvider storageProvider, 
+            IProgress<string>? progress = null,
+            bool includeLargeFile = false)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var report = new TestLabReport
+            {
+                Mode = "RealFnOsPersonal",
+                TargetPath = storageProvider.RootDisplayPath
+            };
+
+            void Log(string msg)
+            {
+                report.LogEntries.Add($"[{DateTime.Now:HH:mm:ss}] {msg}");
+                progress?.Report(msg);
+            }
+
+            Log($">>> 开始执行真实飞牛「我的文件」原生个人空间端到端自动化测试...");
+
+            if (storageProvider == null || !storageProvider.IsAuthenticated)
+            {
+                Log("▲ 错误：飞牛 NAS 个人空间未连接或未鉴权，请先在【NAS 设备】完成登录。");
+                report.IsAllPassed = false;
+                return report;
+            }
+
+            string isolatedSubPath = $"FN_TEST_{report.RunId}";
+            string runRestoreDir = Path.Combine(RestoredBaseDir, $"Run_FnOs_{report.RunId}");
+
+            try
+            {
+                Directory.CreateDirectory(runRestoreDir);
+                Log($"已就绪本地还原沙箱: {runRestoreDir}");
+
+                // 1. 确保源样本已生成
+                if (!Directory.Exists(TestSourceDir) || Directory.GetFiles(TestSourceDir, "*.*", SearchOption.AllDirectories).Length == 0)
+                {
+                    Log("检测到源样本尚未生成，自动生成标准测试样本集 (含 254/255/256/300 字节边界与特殊字符)...");
+                    await GenerateTestSamplesAsync(progress);
+                }
+
+                // 2. 若启用大文件验证，生成一个 100MB 大文件测试分块流式上传
+                string largeFilePath = Path.Combine(TestSourceDir, "07_大文件流式", "100MB_Streaming_Test.bin");
+                if (includeLargeFile && !File.Exists(largeFilePath))
+                {
+                    Log("正在生成 100MB 流式传输验证测试文件...");
+                    string? dir = Path.GetDirectoryName(largeFilePath);
+                    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+                    using (var fs = new FileStream(largeFilePath, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        byte[] chunk = new byte[1024 * 1024]; // 1MB 块
+                        for (int i = 0; i < 100; i++)
+                        {
+                            chunk[0] = (byte)(i % 256);
+                            chunk[1023] = (byte)((i * 3) % 256);
+                            fs.Write(chunk, 0, chunk.Length);
+                        }
+                    }
+                    Log("100MB 流式测试文件生成完毕。");
+                }
+
+                var syncEngine = new SyncEngine(_longNameEngine, _manifestManager, _smbService);
+
+                // 3. 执行第 1 次初次同步
+                Log($"【第 1 阶段】正在执行初次同步到飞牛个人空间: 我的文件/{isolatedSubPath} ...");
+                var syncRep1 = await syncEngine.RunSyncAsync(TestSourceDir, isolatedSubPath, storageProvider, default);
+                report.TotalSourceFiles = syncRep1.TotalFiles;
+                report.InitialUploadedFiles = syncRep1.UploadedFiles;
+                report.LongNameFilesMapped = syncRep1.LongNameFiles;
+                Log($"初次同步完成：总扫描 {syncRep1.TotalFiles}，上传 {syncRep1.UploadedFiles}，长文件名映射 {syncRep1.LongNameFiles}，失败 {syncRep1.FailedFiles}");
+
+                // 4. 执行第 2 次增量测试（零变更跳过验证）
+                Log("【第 2 阶段】正在执行二次增量无变化同步（验证零传输精准跳过）...");
+                var syncRep2 = await syncEngine.RunSyncAsync(TestSourceDir, isolatedSubPath, storageProvider, default);
+                report.IncrementalSkippedFiles = syncRep2.UnchangedFiles;
+                report.IncrementalUploadedFiles = syncRep2.UploadedFiles;
+                Log($"二次增量完成：未修改跳过 {syncRep2.UnchangedFiles} 个 (期望: {syncRep1.TotalFiles})，上传: {syncRep2.UploadedFiles} 个");
+
+                // 5. 执行异机原名恢复
+                Log($"【第 3 阶段】正在从飞牛个人空间执行无损异机恢复下载，目标: {runRestoreDir} ...");
+                var restoreEngine = new RestoreEngine(_manifestManager);
+                var restoreRep = await restoreEngine.RunRestoreAsync(storageProvider, isolatedSubPath, runRestoreDir, ConflictResolution.Overwrite, default);
+                report.RestoredFiles = restoreRep.RestoredFiles;
+                Log($"个人空间还原完成：还原文件 {restoreRep.RestoredFiles} 个，空目录 {restoreRep.RestoredDirectories} 个，长名还原 {restoreRep.LongNameRestoredFiles} 个");
+
+                // 6. 逐项执行 SHA-256 强校验
+                Log("【第 4 阶段】正在执行恢复文件 SHA-256 逐项比对强校验...");
+                int verifiedCount = 0;
+                bool allMatch = true;
+
+                var sourceFiles = Directory.GetFiles(TestSourceDir, "*.*", SearchOption.AllDirectories);
+                foreach (var sFile in sourceFiles)
+                {
+                    string relPath = Path.GetRelativePath(TestSourceDir, sFile);
+                    string rFile = Path.Combine(runRestoreDir, relPath);
+
+                    var itemRes = new TestFileVerificationResult
+                    {
+                        RelativePath = relPath.Replace('\\', '/'),
+                        Utf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(relPath)),
+                        WasMapped = PathHelper.GetUtf8ByteCount(Path.GetFileName(relPath)) > 255
+                    };
+
+                    if (!File.Exists(rFile))
+                    {
+                        itemRes.IsVerified = false;
+                        itemRes.StatusMessage = "FAIL (文件未还原)";
+                        allMatch = false;
+                    }
+                    else
+                    {
+                        string origSha = HashHelper.ComputeFileSha256(sFile);
+                        string restSha = HashHelper.ComputeFileSha256(rFile);
+                        itemRes.OriginalSha256 = origSha;
+                        itemRes.RestoredSha256 = restSha;
+
+                        if (string.Equals(origSha, restSha, StringComparison.OrdinalIgnoreCase))
+                        {
+                            itemRes.IsVerified = true;
+                            itemRes.StatusMessage = "PASS (哈希完全一致)";
+                            verifiedCount++;
+                        }
+                        else
+                        {
+                            itemRes.IsVerified = false;
+                            itemRes.StatusMessage = "FAIL (哈希不匹配)";
+                            allMatch = false;
+                        }
+                    }
+
+                    report.ItemVerifications.Add(itemRes);
+                }
+
+                report.Sha256VerifiedFiles = verifiedCount;
+                report.IsAllPassed = allMatch && verifiedCount == sourceFiles.Length && syncRep1.FailedFiles == 0 && syncRep2.UploadedFiles == 0;
+
+                Log(report.IsAllPassed
+                    ? $"🎉 飞牛个人空间端到端测试 100% 成功！共校验 {verifiedCount}/{sourceFiles.Length} 个文件，全部 SHA-256 哈希一致，二次同步准确 0 传输跳过！"
+                    : $"▲ 飞牛个人空间测试未完全通过：校验通过 {verifiedCount}/{sourceFiles.Length}");
+            }
+            catch (Exception ex)
+            {
+                Log($"▲ 飞牛个人空间测试异常: {ex.Message}");
+                report.IsAllPassed = false;
+            }
+            finally
+            {
+                // 7. 受控清理飞牛 NAS 上的隔离测试目录
+                try
+                {
+                    Log($"正在执行受控安全清理 NAS 端隔离测试目录: 我的文件/{isolatedSubPath} ...");
+                    var delRes = await storageProvider.DeleteAsync(isolatedSubPath, moveToTrash: true);
+                    if (delRes.Success)
+                    {
+                        Log($"已安全清理 NAS 端隔离测试目录: 我的文件/{isolatedSubPath}");
+                    }
+                }
+                catch { }
+
+                try
+                {
+                    if (Directory.Exists(runRestoreDir))
+                    {
+                        Directory.Delete(runRestoreDir, true);
                     }
                 }
                 catch { }

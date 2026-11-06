@@ -8,6 +8,7 @@ using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
+using FNSyncPlus.Core.Storage;
 using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.Core.Services
@@ -194,7 +195,28 @@ namespace FNSyncPlus.Core.Services
         /// <summary>
         /// 启动或触发一次完整的增量同步
         /// </summary>
-        public async Task<SyncProgressReport> RunSyncAsync(string sourceFolder, string targetNasFolder, CancellationToken externalToken = default)
+        public Task<SyncProgressReport> RunSyncAsync(string sourceFolder, string targetNasFolder, CancellationToken externalToken = default)
+        {
+            return RunSyncInternalAsync(sourceFolder, targetNasFolder, null, externalToken);
+        }
+
+        /// <summary>
+        /// 启动或触发一次完整的增量同步（支持传入 NAS 统一存储提供程序）
+        /// </summary>
+        public Task<SyncProgressReport> RunSyncAsync(
+            string sourceFolder, 
+            string targetNasFolder, 
+            INasStorageProvider? storageProvider, 
+            CancellationToken externalToken)
+        {
+            return RunSyncInternalAsync(sourceFolder, targetNasFolder, storageProvider, externalToken);
+        }
+
+        private async Task<SyncProgressReport> RunSyncInternalAsync(
+            string sourceFolder,
+            string targetNasFolder,
+            INasStorageProvider? storageProvider,
+            CancellationToken externalToken)
         {
             if (string.IsNullOrWhiteSpace(sourceFolder) || !Directory.Exists(sourceFolder))
             {
@@ -226,6 +248,12 @@ namespace FNSyncPlus.Core.Services
                 _syncCts?.Cancel();
                 _syncCts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
                 var token = _syncCts.Token;
+
+                // 若指定了飞牛官方原生个人空间提供程序，执行原生流式同步通道
+                if (storageProvider != null && storageProvider.ProviderType == StorageProviderType.FnOsPersonal)
+                {
+                    return await RunSyncWithStorageProviderAsync(sourceFolder, targetNasFolder, storageProvider, token).ConfigureAwait(false);
+                }
 
                 var report = new SyncProgressReport { State = SyncState.Scanning };
                 CurrentState = SyncState.Scanning;
@@ -521,6 +549,228 @@ namespace FNSyncPlus.Core.Services
                 targetLock?.Dispose();
                 _concurrencyLock.Release();
             }
+        }
+
+        private async Task<SyncProgressReport> RunSyncWithStorageProviderAsync(
+            string sourceFolder,
+            string targetNasFolder,
+            INasStorageProvider storageProvider,
+            CancellationToken token)
+        {
+            var report = new SyncProgressReport { State = SyncState.Scanning };
+            CurrentState = SyncState.Scanning;
+            Log("INFO", $"开始飞牛原生个人空间增量同步: 本地【{sourceFolder}】 -> 飞牛「我的文件」【{targetNasFolder}】");
+
+            string longSource = PathHelper.EnsureLongPathPrefix(sourceFolder);
+
+            // 1. 确保远端目标根目录存在
+            var mkdirRes = await storageProvider.CreateDirectoryAsync(targetNasFolder, token).ConfigureAwait(false);
+            if (!mkdirRes.Success)
+            {
+                CurrentState = SyncState.Failed;
+                Log("ERROR", $"无法在飞牛个人空间创建目标目录: {mkdirRes.ErrorMessage}");
+                throw new IOException($"创建个人空间目标目录失败: {mkdirRes.ErrorMessage}");
+            }
+
+            // 2. 加载 NAS 隔离元数据清单 (.fnsync/manifest.json)
+            Log("INFO", "正在加载飞牛 NAS 备份元数据清单 (.fnsync/manifest.json)...");
+            Manifest manifest = await _manifestManager.LoadManifestAsync(storageProvider, targetNasFolder, token).ConfigureAwait(false);
+            manifest.SourceRoot = PathHelper.RemoveLongPathPrefix(sourceFolder);
+            manifest.TargetRoot = targetNasFolder;
+            _longNameEngine.LoadExistingManifest(manifest);
+
+            var manifestFilesMap = new Dictionary<string, ManifestFileEntry>(StringComparer.OrdinalIgnoreCase);
+            foreach (var f in manifest.Files)
+            {
+                manifestFilesMap[f.OriginalRel] = f;
+            }
+
+            // 3. 扫描本地源文件
+            var dirInfo = new DirectoryInfo(longSource);
+            var allLocalFiles = ScanLocalSourceFiles(dirInfo, longSource);
+            report.TotalFiles = allLocalFiles.Count;
+            Log("INFO", $"本地扫描完成，共发现 {report.TotalFiles} 个有效源文件，开始增量比对与流式上传...");
+
+            CurrentState = SyncState.Syncing;
+            report.State = SyncState.Syncing;
+
+            var stopwatch = Stopwatch.StartNew();
+            long totalBytesTransferred = 0;
+            int uploadedCount = 0;
+            int unchangedCount = 0;
+            int longNameCount = 0;
+            int failedCount = 0;
+
+            for (int i = 0; i < allLocalFiles.Count; i++)
+            {
+                if (token.IsCancellationRequested)
+                {
+                    Log("WARN", "同步任务已被用户取消。");
+                    CurrentState = SyncState.Paused;
+                    break;
+                }
+
+                var localFi = allLocalFiles[i];
+                string localFull = localFi.FullName;
+                string originalRel = PathHelper.NormalizeRelPath(Path.GetRelativePath(longSource, localFull));
+                report.CurrentFile = originalRel;
+                report.ScannedFiles = i + 1;
+
+                var (storedRel, isLong) = _longNameEngine.TranslateFilePath(originalRel);
+                if (isLong)
+                {
+                    longNameCount++;
+                    Log("INFO", $"[长文件名无损映射] 原始: {originalRel} -> 映射为: {storedRel}");
+                }
+
+                // 增量判定：大小 + 修改时间
+                bool isUnchanged = false;
+                if (manifestFilesMap.TryGetValue(originalRel, out var existingEntry))
+                {
+                    if (existingEntry.StoredRel.Equals(storedRel, StringComparison.OrdinalIgnoreCase) &&
+                        existingEntry.Size == localFi.Length &&
+                        Math.Abs(existingEntry.ModTimeUtcTicks - localFi.LastWriteTimeUtc.Ticks) < TimeSpan.TicksPerSecond * 2)
+                    {
+                        isUnchanged = true;
+                    }
+                }
+
+                if (isUnchanged)
+                {
+                    unchangedCount++;
+                    report.UnchangedFiles = unchangedCount;
+                    report.LongNameFiles = longNameCount;
+                    ProgressChanged?.Invoke(report);
+                    continue;
+                }
+
+                // 真正的流式上传
+                string remoteRel = string.IsNullOrEmpty(targetNasFolder)
+                    ? storedRel
+                    : $"{targetNasFolder.TrimEnd('/', '\\')}/{storedRel}";
+
+                string remoteDir = Path.GetDirectoryName(remoteRel.Replace('\\', '/'))?.Replace('\\', '/') ?? "";
+                if (!string.IsNullOrEmpty(remoteDir))
+                {
+                    await storageProvider.CreateDirectoryAsync(remoteDir, token).ConfigureAwait(false);
+                }
+
+                bool uploadSuccess = false;
+                string uploadError = "";
+
+                for (int attempt = 1; attempt <= 3; attempt++)
+                {
+                    try
+                    {
+                        FileStream srcStream;
+                        try
+                        {
+                            srcStream = new FileStream(localFull, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 64 * 1024, useAsync: true);
+                        }
+                        catch (IOException ioEx)
+                        {
+                            throw new IOException($"[文件被占用] 无法读取正在被其他程序编辑或锁定的文件: {ioEx.Message}", ioEx);
+                        }
+
+                        using (srcStream)
+                        {
+                            var uploadRes = await storageProvider.UploadFileAsync(
+                                remoteRel,
+                                srcStream,
+                                localFi.Length,
+                                localFi.LastWriteTimeUtc,
+                                overwrite: true,
+                                new Progress<long>(bytesCopied =>
+                                {
+                                    totalBytesTransferred += bytesCopied;
+                                    double elapsedSec = stopwatch.Elapsed.TotalSeconds;
+                                    report.BytesTransferred = totalBytesTransferred;
+                                    report.SpeedBytesPerSec = elapsedSec > 0 ? totalBytesTransferred / elapsedSec : 0;
+                                    ProgressChanged?.Invoke(report);
+                                }),
+                                token).ConfigureAwait(false);
+
+                            if (!uploadRes.Success)
+                            {
+                                throw new IOException(uploadRes.ErrorMessage);
+                            }
+                        }
+
+                        // 计算 SHA-256 并更新清单字典
+                        string sha256 = HashHelper.ComputeFileSha256(localFull);
+                        var newEntry = new ManifestFileEntry
+                        {
+                            OriginalRel = originalRel,
+                            StoredRel = storedRel,
+                            Size = localFi.Length,
+                            ModTimeUtcTicks = localFi.LastWriteTimeUtc.Ticks,
+                            ModTimeIso = localFi.LastWriteTimeUtc,
+                            Sha256 = sha256,
+                            IsLongName = isLong
+                        };
+                        manifestFilesMap[originalRel] = newEntry;
+
+                        uploadedCount++;
+                        uploadSuccess = true;
+                        break;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        uploadError = ex.Message;
+                        Log("WARN", $"[重试 {attempt}/3] 个人空间上传 {originalRel} 异常: {ex.Message}");
+                        if (attempt < 3)
+                        {
+                            await Task.Delay(1000 * attempt, token).ConfigureAwait(false);
+                        }
+                    }
+                }
+
+                if (!uploadSuccess && !token.IsCancellationRequested)
+                {
+                    failedCount++;
+                    report.FailedFiles = failedCount;
+                    FailedItems.Add(new FailedSyncItem
+                    {
+                        RelativePath = originalRel,
+                        ErrorMessage = uploadError
+                    });
+                    Log("ERROR", $"[同步失败] {originalRel} : {uploadError}");
+                }
+
+                report.UploadedFiles = uploadedCount;
+                report.UnchangedFiles = unchangedCount;
+                report.LongNameFiles = longNameCount;
+                ProgressChanged?.Invoke(report);
+
+                if ((uploadedCount > 0 && uploadedCount % 20 == 0) || i == allLocalFiles.Count - 1)
+                {
+                    manifest.Files = manifestFilesMap.Values.ToList();
+                    await _manifestManager.SaveManifestAtomicAsync(storageProvider, targetNasFolder, manifest, token).ConfigureAwait(false);
+                }
+            }
+
+            // 保存最终完整清单
+            try
+            {
+                manifest.Files = manifestFilesMap.Values.ToList();
+                await _manifestManager.SaveManifestAtomicAsync(storageProvider, targetNasFolder, manifest, token).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Log("WARN", $"持久化最终清单异常: {ex.Message}");
+            }
+
+            CurrentState = failedCount > 0 ? SyncState.Failed : SyncState.Completed;
+            report.State = CurrentState;
+            report.StatusMessage = $"飞牛个人空间同步完成！已上传: {uploadedCount}, 跳过未修改: {unchangedCount}, 长文件名映射: {longNameCount}, 失败: {failedCount}";
+            Log("INFO", report.StatusMessage);
+            ProgressChanged?.Invoke(report);
+
+            return report;
         }
 
         private static List<FileInfo> ScanLocalSourceFiles(DirectoryInfo rootDir, string longSource)

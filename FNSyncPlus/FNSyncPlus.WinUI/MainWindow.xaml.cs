@@ -1,4 +1,6 @@
 using System;
+using FNSyncPlus.Core.Models;
+using FNSyncPlus.Core.Services;
 using FNSyncPlus.WinUI.Dialogs;
 using FNSyncPlus.WinUI.Helpers;
 using FNSyncPlus.WinUI.Pages;
@@ -91,17 +93,14 @@ namespace FNSyncPlus.WinUI
                         stepApplied = true;
                         await System.Threading.Tasks.Task.Delay(300);
                         var wizardVm = AppServices.GetService<AddFolderWizardViewModel>();
+                        if (wizardVm.SelectedLocalFolders.Count == 0)
+                        {
+                            wizardVm.AddLocalFolder(@"D:\FNSync_GUI_Test_Folders\Project_Alpha");
+                            wizardVm.AddLocalFolder(@"D:\FNSync_GUI_Test_Folders\Docs_2026");
+                            wizardVm.AddLocalFolder(@"D:\FNSync_GUI_Test_Folders\CAD_Drawings");
+                        }
                         if (wizardStep >= 2)
                         {
-                            if (wizardVm.SelectedLocalFolders.Count == 0)
-                            {
-                                string testPath = @"D:\FN_AutoSync_Package\FN_Sync_Test";
-                                if (!System.IO.Directory.Exists(testPath))
-                                {
-                                    testPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-                                }
-                                wizardVm.AddLocalFolder(testPath);
-                            }
                             await wizardVm.NextStepAsync();
                         }
                         if (wizardStep >= 3)
@@ -110,6 +109,63 @@ namespace FNSyncPlus.WinUI
                         }
                     };
                 }
+            }
+            else if (initialView == "DeviceConnected")
+            {
+                NavigateToTag("Device");
+                bool ran = false;
+                this.Activated += async (s, e) =>
+                {
+                    if (ran) return;
+                    ran = true;
+                    await System.Threading.Tasks.Task.Delay(500);
+                    var deviceVm = AppServices.GetService<DeviceViewModel>();
+                    await deviceVm.LoginAsync();
+                };
+            }
+            else if (initialView == "DashboardSynced")
+            {
+                NavigateToTag("Tasks");
+                bool ran = false;
+                this.Activated += (s, e) =>
+                {
+                    if (ran) return;
+                    ran = true;
+                    var taskVm = AppServices.GetService<TasksViewModel>();
+                    var tm = AppServices.GetService<TaskManager>();
+                    if (tm.Tasks.Count == 0)
+                    {
+                        var t1 = new SyncTask { TaskName = "Project_Alpha 同名备份", SourceFolder = @"D:\FNSync_GUI_Test_Folders\Project_Alpha", DestinationFolder = "我的文件/Project_Alpha", State = TaskSyncState.Completed, CurrentProgress = 100, LastSyncTime = DateTime.Now, LastSyncStatus = "已同步完成" };
+                        var t2 = new SyncTask { TaskName = "Docs_2026 同名备份", SourceFolder = @"D:\FNSync_GUI_Test_Folders\Docs_2026", DestinationFolder = "我的文件/Docs_2026", State = TaskSyncState.Completed, CurrentProgress = 100, LastSyncTime = DateTime.Now, LastSyncStatus = "已同步完成" };
+                        var t3 = new SyncTask { TaskName = "CAD_Drawings 同名备份", SourceFolder = @"D:\FNSync_GUI_Test_Folders\CAD_Drawings", DestinationFolder = "我的文件/CAD_Drawings", State = TaskSyncState.Completed, CurrentProgress = 100, LastSyncTime = DateTime.Now, LastSyncStatus = "已同步完成" };
+                        tm.AddTask(t1);
+                        tm.AddTask(t2);
+                        tm.AddTask(t3);
+                        taskVm.ReloadTasks();
+                    }
+                };
+            }
+            else if (initialView == "RestorePreview" || initialView == "RestoreCompleted")
+            {
+                NavigateToTag("Restore");
+                bool ran = false;
+                this.Activated += async (s, e) =>
+                {
+                    if (ran) return;
+                    ran = true;
+                    await System.Threading.Tasks.Task.Delay(500);
+                    var restoreVm = AppServices.GetService<RestoreViewModel>();
+                    await restoreVm.ScanPackagesAsync();
+                    if (initialView == "RestoreCompleted")
+                    {
+                        await System.Threading.Tasks.Task.Delay(500);
+                        if (restoreVm.SelectedPackage == null && restoreVm.DiscoveredPackages.Count > 0)
+                        {
+                            restoreVm.SelectedPackage = restoreVm.DiscoveredPackages[0];
+                        }
+                        await restoreVm.ExecuteRestoreAsync();
+                    }
+                };
             }
             else if (initialView == "TestLabReport")
             {

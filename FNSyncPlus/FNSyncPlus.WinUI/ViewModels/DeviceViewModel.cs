@@ -49,6 +49,14 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private bool _isSuccess = false;
 
+        [ObservableProperty]
+        private string _twoFactorCode = string.Empty;
+
+        public bool IsConnected => _connectionService.IsConnected;
+        public int? CurrentUid => _connectionService.CurrentUid;
+        public string PersonalRootDisplay => _connectionService.PersonalRootDisplay;
+        public bool TwoFactorRequired => _connectionService.TwoFactorRequired;
+
         public event Action? RequestRefreshConnectionPill;
 
         public DeviceViewModel(SmbAuthService smbService, AppSettings settings, TaskManager taskManager, NasConnectionService connectionService)
@@ -57,6 +65,20 @@ namespace FNSyncPlus.WinUI.ViewModels
             _settings = settings;
             _taskManager = taskManager;
             _connectionService = connectionService;
+
+            _connectionService.PropertyChanged += (s, e) =>
+            {
+                if (e.PropertyName == nameof(NasConnectionService.IsConnected) ||
+                    e.PropertyName == nameof(NasConnectionService.CurrentUid) ||
+                    e.PropertyName == nameof(NasConnectionService.PersonalRootDisplay) ||
+                    e.PropertyName == nameof(NasConnectionService.TwoFactorRequired))
+                {
+                    OnPropertyChanged(nameof(IsConnected));
+                    OnPropertyChanged(nameof(CurrentUid));
+                    OnPropertyChanged(nameof(PersonalRootDisplay));
+                    OnPropertyChanged(nameof(TwoFactorRequired));
+                }
+            };
 
             NasAddress = settings.NasServer;
             Username = settings.Username;
@@ -111,7 +133,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
 
             IsBusy = true;
-            StatusMessage = "正在建立 Windows SMB 安全会话...";
+            StatusMessage = "正在建立飞牛官方原生个人空间安全连接并验证 TLS 证书指纹...";
             IsSuccess = false;
 
             try
@@ -130,6 +152,38 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 IsSuccess = false;
                 StatusMessage = $"连接异常: {ex.Message}";
+            }
+            finally
+            {
+                IsBusy = false;
+            }
+        }
+
+        [RelayCommand]
+        public async Task SubmitTwoFactorCodeAsync()
+        {
+            if (string.IsNullOrWhiteSpace(TwoFactorCode))
+            {
+                StatusMessage = "请输入 6 位动态验证码。";
+                return;
+            }
+
+            IsBusy = true;
+            try
+            {
+                var (success, msg) = await _connectionService.SubmitTwoFactorCodeAsync(TwoFactorCode);
+                IsSuccess = success;
+                StatusMessage = msg;
+                if (success)
+                {
+                    TwoFactorCode = string.Empty;
+                }
+                RequestRefreshConnectionPill?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                IsSuccess = false;
+                StatusMessage = $"两步验证异常: {ex.Message}";
             }
             finally
             {

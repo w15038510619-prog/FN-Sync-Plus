@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using FNSyncPlus.Core.Services;
+using FNSyncPlus.Core.Storage;
 
 namespace FNSyncPlus.WinUI.ViewModels
 {
@@ -25,7 +26,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _statusText = "备份测试实验室就绪。可先点击【生成测试文件集】准备临界样本。";
 
         [ObservableProperty]
-        private int _selectedModeIndex = 0; // 0 = 本地隔离模拟测试, 1 = 真实飞牛 NAS SMB 网络测试
+        private int _selectedModeIndex = 1; // 0 = 本地模拟, 1 = 真实飞牛个人空间 (推荐), 2 = 真实飞牛 SMB
 
         [ObservableProperty]
         private string _targetNasShare = string.Empty;
@@ -119,6 +120,17 @@ namespace FNSyncPlus.WinUI.ViewModels
                 TestLabReport report;
                 if (SelectedModeIndex == 1)
                 {
+                    if (_connectionService.CurrentStorageProvider is not FnOsPersonalStorageProvider fnProvider || !fnProvider.IsAuthenticated)
+                    {
+                        StatusText = "测试失败：未连接飞牛官方个人空间。请先在【NAS 设备】页面完成登录认证。";
+                        ExecutionLogs.Add($"[{DateTime.Now:HH:mm:ss}] 错误：未连接飞牛个人空间，无法执行官方「我的文件」端到端测试。");
+                        return;
+                    }
+                    StatusText = "正在执行真实飞牛 NAS「我的文件」端到端自动化测试 (包含分块流式传输、增量跳过与哈希校验)...";
+                    report = await _engine.RunNasFnOsPersonalTestAsync(fnProvider, progress, includeLargeFile: false);
+                }
+                else if (SelectedModeIndex == 2)
+                {
                     string target = !string.IsNullOrWhiteSpace(TargetNasShare) ? TargetNasShare : _settings.PreferredBackupRoot;
                     if (string.IsNullOrWhiteSpace(target))
                     {
@@ -126,7 +138,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                         ExecutionLogs.Add($"[{DateTime.Now:HH:mm:ss}] 错误：未指定目标 NAS 共享，无法执行网络端到端测试。");
                         return;
                     }
-                    StatusText = "正在执行真实飞牛 NAS 端到端测试 (自动创建隔离目录 FN_TEST_*)...";
+                    StatusText = "正在执行真实飞牛 NAS SMB 端到端测试 (自动创建隔离目录 FN_TEST_*)...";
                     report = await _engine.RunNasSmbTestAsync(target, progress);
                 }
                 else

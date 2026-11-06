@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using FNSyncPlus.Core.Services;
+using FNSyncPlus.Core.Storage;
 using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.WinUI.ViewModels
@@ -33,6 +34,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private readonly SmbAuthService _smbService;
         private readonly AppSettings _settings;
         private readonly FnOsIntegrationService _fnOsService;
+        private readonly NasConnectionService _connectionService;
 
         public ObservableCollection<BreadcrumbItem> BreadcrumbItems { get; } = new();
         public ObservableCollection<CategoryItem> Categories { get; } = new();
@@ -107,11 +109,16 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         public string ConfirmedSelectedPath { get; private set; } = string.Empty;
 
-        public NasBrowserViewModel(SmbAuthService smbService, AppSettings settings, FnOsIntegrationService fnOsService)
+        public NasBrowserViewModel(
+            SmbAuthService smbService, 
+            AppSettings settings, 
+            FnOsIntegrationService fnOsService,
+            NasConnectionService connectionService)
         {
             _smbService = smbService;
             _settings = settings;
             _fnOsService = fnOsService;
+            _connectionService = connectionService;
 
             _ = InitializeAsync();
         }
@@ -124,17 +131,57 @@ namespace FNSyncPlus.WinUI.ViewModels
             IsLoading = true;
             try
             {
+                // 1. 若当前已通过飞牛原生个人空间登录，直接置顶并进入「我的文件」
+                if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider && fnProvider.IsAuthenticated)
+                {
+                    Categories.Clear();
+                    Categories.Add(new CategoryItem
+                    {
+                        Title = "👤 我的文件 (官方个人空间)",
+                        Subtitle = $"已就绪 · UID: {fnProvider.CurrentUid} (专属读写)",
+                        UncPath = "我的文件",
+                        Category = NasShareCategory.PersonalSpace,
+                        IsPersonal = true,
+                        IsConfigured = true,
+                        IconGlyph = "\uE77B"
+                    });
+
+                    try
+                    {
+                        var categorized = await _smbService.EnumerateCategorizedSharesAsync(server, _settings.Username);
+                        foreach (var share in categorized.Shares)
+                        {
+                            bool isPers = share.Category == NasShareCategory.PersonalSpace;
+                            Categories.Add(new CategoryItem
+                            {
+                                Title = isPers ? $"👤 {share.Name}" : $"👥 {share.Name}",
+                                Subtitle = isPers ? "私人共享" : "团队文件 (公共协作)",
+                                UncPath = share.UncPath,
+                                Category = share.Category,
+                                IsPersonal = isPers,
+                                IsConfigured = true,
+                                IconGlyph = isPers ? "\uE77B" : "\uE716"
+                            });
+                        }
+                    }
+                    catch { }
+
+                    IsPersonalSpaceGuidanceActive = false;
+                    await NavigateToFolderAsync("我的文件");
+                    return;
+                }
+
                 var status = await _fnOsService.EvaluatePersonalSpaceAsync(server, _settings.Username, _settings.PreferredBackupRoot);
                 PersonalSpaceTitle = status.DisplayTitle;
                 PersonalSpaceExplanation = status.Explanation;
                 PersonalSpaceSetupSteps = status.SetupGuidance;
                 OfficialClientInfoText = status.OfficialClientInfo?.SummaryText ?? string.Empty;
 
-                var categorized = await _smbService.EnumerateCategorizedSharesAsync(server, _settings.Username);
+                var catShares = await _smbService.EnumerateCategorizedSharesAsync(server, _settings.Username);
 
                 Categories.Clear();
 
-                // 1. 首选置顶项：👤 我的文件 (个人空间)
+                // 首选置顶项：👤 我的文件 (个人空间)
                 if (status.HasPersonalSpaceTarget)
                 {
                     Categories.Add(new CategoryItem
@@ -163,9 +210,8 @@ namespace FNSyncPlus.WinUI.ViewModels
                 }
 
                 // 2. 团队共享与其它共享
-                foreach (var share in categorized.Shares)
+                foreach (var share in catShares.Shares)
                 {
-                    // 若该共享已被指定为个人空间，避免在下方重复
                     if (status.HasPersonalSpaceTarget && string.Equals(share.UncPath, status.PersonalSpaceRootUnc, StringComparison.OrdinalIgnoreCase))
                     {
                         continue;
@@ -184,8 +230,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                     });
                 }
 
-                // 3. 默认导航策略：
-                // 如果个人空间已就绪，优先直接进入个人空间！
+                // 3. 默认导航策略
                 if (status.HasPersonalSpaceTarget)
                 {
                     IsPersonalSpaceGuidanceActive = false;
@@ -193,7 +238,6 @@ namespace FNSyncPlus.WinUI.ViewModels
                 }
                 else
                 {
-                    // 默认停留在「我的文件 (个人空间)」指引页面，绝不自动使用团队共享！
                     IsPersonalSpaceGuidanceActive = true;
                     CurrentUncPath = "我的文件 (个人空间)";
                     UpdateBreadcrumbs("我的文件 (个人空间)");
@@ -230,6 +274,11 @@ namespace FNSyncPlus.WinUI.ViewModels
                 SecurityBadgeBg = "#FEF3C7";
                 SecurityBadgeColor = "#D97706";
                 IsTeamShare = false;
+            }
+            else if (category.UncPath == "我的文件")
+            {
+                IsPersonalSpaceGuidanceActive = false;
+                await NavigateToFolderAsync("我的文件");
             }
             else
             {
@@ -278,6 +327,58 @@ namespace FNSyncPlus.WinUI.ViewModels
         {
             if (string.IsNullOrWhiteSpace(uncPath)) return;
 
+            // 1. 飞牛原生个人空间「我的文件」专用导航通道
+            if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider && 
+                (uncPath == "我的文件" || uncPath.StartsWith("我的文件/") || !uncPath.StartsWith(@"\\")))
+            {
+                CurrentUncPath = uncPath;
+                _baseShare = "我的文件";
+                IsServerRoot = false;
+
+                string subPath = uncPath == "我的文件" ? "" : uncPath.Substring("我的文件".Length).TrimStart('/', '\\');
+                CanNavigateUp = !string.IsNullOrEmpty(subPath);
+                UpdateBreadcrumbs(uncPath);
+
+                IsLoading = true;
+                try
+                {
+                    var entries = await fnProvider.ListEntriesAsync(subPath);
+                    _allLoadedItems = entries
+                        .Where(e => e.IsDirectory)
+                        .Select(e => new NasFolderItem
+                        {
+                            Name = e.Name,
+                            FullUncPath = string.IsNullOrEmpty(subPath) ? $"我的文件/{e.Name}" : $"我的文件/{subPath}/{e.Name}",
+                            RelativeSubPath = string.IsNullOrEmpty(subPath) ? e.Name : $"{subPath}/{e.Name}",
+                            Category = NasShareCategory.PersonalSpace,
+                            IsShareRoot = false
+                        })
+                        .ToList();
+
+                    ApplyFilter();
+                    HasWritePermission = true;
+                    PermissionStatusText = "● 飞牛官方原生个人空间 (专属读写)";
+                    SecurityTitle = "飞牛官方个人空间 [我的文件]";
+                    SecurityDescription = "已直连飞牛官方「我的文件」原生存储，具备独立目录隔离与安全保护。";
+                    SecurityBadgeBg = "#DCFCE7";
+                    SecurityBadgeColor = "#15803D";
+                    IsTeamShare = false;
+                    IsPersonalSpaceGuidanceActive = false;
+                }
+                catch (Exception ex)
+                {
+                    LastErrorMessage = $"列出个人空间目录异常: {ex.Message}";
+                    SecurityDescription = LastErrorMessage;
+                    FolderItems.Clear();
+                }
+                finally
+                {
+                    IsLoading = false;
+                }
+                return;
+            }
+
+            // 2. 传统 Windows SMB 共享导航通道
             var (serverName, shareName, parsedBase, isServerRoot) = PathHelper.ParseUncShare(uncPath);
             if (string.IsNullOrEmpty(baseShare) || isServerRoot)
             {
@@ -345,8 +446,27 @@ namespace FNSyncPlus.WinUI.ViewModels
         private void UpdateBreadcrumbs(string uncPath)
         {
             BreadcrumbItems.Clear();
-            var parts = uncPath.TrimEnd('\\').Split('\\', StringSplitOptions.RemoveEmptyEntries);
 
+            if (uncPath.StartsWith("我的文件") || !uncPath.StartsWith(@"\\"))
+            {
+                string clean = uncPath.Replace('\\', '/').Trim('/');
+                var segments = clean.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                if (segments.Length == 0)
+                {
+                    BreadcrumbItems.Add(new BreadcrumbItem { Label = "我的文件", Path = "我的文件" });
+                    return;
+                }
+
+                string acc = "";
+                for (int i = 0; i < segments.Length; i++)
+                {
+                    acc = i == 0 ? segments[0] : $"{acc}/{segments[i]}";
+                    BreadcrumbItems.Add(new BreadcrumbItem { Label = segments[i], Path = acc });
+                }
+                return;
+            }
+
+            var parts = uncPath.TrimEnd('\\').Split('\\', StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length == 0) return;
 
             string accumulated = $@"\\{parts[0]}";
@@ -410,10 +530,23 @@ namespace FNSyncPlus.WinUI.ViewModels
         public async Task NavigateUpAsync()
         {
             if (string.IsNullOrWhiteSpace(CurrentUncPath) || IsServerRoot) return;
-            string parent = PathHelper.GetParentUncPath(CurrentUncPath);
-            if (!string.IsNullOrEmpty(parent))
+
+            // 个人空间「我的文件」上级返回
+            if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider && 
+                (CurrentUncPath.StartsWith("我的文件") || !CurrentUncPath.StartsWith(@"\\")))
             {
+                if (CurrentUncPath == "我的文件") return;
+                string clean = CurrentUncPath.Replace('\\', '/').TrimEnd('/');
+                int lastSlash = clean.LastIndexOf('/');
+                string parent = lastSlash > 0 ? clean.Substring(0, lastSlash) : "我的文件";
                 await NavigateToFolderAsync(parent);
+                return;
+            }
+
+            string parentUnc = PathHelper.GetParentUncPath(CurrentUncPath);
+            if (!string.IsNullOrEmpty(parentUnc))
+            {
+                await NavigateToFolderAsync(parentUnc);
             }
         }
 
@@ -425,6 +558,37 @@ namespace FNSyncPlus.WinUI.ViewModels
                 return false;
             }
 
+            // 1. 飞牛官方「我的文件」原生新建目录通道
+            if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider && 
+                (CurrentUncPath.StartsWith("我的文件") || !CurrentUncPath.StartsWith(@"\\")))
+            {
+                try
+                {
+                    string sub = CurrentUncPath == "我的文件" ? folderName : $"{CurrentUncPath.Substring("我的文件".Length).Trim('/')}/{folderName}";
+                    var res = await fnProvider.CreateDirectoryAsync(sub);
+                    if (res.Success)
+                    {
+                        await NavigateToFolderAsync(CurrentUncPath);
+                        SelectedFolder = FolderItems.FirstOrDefault(f => string.Equals(f.Name, folderName, StringComparison.OrdinalIgnoreCase));
+                        LastErrorMessage = string.Empty;
+                        return true;
+                    }
+                    else
+                    {
+                        LastErrorMessage = $"在飞牛个人空间创建目录失败: {res.ErrorMessage}";
+                        SecurityDescription = LastErrorMessage;
+                        return false;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LastErrorMessage = $"创建目录异常: {ex.Message}";
+                    SecurityDescription = LastErrorMessage;
+                    return false;
+                }
+            }
+
+            // 2. 传统 SMB 新建目录通道
             if (string.IsNullOrWhiteSpace(CurrentUncPath) || IsServerRoot || string.IsNullOrEmpty(_baseShare))
             {
                 LastErrorMessage = "请先选择并进入具体的 NAS 共享目录后再新建文件夹。无法在服务器根路径创建。";
@@ -466,6 +630,14 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             string candidate = SelectedFolder != null ? SelectedFolder.FullUncPath : CurrentUncPath;
             if (string.IsNullOrWhiteSpace(candidate) || candidate.Contains("FN_PERSONAL_SPACE_GUIDANCE")) return false;
+
+            // 飞牛个人空间直接选定确认
+            if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider && 
+                (candidate.StartsWith("我的文件") || !candidate.StartsWith(@"\\")))
+            {
+                ConfirmedSelectedPath = candidate;
+                return true;
+            }
 
             var (server, share, baseShareUnc, isServerRoot) = PathHelper.ParseUncShare(candidate);
             if (isServerRoot || string.IsNullOrEmpty(share))

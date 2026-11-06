@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
+using FNSyncPlus.Core.Storage;
 using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.Core.Services
@@ -164,11 +165,106 @@ namespace FNSyncPlus.Core.Services
         }
 
         /// <summary>
+        /// 从 NAS 统一存储提供程序中发现包含清单元数据的备份任务包
+        /// </summary>
+        public async Task<List<DiscoveredBackupPackage>> DiscoverBackupPackagesAsync(
+            INasStorageProvider storageProvider, 
+            string nasBackupRootRel = "", 
+            CancellationToken cancellationToken = default)
+        {
+            var result = new List<DiscoveredBackupPackage>();
+            if (storageProvider == null || !storageProvider.IsAuthenticated) return result;
+
+            if (storageProvider is SmbStorageProvider && (nasBackupRootRel.StartsWith(@"\\") || nasBackupRootRel.Contains(@":\")))
+            {
+                return await DiscoverBackupPackagesAsync(nasBackupRootRel, cancellationToken).ConfigureAwait(false);
+            }
+
+            try
+            {
+                // 1. 检查根目录本身是否包含清单
+                var rootManifest = await _manifestManager.LoadManifestAsync(storageProvider, nasBackupRootRel, cancellationToken).ConfigureAwait(false);
+                if (rootManifest.Files.Count > 0)
+                {
+                    result.Add(new DiscoveredBackupPackage
+                    {
+                        PackageName = "个人空间根备份",
+                        NasFolderUnc = nasBackupRootRel,
+                        OriginalSourceRoot = rootManifest.SourceRoot,
+                        FileCount = rootManifest.Files.Count,
+                        TotalSizeBytes = rootManifest.Files.Sum(f => f.Size),
+                        LongNameCount = rootManifest.Files.Count(f => f.IsLongName),
+                        LastUpdated = rootManifest.UpdatedAt
+                    });
+                }
+
+                // 2. 枚举子目录
+                var entries = await storageProvider.ListEntriesAsync(nasBackupRootRel, cancellationToken).ConfigureAwait(false);
+                foreach (var entry in entries)
+                {
+                    if (entry.IsDirectory && !entry.Name.StartsWith(".") && !entry.Name.StartsWith("$"))
+                    {
+                        try
+                        {
+                            var subManifest = await _manifestManager.LoadManifestAsync(storageProvider, entry.RelativePath, cancellationToken).ConfigureAwait(false);
+                            if (subManifest.Files.Count > 0)
+                            {
+                                result.Add(new DiscoveredBackupPackage
+                                {
+                                    PackageName = entry.Name,
+                                    NasFolderUnc = entry.RelativePath,
+                                    OriginalSourceRoot = subManifest.SourceRoot,
+                                    FileCount = subManifest.Files.Count,
+                                    TotalSizeBytes = subManifest.Files.Sum(f => f.Size),
+                                    LongNameCount = subManifest.Files.Count(f => f.IsLongName),
+                                    LastUpdated = subManifest.UpdatedAt
+                                });
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+
+            return result;
+        }
+
+        /// <summary>
         /// 预览备份目录中的文件清单与原始长文件名映射（无需开始恢复）
         /// </summary>
         public async Task<List<RestorePreviewItem>> PreviewBackupAsync(string targetNasFolder, CancellationToken cancellationToken = default)
         {
             var manifest = await _manifestManager.LoadManifestAsync(targetNasFolder, cancellationToken).ConfigureAwait(false);
+            var list = new List<RestorePreviewItem>();
+
+            foreach (var f in manifest.Files)
+            {
+                list.Add(new RestorePreviewItem
+                {
+                    OriginalRelPath = f.OriginalRel,
+                    StoredRelPath = f.StoredRel,
+                    Size = f.Size,
+                    IsLongName = f.IsLongName,
+                    Sha256 = f.Sha256,
+                    ModTime = f.ModTimeIso
+                });
+            }
+
+            return list;
+        }
+
+        /// <summary>
+        /// 从 NAS 统一存储提供程序预览备份目录中的文件清单与原始长文件名映射
+        /// </summary>
+        public async Task<List<RestorePreviewItem>> PreviewBackupAsync(INasStorageProvider storageProvider, string targetNasFolderRel, CancellationToken cancellationToken = default)
+        {
+            if (storageProvider is SmbStorageProvider && (targetNasFolderRel.StartsWith(@"\\") || targetNasFolderRel.Contains(@":\")))
+            {
+                return await PreviewBackupAsync(targetNasFolderRel, cancellationToken).ConfigureAwait(false);
+            }
+
+            var manifest = await _manifestManager.LoadManifestAsync(storageProvider, targetNasFolderRel, cancellationToken).ConfigureAwait(false);
             var list = new List<RestorePreviewItem>();
 
             foreach (var f in manifest.Files)
@@ -454,6 +550,157 @@ namespace FNSyncPlus.Core.Services
             }
 
             report.StatusMessage = $"恢复操作完成！已成功恢复: {restoredCount}, 长文件名还原: {longNameRestoredCount}, 完整性校验通过: {integrityOkCount}, 空目录恢复: {restoredDirsCount}, 跳过已存在: {skippedCount}, 失败: {failedCount}";
+            Log("INFO", report.StatusMessage);
+            return report;
+        }
+
+        /// <summary>
+        /// 从 NAS 统一存储提供程序执行异机还原
+        /// </summary>
+        public async Task<RestoreProgressReport> RunRestoreAsync(
+            INasStorageProvider storageProvider,
+            string nasBackupFolderRel,
+            string localDestinationFolder,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
+            CancellationToken cancellationToken = default)
+        {
+            if (storageProvider == null) throw new ArgumentNullException(nameof(storageProvider));
+
+            if (storageProvider is SmbStorageProvider && (nasBackupFolderRel.StartsWith(@"\\") || nasBackupFolderRel.Contains(@":\")))
+            {
+                return await RunRestoreAsync(nasBackupFolderRel, localDestinationFolder, conflictResolution, cancellationToken).ConfigureAwait(false);
+            }
+
+            var report = new RestoreProgressReport();
+            var manifest = await _manifestManager.LoadManifestAsync(storageProvider, nasBackupFolderRel, cancellationToken).ConfigureAwait(false);
+
+            report.TotalFiles = manifest.Files.Count;
+            Log("INFO", $"开始从 NAS 恢复任务: 备份源【{nasBackupFolderRel}】 -> 本地【{localDestinationFolder}】，共 {report.TotalFiles} 个文件");
+
+            string longLocal = PathHelper.EnsureLongPathPrefix(localDestinationFolder);
+            if (!Directory.Exists(longLocal))
+            {
+                Directory.CreateDirectory(longLocal);
+            }
+
+            // 1. 恢复空目录
+            foreach (var dir in manifest.Directories)
+            {
+                string dirRel = PathHelper.NormalizeRelPath(dir.OriginalRel);
+                if (PathHelper.IsSafeRelativePath(dirRel))
+                {
+                    string targetDir = Path.Combine(longLocal, dirRel.Replace('/', '\\'));
+                    if (!Directory.Exists(targetDir))
+                    {
+                        Directory.CreateDirectory(targetDir);
+                        report.RestoredDirectories++;
+                    }
+                }
+            }
+
+            // 2. 恢复文件并流式校验 SHA-256
+            for (int i = 0; i < manifest.Files.Count; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var fileEntry = manifest.Files[i];
+                report.CurrentFile = fileEntry.OriginalRel;
+
+                string targetRel = PathHelper.NormalizeRelPath(fileEntry.OriginalRel);
+                if (!PathHelper.IsSafeRelativePath(targetRel))
+                {
+                    report.FailedFiles++;
+                    Log("ERROR", $"[安全拦截] 文件相对路径不安全: {targetRel}");
+                    continue;
+                }
+
+                string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
+                string targetDir = Path.GetDirectoryName(targetLocalFull)!;
+
+                if (File.Exists(targetLocalFull))
+                {
+                    if (conflictResolution == ConflictResolution.SkipExisting)
+                    {
+                        report.SkippedFiles++;
+                        ProgressChanged?.Invoke(report);
+                        continue;
+                    }
+                    else if (conflictResolution == ConflictResolution.RenameWithTimestamp)
+                    {
+                        string stem = Path.GetFileNameWithoutExtension(targetLocalFull);
+                        string ext = Path.GetExtension(targetLocalFull);
+                        targetLocalFull = Path.Combine(targetDir, $"{stem}_恢复_{DateTime.Now:yyyyMMdd_HHmmss}{ext}");
+                    }
+                }
+
+                if (!Directory.Exists(targetDir))
+                {
+                    Directory.CreateDirectory(targetDir);
+                }
+
+                string tempRestorePath = Path.Combine(targetDir, $".fnsync_rst_{Guid.NewGuid():N}.tmp");
+                try
+                {
+                    string remoteRel = string.IsNullOrEmpty(nasBackupFolderRel)
+                        ? fileEntry.StoredRel
+                        : $"{nasBackupFolderRel.TrimEnd('/', '\\')}/{fileEntry.StoredRel}";
+
+                    string computedHash = "";
+                    using (var src = await storageProvider.OpenReadAsync(remoteRel, cancellationToken).ConfigureAwait(false))
+                    using (var dest = new FileStream(tempRestorePath, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, FileOptions.WriteThrough | FileOptions.Asynchronous))
+                    using (var sha = SHA256.Create())
+                    {
+                        byte[] buf = new byte[128 * 1024];
+                        int r;
+                        while ((r = await src.ReadAsync(buf, 0, buf.Length, cancellationToken).ConfigureAwait(false)) > 0)
+                        {
+                            await dest.WriteAsync(buf.AsMemory(0, r), cancellationToken).ConfigureAwait(false);
+                            sha.TransformBlock(buf, 0, r, null, 0);
+                        }
+                        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                        computedHash = Convert.ToHexString(sha.Hash!).ToLowerInvariant();
+                        await dest.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    }
+
+                    // 强比对 SHA-256
+                    if (!string.IsNullOrEmpty(fileEntry.Sha256) && !string.Equals(fileEntry.Sha256, computedHash, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (File.Exists(tempRestorePath))
+                        {
+                            try { File.Delete(tempRestorePath); } catch { }
+                        }
+                        report.FailedFiles++;
+                        Log("ERROR", $"[SHA-256 校验失败] 恢复文件与原始数据哈希不一致！文件: {targetRel}");
+                        ProgressChanged?.Invoke(report);
+                        continue;
+                    }
+                    else
+                    {
+                        report.IntegrityVerifiedFiles++;
+                    }
+
+                    if (fileEntry.ModTimeUtcTicks > 0)
+                    {
+                        File.SetLastWriteTimeUtc(tempRestorePath, new DateTime(fileEntry.ModTimeUtcTicks, DateTimeKind.Utc));
+                    }
+
+                    File.Move(tempRestorePath, targetLocalFull, overwrite: true);
+                    report.RestoredFiles++;
+                    if (fileEntry.IsLongName) report.LongNameRestoredFiles++;
+                }
+                catch (Exception ex)
+                {
+                    if (File.Exists(tempRestorePath))
+                    {
+                        try { File.Delete(tempRestorePath); } catch { }
+                    }
+                    report.FailedFiles++;
+                    Log("ERROR", $"[恢复失败] {targetRel} : {ex.Message}");
+                }
+
+                ProgressChanged?.Invoke(report);
+            }
+
+            report.StatusMessage = $"恢复操作完成！已成功恢复: {report.RestoredFiles}, 校验通过: {report.IntegrityVerifiedFiles}, 失败: {report.FailedFiles}";
             Log("INFO", report.StatusMessage);
             return report;
         }

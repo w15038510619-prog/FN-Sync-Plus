@@ -46,6 +46,17 @@ namespace FNSyncPlus.Core.Storage.FnOs
         public int? CurrentUid { get; private set; }
         public int? CurrentVolumeId { get; private set; }
 
+        public void SetAuthenticatedForTesting(string user, int uid, int volId)
+        {
+            IsAuthenticated = true;
+            AuthenticatedUser = user;
+            CurrentUid = uid;
+            CurrentVolumeId = volId;
+        }
+
+        public static Func<string, string, bool>? TrustedThumbprintValidator { get; set; }
+        public string? LastSeenCertSha256 { get; private set; }
+
         public FnOsApiClient(string? pinnedCertSha256 = null)
         {
             _pinnedCertSha256 = pinnedCertSha256;
@@ -70,25 +81,26 @@ namespace FNSyncPlus.Core.Storage.FnOs
 
             if (certificate == null) return false;
 
-            // 检查自签名或设备专属证书的 SHA-256 指纹强校验 (Certificate Pinning)
+            // 提取服务端的真实 SHA-256 证书指纹
+            string thumbprint = certificate.GetCertHashString(System.Security.Cryptography.HashAlgorithmName.SHA256).ToLowerInvariant();
+            LastSeenCertSha256 = thumbprint;
+
+            // 1. 检查自签名或设备专属证书的 SHA-256 指纹强校验 (Certificate Pinning)
             if (!string.IsNullOrEmpty(_pinnedCertSha256))
             {
-                string thumbprint = certificate.GetCertHashString(System.Security.Cryptography.HashAlgorithmName.SHA256).ToLowerInvariant();
                 return string.Equals(thumbprint, _pinnedCertSha256.Replace(":", "").ToLowerInvariant(), StringComparison.OrdinalIgnoreCase);
             }
 
-            // 若 NAS 使用内置自签名证书 (Subject 为 CN=fnOS)
-            if (certificate.Subject.Contains("fnOS", StringComparison.OrdinalIgnoreCase) &&
-                certificate.Issuer.Contains("fnOS", StringComparison.OrdinalIgnoreCase))
+            // 2. 检查由用户授权并记录在安全配置中的证书指纹白名单
+            if (!string.IsNullOrEmpty(_host) && TrustedThumbprintValidator != null)
             {
-                // 放行局域网 IP 直连导致的名称不匹配和自签名证书链未知错误，确保未被其他伪造证书劫持
-                var allowedErrors = SslPolicyErrors.RemoteCertificateChainErrors | SslPolicyErrors.RemoteCertificateNameMismatch;
-                if ((sslPolicyErrors & ~allowedErrors) == SslPolicyErrors.None)
+                if (TrustedThumbprintValidator(_host, thumbprint))
                 {
                     return true;
                 }
             }
 
+            // 严格安全策略：拒绝仅凭 Subject 包含 fnOS 字样就放行的逻辑，严防中间人攻击
             return false;
         }
 
@@ -309,6 +321,82 @@ namespace FNSyncPlus.Core.Storage.FnOs
             return loginResp ?? new FnOsLoginResponse { Result = "failed", ErrMsg = "Empty response" };
         }
 
+        /// <summary>
+        /// 提交 TOTP 两步验证码完成二次鉴权
+        /// </summary>
+        public async Task<FnOsLoginResponse> LoginWithTwoFactorAsync(string accessToken, string code, string username, CancellationToken ct = default)
+        {
+            if (string.IsNullOrEmpty(_sessionId) || _aesKey == null || _iv == null || string.IsNullOrEmpty(_rsaPublicKeyPem))
+            {
+                throw new InvalidOperationException("缺少基础会话加密上下文，无法进行两步验证。");
+            }
+
+            string reqId = FnOsCryptoHelper.GenerateReqId();
+            var payload = new Dictionary<string, object?>
+            {
+                ["reqid"] = reqId,
+                ["req"] = "user.twofaLogin",
+                ["accessToken"] = accessToken,
+                ["code"] = code,
+                ["si"] = _sessionId,
+                ["did"] = FnOsCryptoHelper.GenerateDeviceId(),
+                ["stay"] = true
+            };
+
+            string payloadJson = JsonSerializer.Serialize(payload);
+            byte[] encryptedData = FnOsCryptoHelper.EncryptAesCbc(Encoding.UTF8.GetBytes(payloadJson), _aesKey, _iv);
+            byte[] encryptedAesKey = FnOsCryptoHelper.EncryptAesKeyWithRsa(_rsaPublicKeyPem, _aesKey);
+
+            var envelope = new FnOsEncryptedAuthEnvelope
+            {
+                Req = "encrypted",
+                IvBase64 = Convert.ToBase64String(_iv),
+                RsaEncryptedKeyBase64 = Convert.ToBase64String(encryptedAesKey),
+                AesEncryptedPayloadBase64 = Convert.ToBase64String(encryptedData)
+            };
+
+            string envelopeJson = JsonSerializer.Serialize(envelope);
+            var tcs = new TaskCompletionSource<string>();
+            lock (_pendingRequests)
+            {
+                _pendingRequests[reqId] = tcs;
+            }
+
+            await SendRawTextAsync(envelopeJson, ct).ConfigureAwait(false);
+
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+            using var reg = linked.Token.Register(() => tcs.TrySetCanceled());
+
+            string responseJson = await tcs.Task.ConfigureAwait(false);
+            var loginResp = JsonSerializer.Deserialize<FnOsLoginResponse>(responseJson);
+
+            if (loginResp?.Result == "succ" && !string.IsNullOrEmpty(loginResp.EncryptedSecretBase64))
+            {
+                byte[] rawSecretCipher = Convert.FromBase64String(loginResp.EncryptedSecretBase64);
+                _hmacKeyBytes = FnOsCryptoHelper.DecryptAesCbc(rawSecretCipher, _aesKey, _iv);
+
+                AuthToken = loginResp.Token;
+                LongToken = loginResp.LongToken;
+                AuthenticatedUser = username;
+                IsAuthenticated = true;
+
+                try
+                {
+                    string infoJson = await SendSignedRpcAsync("user.info", new Dictionary<string, object?>(), ct).ConfigureAwait(false);
+                    using var doc = JsonDocument.Parse(infoJson);
+                    if (doc.RootElement.TryGetProperty("userInfo", out var uInfo) &&
+                        uInfo.TryGetProperty("uid", out var uidProp))
+                    {
+                        CurrentUid = uidProp.GetInt32();
+                    }
+                }
+                catch { }
+            }
+
+            return loginResp ?? new FnOsLoginResponse { Result = "failed", ErrMsg = "Empty response" };
+        }
+
         private async Task SendRawTextAsync(string text, CancellationToken ct)
         {
             if (_webSocket == null || _webSocket.State != WebSocketState.Open)
@@ -367,8 +455,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 payload["path"] = subPath;
             }
 
-            string responseJson = await SendSignedRpcAsync("file.ls", payload, ct);
-            Console.WriteLine($"[DEBUG] ListFiles raw response: {responseJson}");
+            string responseJson = await SendSignedRpcAsync("file.ls", payload, ct).ConfigureAwait(false);
             var result = JsonSerializer.Deserialize<FnOsFileListResponse>(responseJson);
 
             // 若在根目录下，自动捕获当前系统 VolumeId 与 UID
@@ -397,7 +484,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 ["path"] = path
             };
 
-            string responseJson = await SendSignedRpcAsync("file.mkdir", payload, ct);
+            string responseJson = await SendSignedRpcAsync("file.mkdir", payload, ct).ConfigureAwait(false);
             return JsonSerializer.Deserialize<FnOsGenericRpcResponse>(responseJson) 
                    ?? new FnOsGenericRpcResponse { Result = "failed" };
         }
@@ -415,8 +502,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 ["mtim"] = mtimSeconds
             };
 
-            string responseJson = await SendSignedRpcAsync("file.checkUpload", payload, ct);
-            Console.WriteLine($"[DEBUG] checkUpload raw response: {responseJson}");
+            string responseJson = await SendSignedRpcAsync("file.checkUpload", payload, ct).ConfigureAwait(false);
 
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             using var doc = JsonDocument.Parse(responseJson);
@@ -427,7 +513,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
             };
             if (doc.RootElement.TryGetProperty("uploadName", out var uProp))
             {
-                resp.ErrMsg = uProp.GetString(); // 临时借用 ErrMsg 存放 uploadName 供调用方使用
+                resp.ErrMsg = uProp.GetString(); // uploadName
             }
 
             return resp;
@@ -441,6 +527,22 @@ namespace FNSyncPlus.Core.Storage.FnOs
             byte[] fileBytes, 
             DateTime lastWriteTimeUtc, 
             bool overwrite = true, 
+            CancellationToken ct = default)
+        {
+            using var ms = new MemoryStream(fileBytes);
+            return await UploadStreamAsync(remotePath, ms, fileBytes.Length, lastWriteTimeUtc, overwrite, null, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// 真正的流式上传文件 (分块直接写入 HTTP 请求体，绝不将整个文件读取至内存，支持 100MB+ 大文件与进度报告)
+        /// </summary>
+        public async Task<bool> UploadStreamAsync(
+            string remotePath,
+            Stream sourceStream,
+            long fileSize,
+            DateTime lastWriteTimeUtc,
+            bool overwrite = true,
+            IProgress<long>? progress = null,
             CancellationToken ct = default)
         {
             if (!IsAuthenticated || _hmacKeyBytes == null || string.IsNullOrEmpty(AuthToken))
@@ -459,7 +561,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
 
             try
             {
-                var checkRes = await CheckUploadAsync(canonicalPath, fileBytes.Length, mtim, ct);
+                var checkRes = await CheckUploadAsync(canonicalPath, fileSize, mtim, ct).ConfigureAwait(false);
                 if (checkRes.FromOffset.HasValue) fromOffset = checkRes.FromOffset.Value;
                 if (!string.IsNullOrEmpty(checkRes.ErrMsg)) // checkRes.ErrMsg 存放了 uploadName
                 {
@@ -467,12 +569,10 @@ namespace FNSyncPlus.Core.Storage.FnOs
                     uploadPath = string.IsNullOrEmpty(parentDir) ? checkRes.ErrMsg : $"{parentDir}/{checkRes.ErrMsg}";
                 }
             }
-            catch (Exception ex)
+            catch
             {
-                Console.WriteLine($"[DEBUG] checkUpload exception: {ex.Message}");
+                // checkUpload 失败降级使用规范化路径
             }
-
-            Console.WriteLine($"[DEBUG] Actual Upload Target Path: {uploadPath}, From: {fromOffset}");
 
             // 3. 计算 Trim-Sign: HMAC-SHA256(SecretKey, Trim-Path)
             string trimSign = FnOsCryptoHelper.ComputeTrimUploadSign(_hmacKeyBytes, uploadPath);
@@ -490,15 +590,19 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 }
             }
 
-            byte[] dataToSend = fileBytes;
-            if (fromOffset > 0 && fromOffset < fileBytes.Length)
+            if (fromOffset > 0 && sourceStream.CanSeek)
             {
-                dataToSend = fileBytes[(int)fromOffset..];
+                sourceStream.Seek(fromOffset, SeekOrigin.Begin);
             }
 
-            var fileContent = new ByteArrayContent(dataToSend);
-            fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-            content.Add(fileContent, "trim-upload-file", "upload");
+            // 5. 真正的分块流式包装：使用 ProgressReportingStream 逐块通知进度，不占用额外大内存
+            Stream payloadStream = progress != null
+                ? new ProgressReportingStream(sourceStream, progress, fromOffset)
+                : sourceStream;
+
+            var streamContent = new StreamContent(payloadStream, bufferSize: 64 * 1024);
+            streamContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            content.Add(streamContent, "trim-upload-file", "upload");
 
             using var request = new HttpRequestMessage(HttpMethod.Post, uploadUrl)
             {
@@ -512,16 +616,49 @@ namespace FNSyncPlus.Core.Storage.FnOs
             request.Headers.Add("Trim-Token", AuthToken);
             request.Headers.Add("Trim-Sign", trimSign);
 
-            using var resp = await _httpClient.SendAsync(request, ct);
-            string respBody = await resp.Content.ReadAsStringAsync(ct);
-            Console.WriteLine($"[DEBUG] POST /upload StatusCode: {(int)resp.StatusCode} {resp.StatusCode}, Body: {respBody}");
-            return resp.IsSuccessStatusCode;
+            using var resp = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (!resp.IsSuccessStatusCode)
+            {
+                return false;
+            }
+
+            // 校验业务响应内容
+            string respBody = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(respBody))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(respBody);
+                    if (doc.RootElement.TryGetProperty("result", out var resProp) && resProp.GetString() == "fail")
+                    {
+                        return false;
+                    }
+                    if (doc.RootElement.TryGetProperty("errno", out var errNoProp) && errNoProp.GetInt32() != 0)
+                    {
+                        return false;
+                    }
+                }
+                catch { }
+            }
+
+            return true;
         }
 
         /// <summary>
         /// 下载文件获取原生二进制流 (调用 POST /multiple-download 获取 Token，紧随 GET 流式读取)
         /// </summary>
         public async Task<byte[]> DownloadFileAsync(string remotePath, CancellationToken ct = default)
+        {
+            using var stream = await DownloadStreamAsync(remotePath, ct).ConfigureAwait(false);
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms, ct).ConfigureAwait(false);
+            return ms.ToArray();
+        }
+
+        /// <summary>
+        /// 真正的流式下载远端文件 (返回未加载至内存的原生 Stream，支持逐块消费 100MB+ 大文件)
+        /// </summary>
+        public async Task<Stream> DownloadStreamAsync(string remotePath, CancellationToken ct = default)
         {
             if (!IsAuthenticated || string.IsNullOrEmpty(AuthToken))
                 throw new InvalidOperationException("未登录鉴权，无法下载文件。");
@@ -541,68 +678,30 @@ namespace FNSyncPlus.Core.Storage.FnOs
             };
 
             string jsonReq = JsonSerializer.Serialize(dlReq);
-            Console.WriteLine($"[DEBUG] POST /multiple-download request: {jsonReq}");
             using var postReq = new HttpRequestMessage(HttpMethod.Post, baseUrl)
             {
                 Content = new StringContent(jsonReq, Encoding.UTF8, "application/json")
             };
 
-            using var postResp = await _httpClient.SendAsync(postReq, ct);
-            string postRespJson = await postResp.Content.ReadAsStringAsync(ct);
-            Console.WriteLine($"[DEBUG] POST /multiple-download StatusCode: {(int)postResp.StatusCode} {postResp.StatusCode}, Body: {postRespJson}");
+            using var postResp = await _httpClient.SendAsync(postReq, ct).ConfigureAwait(false);
             postResp.EnsureSuccessStatusCode();
+            string postRespJson = await postResp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             var dlTokenObj = JsonSerializer.Deserialize<FnOsMultipleDownloadResponse>(postRespJson);
 
             if (string.IsNullOrEmpty(dlTokenObj?.Token))
             {
-                throw new InvalidOperationException($"获取下载令牌失败: {postRespJson}");
+                throw new InvalidOperationException("获取下载令牌失败");
             }
 
             // 2. GET 下载原生二进制数据流 (附带认证 Cookie 与 Token)
             string streamUrl = $"{baseUrl}?token={dlTokenObj.Token}";
-            using var getReq = new HttpRequestMessage(HttpMethod.Get, streamUrl);
+            var getReq = new HttpRequestMessage(HttpMethod.Get, streamUrl);
             getReq.Headers.Add("Cookie", $"fnos-token={AuthToken}");
 
-            using var streamResp = await _httpClient.SendAsync(getReq, HttpCompletionOption.ResponseContentRead, ct);
-            if (!streamResp.IsSuccessStatusCode)
-            {
-                string errBody = await streamResp.Content.ReadAsStringAsync(ct);
-                Console.WriteLine($"[DEBUG] GET /multiple-download StatusCode: {(int)streamResp.StatusCode} {streamResp.StatusCode}, Body: {errBody}");
-            }
+            var streamResp = await _httpClient.SendAsync(getReq, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
             streamResp.EnsureSuccessStatusCode();
 
-            return await streamResp.Content.ReadAsByteArrayAsync(ct);
-        }
-
-        /// <summary>
-        /// 流式上传文件
-        /// </summary>
-        public async Task<bool> UploadStreamAsync(
-            string remotePath,
-            Stream sourceStream,
-            DateTime lastWriteTimeUtc,
-            bool overwrite = true,
-            IProgress<long>? progress = null,
-            CancellationToken ct = default)
-        {
-            using var ms = new MemoryStream();
-            await sourceStream.CopyToAsync(ms, ct);
-            byte[] fileBytes = ms.ToArray();
-            bool result = await UploadFileAsync(remotePath, fileBytes, lastWriteTimeUtc, overwrite, ct);
-            if (result)
-            {
-                progress?.Report(fileBytes.Length);
-            }
-            return result;
-        }
-
-        /// <summary>
-        /// 流式下载文件获取 Stream
-        /// </summary>
-        public async Task<Stream> DownloadStreamAsync(string remotePath, CancellationToken ct = default)
-        {
-            byte[] bytes = await DownloadFileAsync(remotePath, ct);
-            return new MemoryStream(bytes);
+            return await streamResp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -616,7 +715,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 ["path"] = canonicalPath,
                 ["trash"] = moveToTrash
             };
-            string responseJson = await SendSignedRpcAsync("file.rm", payload, ct);
+            string responseJson = await SendSignedRpcAsync("file.rm", payload, ct).ConfigureAwait(false);
             return JsonSerializer.Deserialize<FnOsGenericRpcResponse>(responseJson)
                    ?? new FnOsGenericRpcResponse { Result = "failed" };
         }

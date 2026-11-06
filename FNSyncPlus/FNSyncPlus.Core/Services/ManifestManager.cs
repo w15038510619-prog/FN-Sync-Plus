@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
+using FNSyncPlus.Core.Storage;
 using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.Core.Services
@@ -192,6 +193,117 @@ namespace FNSyncPlus.Core.Services
             try
             {
                 await SaveManifestAtomicInternalAsync(targetRootDirectory, manifest, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                _memoryLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// 从 NAS 统一存储提供程序读取清单 (.fnsync/manifest.json)
+        /// </summary>
+        public async Task<Manifest> LoadManifestAsync(INasStorageProvider storageProvider, string targetFolder, CancellationToken cancellationToken = default)
+        {
+            if (storageProvider == null) throw new ArgumentNullException(nameof(storageProvider));
+
+            // 若为本地/UNC SMB 共享且不以相对路径模式运行，优先复用原生文件系统逻辑
+            if (storageProvider is SmbStorageProvider && (targetFolder.StartsWith(@"\\") || targetFolder.Contains(@":\")))
+            {
+                return await LoadManifestAsync(targetFolder, cancellationToken).ConfigureAwait(false);
+            }
+
+            await _memoryLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                string cleanFolder = targetFolder.Trim().TrimEnd('/', '\\').Replace('\\', '/');
+                string manifestRelPath = string.IsNullOrEmpty(cleanFolder) ? ".fnsync/manifest.json" : $"{cleanFolder}/.fnsync/manifest.json";
+
+                if (await storageProvider.ExistsAsync(manifestRelPath, cancellationToken).ConfigureAwait(false))
+                {
+                    try
+                    {
+                        using var stream = await storageProvider.OpenReadAsync(manifestRelPath, cancellationToken).ConfigureAwait(false);
+                        var manifest = await JsonSerializer.DeserializeAsync<Manifest>(stream, JsonOptions, cancellationToken).ConfigureAwait(false);
+                        if (manifest != null && manifest.Files != null)
+                        {
+                            return manifest;
+                        }
+                    }
+                    catch
+                    {
+                        // 若主清单读取异常，尝试读取 .bak 备份清单
+                        string bakRelPath = manifestRelPath + ".bak";
+                        if (await storageProvider.ExistsAsync(bakRelPath, cancellationToken).ConfigureAwait(false))
+                        {
+                            try
+                            {
+                                using var bakStream = await storageProvider.OpenReadAsync(bakRelPath, cancellationToken).ConfigureAwait(false);
+                                var bakManifest = await JsonSerializer.DeserializeAsync<Manifest>(bakStream, JsonOptions, cancellationToken).ConfigureAwait(false);
+                                if (bakManifest != null) return bakManifest;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+
+                // 远端尚未建立清单，初始化并返回全新清单
+                return new Manifest
+                {
+                    Version = Manifest.CurrentVersion,
+                    TargetRoot = targetFolder,
+                    UpdatedAt = DateTimeOffset.UtcNow
+                };
+            }
+            finally
+            {
+                _memoryLock.Release();
+            }
+        }
+
+        /// <summary>
+        /// 将清单通过存储提供程序持久化至远端 .fnsync/manifest.json (流式上传并保留 .bak 副本)
+        /// </summary>
+        public async Task SaveManifestAtomicAsync(INasStorageProvider storageProvider, string targetFolder, Manifest manifest, CancellationToken cancellationToken = default)
+        {
+            if (storageProvider == null) throw new ArgumentNullException(nameof(storageProvider));
+            if (manifest == null) throw new ArgumentNullException(nameof(manifest));
+
+            if (storageProvider is SmbStorageProvider && (targetFolder.StartsWith(@"\\") || targetFolder.Contains(@":\")))
+            {
+                await SaveManifestAtomicAsync(targetFolder, manifest, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            await _memoryLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                manifest.UpdatedAt = DateTimeOffset.UtcNow;
+                string cleanFolder = targetFolder.Trim().TrimEnd('/', '\\').Replace('\\', '/');
+                string metaDir = string.IsNullOrEmpty(cleanFolder) ? ".fnsync" : $"{cleanFolder}/.fnsync";
+                await storageProvider.CreateDirectoryAsync(metaDir, cancellationToken).ConfigureAwait(false);
+
+                byte[] manifestBytes = JsonSerializer.SerializeToUtf8Bytes(manifest, JsonOptions);
+
+                // 1. 上传主清单
+                string manifestPath = $"{metaDir}/manifest.json";
+                using (var ms = new MemoryStream(manifestBytes))
+                {
+                    var res = await storageProvider.UploadFileAsync(manifestPath, ms, manifestBytes.Length, DateTime.UtcNow, overwrite: true, null, cancellationToken).ConfigureAwait(false);
+                    if (!res.Success)
+                    {
+                        throw new IOException($"远端清单元数据持久化失败: {res.ErrorMessage}");
+                    }
+                }
+
+                // 2. 异步保留一份 .bak 副本以防灾难性损坏
+                try
+                {
+                    string bakPath = $"{metaDir}/manifest.json.bak";
+                    using var bakMs = new MemoryStream(manifestBytes);
+                    await storageProvider.UploadFileAsync(bakPath, bakMs, manifestBytes.Length, DateTime.UtcNow, overwrite: true, null, cancellationToken).ConfigureAwait(false);
+                }
+                catch { }
             }
             finally
             {

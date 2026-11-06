@@ -73,8 +73,9 @@
                 <StackPanel Grid.Column="0" Spacing="4">
                     <TextBlock Text="测试运行模式" FontSize="11" FontWeight="Medium" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     <ComboBox SelectedIndex="{x:Bind ViewModel.SelectedModeIndex, Mode=TwoWay}" HorizontalAlignment="Stretch">
-                        <ComboBoxItem Content="1. 本地模拟环境测试 (推荐，安全零风险)" />
-                        <ComboBoxItem Content="2. 真实飞牛 NAS SMB 网络端到端测试" />
+                        <ComboBoxItem Content="1. 本地模拟环境测试 (安全零风险)" />
+                        <ComboBoxItem Content="2. 真实飞牛 NAS 个人空间端到端测试 (推荐)" />
+                        <ComboBoxItem Content="3. 真实飞牛 NAS SMB 网络共享测试" />
                     </ComboBox>
                 </StackPanel>
 

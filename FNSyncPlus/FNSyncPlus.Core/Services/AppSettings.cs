@@ -18,6 +18,9 @@ namespace FNSyncPlus.Core.Services
         public int MaxConcurrentSyncs { get; set; } = 2;       // 全局并发任务数
         public string AppTheme { get; set; } = "Light";         // 主题：Light / Dark
 
+        // 已信任的设备证书 SHA-256 指纹列表 (Host -> SHA256 Thumbprint)
+        public Dictionary<string, string> TrustedCertThumbprints { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
         // 多任务集合
         public List<SyncTask> Tasks { get; set; } = new();
 

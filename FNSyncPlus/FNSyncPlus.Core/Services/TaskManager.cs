@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
+using FNSyncPlus.Core.Storage;
 using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.Core.Services
@@ -41,6 +42,11 @@ namespace FNSyncPlus.Core.Services
         public event Action<SyncTask, string, string>? TaskLogEmitted; // (task, level, msg)
         public event Action<SyncTask>? TaskStateChanged;
         public event Action? TaskListChanged;
+
+        /// <summary>
+        /// 统一 NAS 存储提供程序委托（由 NasConnectionService 或工厂提供）
+        /// </summary>
+        public Func<INasStorageProvider?>? StorageProviderSupplier { get; set; }
 
         public IReadOnlyList<SyncTask> Tasks => _settings.Tasks;
 
@@ -300,7 +306,8 @@ namespace FNSyncPlus.Core.Services
                 task.LastError = null;
                 TaskStateChanged?.Invoke(task);
 
-                var report = await syncEngine.RunSyncAsync(task.SourceFolder, task.DestinationFolder, taskCts.Token).ConfigureAwait(false);
+                var provider = StorageProviderSupplier?.Invoke();
+                var report = await syncEngine.RunSyncAsync(task.SourceFolder, task.DestinationFolder, provider, taskCts.Token).ConfigureAwait(false);
 
                 task.LastSyncTime = DateTime.Now;
                 task.LastScannedFiles = report.TotalFiles;

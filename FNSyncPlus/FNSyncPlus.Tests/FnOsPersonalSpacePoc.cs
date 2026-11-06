@@ -60,8 +60,8 @@ namespace FNSyncPlus.Tests
                 Console.WriteLine($"[1/10 凭据加载] 已从受控环境变量加载账号: {username}，目标: {server}");
             }
 
-            // 2. 连接并登录 fnOS (尝试官方标准端口 5667 HTTPS/WSS 与 5666/80 HTTP/WS)
-            await using var client = new FnOsApiClient();
+            // 2. 连接并登录 fnOS (使用强证书指纹 Pinning 校验，杜绝中间人攻击)
+            await using var client = new FnOsApiClient("FF3B816D9A6F1967A37970D4F30A2A542C8B5C6A8D6D4FB4B8FFD21B3245FDEF");
             int[] portsToTry = new[] { 5667, 5666, 80, 443 };
             bool connected = false;
             int connectedPort = 5667;
@@ -122,18 +122,15 @@ namespace FNSyncPlus.Tests
             Console.ResetColor();
 
             // 查询当前登录用户的完整信息 (user.info)
-            string userInfoRaw = await client.SendSignedRpcAsync("user.info", new Dictionary<string, object?>());
-            Console.WriteLine($"[DEBUG] user.info raw response: {userInfoRaw}");
+            await client.SendSignedRpcAsync("user.info", new Dictionary<string, object?>());
 
             // 查询配额与存储信息 (user.quota)
             try
             {
-                string quotaRaw = await client.SendSignedRpcAsync("user.quota", new Dictionary<string, object?>());
-                Console.WriteLine($"[DEBUG] user.quota raw response: {quotaRaw}");
+                await client.SendSignedRpcAsync("user.quota", new Dictionary<string, object?>());
             }
-            catch (Exception ex)
+            catch
             {
-                Console.WriteLine($"[DEBUG] user.quota failed: {ex.Message}");
             }
 
             // 4. 列出「我的文件」根目录并捕获真实卷与 UID
