@@ -20,7 +20,9 @@ namespace FNSyncPlus.WinUI
             ViewModel = AppServices.GetService<MainViewModel>();
             InitializeComponent();
 
-            WindowHelper.ConfigureWindow(this, "飞牛同步增强版 v0.4.0-beta", 1200, 780);
+            WindowHelper.ConfigureWindow(this, AppServices.IsIsolatedTestSession
+                ? "飞牛同步增强版 v0.4.0-beta [隔离测试会话]"
+                : "飞牛同步增强版 v0.4.0-beta", 1200, 780);
             WindowHelper.SetMicaBackdrop(this);
             SetTitleBar(AppTitleBarDragArea);
 
