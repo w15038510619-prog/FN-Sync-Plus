@@ -369,7 +369,8 @@ namespace FNSyncPlus.Core.Services
                 return;
             }
 
-            var provider = StorageProviderSupplier?.Invoke();
+            // The active fnOS connection must never redirect a local/SMB task into personal storage.
+            var provider = task.ProviderType == StorageProviderType.FnOsPersonal ? StorageProviderSupplier?.Invoke() : null;
             if (task.ProviderType == StorageProviderType.FnOsPersonal &&
                 (!_isNasOnline || provider == null || provider.ProviderType != StorageProviderType.FnOsPersonal || !provider.IsAuthenticated))
             {

@@ -326,6 +326,26 @@ namespace FNSyncPlus.Tests
                 }
                 finally { Environment.CurrentDirectory = previousDirectory; }
                 await Task.Delay(200);
+                string localTarget = Path.Combine(root, "local-target");
+                var localSettings = AppSettings.CreateInMemory();
+                var localTask = new SyncTask
+                {
+                    TaskName = "隔离本地目标测试", SourceFolder = lockedSource,
+                    DestinationFolder = localTarget, ProviderType = StorageProviderType.LocalFileSystem,
+                    ScheduleMode = TaskSyncScheduleMode.ManualOnly
+                };
+                localSettings.Tasks.Add(localTask);
+                using (var manager = new TaskManager(localSettings, new SmbAuthService(), new LogService(Path.Combine(root, "local-logs"))))
+                {
+                    manager.StorageProviderSupplier = () => renameProvider;
+                    var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    manager.TaskStateChanged += t => { if (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error) done.TrySetResult(); };
+                    manager.TriggerSync(localTask.TaskId);
+                    bool signaled = await Task.WhenAny(done.Task, Task.Delay(10000)) == done.Task;
+                    Assert(signaled && localTask.State == TaskSyncState.Completed && File.Exists(Path.Combine(localTarget, "sample.txt")),
+                        "飞牛已连接时本地任务仍写入本地目标");
+                }
+                await Task.Delay(200);
             }
             finally
             {
