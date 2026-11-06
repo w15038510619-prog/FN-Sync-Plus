@@ -361,6 +361,48 @@ namespace FNSyncPlus.Tests
                 bool newRestored = await historyEngine.RunRestoreHistoryFileAsync(versionProvider, "content-target", restoredNew, currentForRestore);
                 Assert(oldRestored && newRestored && File.ReadAllText(Path.Combine(restoredOld, longOriginal)) == "旧内容" &&
                     File.ReadAllText(Path.Combine(restoredNew, longOriginal)) == "新内容", "原型清单和内容对象恢复 300 字节名称的旧版及新版");
+                async Task<bool> TestAmbiguousRenameAsync(string suffix, bool duplicateOld, string content = "same content")
+                {
+                    string source = Path.Combine(root, $"ambiguous-source-{suffix}");
+                    string target = $"ambiguous-target-{suffix}";
+                    Directory.CreateDirectory(source);
+                    File.WriteAllText(Path.Combine(source, "old-a.txt"), content);
+                    if (duplicateOld) File.WriteAllText(Path.Combine(source, "old-b.txt"), content);
+                    var provider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+                    var initial = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
+                    await initial.RunSyncAsync(source, target, provider, BackupStrategy.Smart, null, CancellationToken.None);
+                    File.Move(Path.Combine(source, "old-a.txt"), Path.Combine(source, "new-a.txt"));
+                    if (duplicateOld) File.Delete(Path.Combine(source, "old-b.txt"));
+                    else File.WriteAllText(Path.Combine(source, "new-b.txt"), content);
+                    bool warned = false;
+                    var changed = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
+                    changed.LogEmitted += (_, message) => { if (message.Contains("待处理差异", StringComparison.Ordinal)) warned = true; };
+                    bool stopped = false;
+                    try { await changed.RunSyncAsync(source, target, provider, BackupStrategy.Smart, null, CancellationToken.None); }
+                    catch (InvalidDataException) { stopped = true; }
+                    var manifest = await manifestManager.LoadManifestAsync(provider, target);
+                    return stopped && warned &&
+                        manifest.Files.Any(f => f.OriginalRel == "old-a.txt") &&
+                        (!duplicateOld || manifest.Files.Any(f => f.OriginalRel == "old-b.txt")) &&
+                        !manifest.History.Any(h => h.OriginalRel == "old-a.txt" || h.OriginalRel == "old-b.txt") &&
+                        !manifest.Files.Any(f => f.OriginalRel.StartsWith("new-", StringComparison.Ordinal)) &&
+                        !File.Exists(Path.Combine(root, target, "new-a.txt"));
+                }
+                Assert(await TestAmbiguousRenameAsync("old-duplicates", true), "多个同内容旧文件无法唯一匹配时保留旧记录");
+                Assert(await TestAmbiguousRenameAsync("new-duplicates", false), "多个同内容新文件无法唯一匹配时保留旧记录");
+                Assert(await TestAmbiguousRenameAsync("empty-duplicates", true, ""), "多个零字节旧文件无法唯一匹配时停止备份");
+                string uniqueSource = Path.Combine(root, "unique-rename-source");
+                Directory.CreateDirectory(uniqueSource);
+                File.WriteAllText(Path.Combine(uniqueSource, "old.txt"), "unique rename");
+                var uniqueProvider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+                await new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService())
+                    .RunSyncAsync(uniqueSource, "unique-rename-target", uniqueProvider, BackupStrategy.Smart, null, CancellationToken.None);
+                File.Move(Path.Combine(uniqueSource, "old.txt"), Path.Combine(uniqueSource, "new.txt"));
+                var uniqueResult = await new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService())
+                    .RunSyncAsync(uniqueSource, "unique-rename-target", uniqueProvider, BackupStrategy.Smart, null, CancellationToken.None);
+                var uniqueManifest = await manifestManager.LoadManifestAsync(uniqueProvider, "unique-rename-target");
+                Assert(uniqueResult.State == SyncState.Completed && uniqueManifest.Files.Single().PreviousRel == "old.txt" &&
+                    uniqueManifest.History.Any(h => h.OriginalRel == "old.txt" && h.Reason == "renamed"), "唯一的离线重命名仍能识别");
                 string renameSource = Path.Combine(root, "rename-source");
                 string renameTarget = Path.Combine(root, "rename-target");
                 Directory.CreateDirectory(renameSource);

@@ -254,38 +254,43 @@ namespace FNSyncPlus.Core.Services
                 }
             }
 
-            // 2. 基于文件大小与 SHA-256 内容哈希进行精准重命名比对
-            foreach (var missing in missingManifestEntries)
+            // 2. 离线匹配必须在旧项和新项两侧均唯一；重复内容不能推断身份。
+            var ambiguousOldRels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var candidateHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var remainingGroups = missingManifestEntries
+                .Where(m => !detectedRenames.ContainsKey(m.OriginalRel) && !string.IsNullOrWhiteSpace(m.Sha256))
+                .GroupBy(m => (m.Size, Hash: m.Sha256.ToUpperInvariant()));
+            foreach (var group in remainingGroups)
             {
-                if (detectedRenames.ContainsKey(missing.OriginalRel)) continue;
-
-                var sameSizeCandidates = candidateNewRelList
-                    .Where(newRel => !matchedNewRels.Contains(newRel) && localRelMap[newRel].Length == missing.Size)
-                    .ToList();
-
-                if (sameSizeCandidates.Count == 1)
+                var matches = new List<string>();
+                foreach (string candidate in candidateNewRelList.Where(r => !matchedNewRels.Contains(r) && localRelMap[r].Length == group.Key.Size))
                 {
-                    string candidate = sameSizeCandidates[0];
-                    string candidateHash = HashHelper.ComputeFileSha256(localRelMap[candidate].FullName);
-                    if (!string.IsNullOrEmpty(missing.Sha256) && string.Equals(candidateHash, missing.Sha256, StringComparison.OrdinalIgnoreCase))
+                    if (!candidateHashes.TryGetValue(candidate, out string? hash))
                     {
-                        detectedRenames[missing.OriginalRel] = candidate;
-                        matchedNewRels.Add(candidate);
+                        hash = HashHelper.ComputeFileSha256(localRelMap[candidate].FullName);
+                        candidateHashes[candidate] = hash;
                     }
+                    if (string.Equals(hash, group.Key.Hash, StringComparison.OrdinalIgnoreCase)) matches.Add(candidate);
                 }
-                else if (sameSizeCandidates.Count > 1)
+                if (matches.Count == 1 && group.Count() == 1)
                 {
-                    foreach (var candidate in sameSizeCandidates)
-                    {
-                        string candidateHash = HashHelper.ComputeFileSha256(localRelMap[candidate].FullName);
-                        if (!string.IsNullOrEmpty(missing.Sha256) && string.Equals(candidateHash, missing.Sha256, StringComparison.OrdinalIgnoreCase))
-                        {
-                            detectedRenames[missing.OriginalRel] = candidate;
-                            matchedNewRels.Add(candidate);
-                            break;
-                        }
-                    }
+                    string oldRel = group.Single().OriginalRel;
+                    detectedRenames[oldRel] = matches[0];
+                    matchedNewRels.Add(matches[0]);
                 }
+                else if (matches.Count > 0)
+                {
+                    foreach (var old in group) ambiguousOldRels.Add(old.OriginalRel);
+                    Log("WARN", $"[待处理差异] {group.Count()} 个旧文件与 {matches.Count} 个新文件内容相同，无法唯一确认重命名；保留旧记录。");
+                }
+            }
+
+            if (ambiguousOldRels.Count > 0)
+            {
+                foreach (string oldRel in ambiguousOldRels)
+                    Log("WARN", $"[待处理差异] 无法确认旧文件的去向: {oldRel}");
+                CurrentState = SyncState.Failed;
+                throw new InvalidDataException("存在无法唯一确认的重命名，已停止本次备份并保留原清单；请检查任务日志。");
             }
 
             manifest.History ??= new List<ManifestHistoryEntry>();
@@ -318,7 +323,7 @@ namespace FNSyncPlus.Core.Services
             }
 
             // 4. 处理已删除项 (未匹配重命名的缺失文件)
-            var deletedEntries = missingManifestEntries.Where(m => !detectedRenames.ContainsKey(m.OriginalRel)).ToList();
+            var deletedEntries = missingManifestEntries.Where(m => !detectedRenames.ContainsKey(m.OriginalRel) && !ambiguousOldRels.Contains(m.OriginalRel)).ToList();
             foreach (var deleted in deletedEntries)
             {
                 if (strategy == BackupStrategy.Smart || strategy == BackupStrategy.Mirror)
