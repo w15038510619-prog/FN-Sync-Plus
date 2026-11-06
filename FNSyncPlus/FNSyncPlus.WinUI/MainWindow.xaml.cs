@@ -23,6 +23,7 @@ namespace FNSyncPlus.WinUI
             WindowHelper.ConfigureWindow(this, AppServices.IsIsolatedTestSession
                 ? "飞牛同步增强版 v0.4.0-beta [隔离测试会话]"
                 : "飞牛同步增强版 v0.4.0-beta", 1200, 780);
+            if (AppServices.IsIsolatedTestSession) AppTitleText.Text = "飞牛同步增强版 v0.4.0-beta [隔离测试会话]";
             WindowHelper.SetMicaBackdrop(this);
             SetTitleBar(AppTitleBarDragArea);
 
