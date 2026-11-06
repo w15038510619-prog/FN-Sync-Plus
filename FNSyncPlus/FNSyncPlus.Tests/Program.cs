@@ -43,6 +43,13 @@ namespace FNSyncPlus.Tests
         {
             Console.OutputEncoding = Encoding.UTF8;
 
+            if (args.Contains("--integrity-regressions"))
+            {
+                await TestIntegrityRegressionsAsync();
+                Console.WriteLine($"PASS: {_passed}, FAIL: {_failed}, SKIP: {_skipped}");
+                return _failed == 0 ? 0 : 1;
+            }
+
             if (args.Any(a => a.Equals("--poc", StringComparison.OrdinalIgnoreCase) || 
                               a.Equals("poc", StringComparison.OrdinalIgnoreCase) ||
                               a.Equals("--unicode-suite", StringComparison.OrdinalIgnoreCase)))
@@ -166,6 +173,425 @@ namespace FNSyncPlus.Tests
             Console.WriteLine("================================================================================");
 
             return _failed == 0 ? 0 : 1;
+        }
+
+        static async Task TestIntegrityRegressionsAsync()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "FNSync_integrity_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try
+            {
+                string config = Path.Combine(root, "settings.json");
+                var settings = AppSettings.CreateForTest(config);
+                settings.Tasks.Add(new SyncTask { TaskName = "失败测试", TaskId = "task_fail_legitimate", SourceFolder = @"C:\Fake" });
+                settings.Save();
+                Assert(AppSettings.LoadFromPath(config).Tasks.Single().TaskName == "失败测试", "合法任务名称和路径在加载后保留");
+                File.WriteAllText(config, "{broken");
+                bool failed = false;
+                try { AppSettings.LoadFromPath(config); } catch (IOException) { failed = true; }
+                Assert(failed && File.ReadAllText(config) == "{broken", "损坏的配置报错并保留原文");
+                string legacyConfig = Path.Combine(root, "legacy.json");
+                string legacyJson = "{\"SourceFolder\":\"C:\\\\MyData\",\"TargetShare\":\"backup\"}";
+                File.WriteAllText(legacyConfig, legacyJson);
+                var migrated = AppSettings.LoadFromPath(legacyConfig);
+                var migrationBackup = Directory.GetFiles(root, "legacy.json.pre-migration-*.bak");
+                Assert(migrated.Tasks.Count == 1 && migrationBackup.Length == 1 && File.ReadAllText(migrationBackup[0]) == legacyJson, "迁移配置前保留原始备份");
+                string isolatedCredentials = Path.Combine(root, "credentials", "credentials.dat");
+                SmbAuthService.SaveCredentials("test.invalid", "test-user", "test-secret", isolatedCredentials);
+                var isolatedSaved = SmbAuthService.LoadCredentials(isolatedCredentials);
+                Assert(isolatedSaved.HasValue && isolatedSaved.Value.Server == "test.invalid" && isolatedSaved.Value.Password == "test-secret" &&
+                    !Encoding.UTF8.GetString(File.ReadAllBytes(isolatedCredentials)).Contains("test-secret"), "独立测试凭据可由当前 Windows 用户加密保存并读取");
+                SmbAuthService.ClearSavedCredentials(isolatedCredentials);
+                Assert(!File.Exists(isolatedCredentials), "只清除明确指定的隔离测试凭据");
+
+                string backup = Path.Combine(root, "backup");
+                string target = Path.Combine(root, "restore");
+                Directory.CreateDirectory(backup);
+                Directory.CreateDirectory(target);
+                File.WriteAllText(Path.Combine(backup, "history.txt"), "old content");
+                File.WriteAllText(Path.Combine(target, "file.txt"), "user content");
+                var provider = new SmbStorageProvider(rootUncPath: root);
+                var engine = new RestoreEngine(new ManifestManager());
+                var entry = new ManifestHistoryEntry { OriginalRel = "file.txt", StoredRel = "history.txt", Sha256 = HashHelper.ComputeFileSha256(Path.Combine(backup, "history.txt")) };
+                bool skipped = await engine.RunRestoreHistoryFileAsync(provider, "backup", target, entry);
+                Assert(!skipped && File.ReadAllText(Path.Combine(target, "file.txt")) == "user content", "历史恢复默认不覆盖现有文件");
+                bool renamed = await engine.RunRestoreHistoryFileAsync(provider, "backup", target, entry, conflictResolution: ConflictResolution.RenameWithTimestamp);
+                Assert(renamed && File.ReadAllText(Path.Combine(target, "file.txt")) == "user content" && Directory.GetFiles(target).Length == 2, "历史恢复可选择重命名并保留现有文件");
+                entry.OriginalRel = "../escape.txt";
+                bool escaped = await engine.RunRestoreHistoryFileAsync(provider, "backup", target, entry, conflictResolution: ConflictResolution.Overwrite);
+                Assert(!escaped && !File.Exists(Path.Combine(root, "escape.txt")), "历史恢复拦截路径穿越");
+                entry.OriginalRel = "bad.txt";
+                entry.Sha256 = new string('0', 64);
+                bool badHash = await engine.RunRestoreHistoryFileAsync(provider, "backup", target, entry);
+                Assert(!badHash && !File.Exists(Path.Combine(target, "bad.txt")), "哈希不匹配时不生成最终文件");
+
+                var faultProvider = new FaultInjectingProvider(root);
+                var manifestManager = new ManifestManager();
+                await manifestManager.SaveManifestAtomicAsync(faultProvider, "backup", new Manifest { SourceRoot = "old" });
+                faultProvider.InterruptMainUpload = true;
+                bool interrupted = false;
+                try { await manifestManager.SaveManifestAtomicAsync(faultProvider, "backup", new Manifest { SourceRoot = "new" }); }
+                catch (IOException) { interrupted = true; }
+                var recovered = await manifestManager.LoadManifestAsync(faultProvider, "backup");
+                Assert(interrupted && recovered.SourceRoot == "old", "主清单上传中断后回退到上一份清单");
+                File.WriteAllText(Path.Combine(backup, ".fnsync", "manifest.json.bak"), "broken too");
+                bool refused = false;
+                try { await manifestManager.LoadManifestAsync(faultProvider, "backup"); }
+                catch (InvalidDataException) { refused = true; }
+                Assert(refused, "主备清单均损坏时拒绝返回空清单");
+                Assert(new FnOsFileListResponse { Files = new() }.IsSuccess, "fnOS 文件列表允许省略 result 的有效响应");
+                Assert(!new FnOsFileListResponse().IsSuccess && !new FnOsFileListResponse { Result = "fail", Files = new() }.IsSuccess, "fnOS 文件列表拒绝空响应或明确失败");
+                var versionProvider = new FaultInjectingProvider(root);
+                var versions = new VersionedManifestStore();
+                bool unsafeTargetRejected = false;
+                try { await versions.SaveAsync(versionProvider, "../outside", new Manifest(), null); }
+                catch (ArgumentException) { unsafeTargetRejected = true; }
+                Assert(unsafeTargetRejected, "版本化清单拒绝不安全的目标路径");
+                var firstVersion = await versions.SaveAsync(versionProvider, "version-test", new Manifest { SourceRoot = "version-one" }, null);
+                var loadedVersion = await versions.LoadAsync(versionProvider, "version-test");
+                Assert(loadedVersion?.Id == firstVersion.Id && loadedVersion.Manifest.SourceRoot == "version-one", "版本化清单候选及提交记录可回读");
+                versionProvider.InterruptUploadContains = "/candidate-";
+                bool candidateFailed = false;
+                try { await versions.SaveAsync(versionProvider, "version-test", new Manifest { SourceRoot = "candidate-failed" }, firstVersion.Id); }
+                catch (IOException) { candidateFailed = true; }
+                loadedVersion = await versions.LoadAsync(versionProvider, "version-test");
+                Assert(candidateFailed && loadedVersion?.Id == firstVersion.Id, "清单候选上传中断保留已提交版本");
+                versionProvider.InterruptUploadContains = "/commit-";
+                bool commitFailed = false;
+                try { await versions.SaveAsync(versionProvider, "version-test", new Manifest { SourceRoot = "commit-failed" }, firstVersion.Id); }
+                catch (IOException) { commitFailed = true; }
+                loadedVersion = await versions.LoadAsync(versionProvider, "version-test");
+                Assert(commitFailed && loadedVersion?.Id == firstVersion.Id, "清单提交记录写入中断保留已提交版本");
+                versionProvider.InterruptUploadContains = null;
+                bool damagedHeadRejected = false;
+                try { await versions.SaveAsync(versionProvider, "version-test", new Manifest(), firstVersion.Id); }
+                catch (InvalidDataException) { damagedHeadRejected = true; }
+                Assert(damagedHeadRejected, "新提交损坏时拒绝基于回退版本继续写入");
+                firstVersion = await versions.SaveAsync(versionProvider, "version-healthy", new Manifest { SourceRoot = "version-one" }, null);
+                bool staleRejected = false;
+                try { await versions.SaveAsync(versionProvider, "version-healthy", new Manifest(), null); }
+                catch (IOException) { staleRejected = true; }
+                Assert(staleRejected, "版本已变化时拒绝过期写入");
+                var secondVersion = await versions.SaveAsync(versionProvider, "version-healthy", new Manifest { SourceRoot = "version-two" }, firstVersion.Id);
+                string versionsDir = Path.Combine(root, "version-healthy", ".fnsync", "manifest-versions");
+                string secondCandidate = Path.Combine(versionsDir, $"candidate-{secondVersion.Id}.json");
+                byte[] goodSecondCandidate = File.ReadAllBytes(secondCandidate);
+                File.WriteAllText(secondCandidate, "{}");
+                loadedVersion = await versions.LoadAsync(versionProvider, "version-healthy");
+                Assert(loadedVersion?.Id == firstVersion.Id, "较新版本损坏时回退到完整旧版本");
+                File.WriteAllBytes(secondCandidate, goodSecondCandidate);
+                string otherId = Guid.NewGuid().ToString("N");
+                File.Copy(Path.Combine(versionsDir, $"candidate-{firstVersion.Id}.json"), Path.Combine(versionsDir, $"candidate-{otherId}.json"));
+                string firstReceipt = Path.Combine(versionsDir, $"commit-{firstVersion.Sequence:D20}-{firstVersion.Id}.json");
+                File.WriteAllText(Path.Combine(versionsDir, $"commit-{firstVersion.Sequence:D20}-{otherId}.json"),
+                    File.ReadAllText(firstReceipt).Replace(firstVersion.Id, otherId, StringComparison.Ordinal));
+                bool collisionRejected = false;
+                try { await versions.LoadAsync(versionProvider, "version-healthy"); }
+                catch (InvalidDataException) { collisionRejected = true; }
+                Assert(collisionRejected, "较新版本存在时仍拒绝早期版本号的并发冲突");
+                var uncertainFirst = await versions.SaveAsync(versionProvider, "version-uncertain", new Manifest { SourceRoot = "old" }, null);
+                versionProvider.ErrorAfterCompleteContains = "/commit-";
+                bool uncertainFailure = false;
+                try { await versions.SaveAsync(versionProvider, "version-uncertain", new Manifest { SourceRoot = "new" }, uncertainFirst.Id); }
+                catch (IOException) { uncertainFailure = true; }
+                versionProvider.ErrorAfterCompleteContains = null;
+                loadedVersion = await versions.LoadAsync(versionProvider, "version-uncertain");
+                Assert(uncertainFailure && loadedVersion?.Manifest.SourceRoot == "new", "提交已写入但响应丢失时需重新读取确认结果");
+                versionProvider.FailReadContains = "/candidate-";
+                bool readErrorPropagated = false;
+                try { await versions.LoadAsync(versionProvider, "version-uncertain"); }
+                catch (IOException) { readErrorPropagated = true; }
+                versionProvider.FailReadContains = null;
+                Assert(readErrorPropagated, "读取清单时的网络错误不会被误认为版本损坏并静默回退");
+                var malformedVersion = await versions.SaveAsync(versionProvider, "version-malformed", new Manifest(), null);
+                string malformedDir = Path.Combine(root, "version-malformed", ".fnsync", "manifest-versions");
+                File.WriteAllText(Path.Combine(malformedDir, "commit-malformed.json"), "{}");
+                bool malformedRejected = false;
+                try { await versions.SaveAsync(versionProvider, "version-malformed", new Manifest(), malformedVersion.Id); }
+                catch (InvalidDataException) { malformedRejected = true; }
+                Assert(malformedRejected && (await versions.LoadAsync(versionProvider, "version-malformed"))?.Id == malformedVersion.Id,
+                    "格式错误的提交文件阻止后续写入但允许读取已有版本");
+                var versionThree = await versions.SaveAsync(versionProvider, "version-compat", new Manifest { Version = 3, SourceRoot = "v3" }, null);
+                var readThree = await versions.LoadAsync(versionProvider, "version-compat");
+                var versionFour = await versions.SaveAsync(versionProvider, "version-compat", new Manifest { Version = 4, SourceRoot = "v4" }, versionThree.Id);
+                var readFour = await versions.LoadAsync(versionProvider, "version-compat");
+                Assert(readThree?.Manifest.Version == 3 && readThree.Manifest.SourceRoot == "v3" &&
+                    readFour?.Id == versionFour.Id && readFour.Manifest.Version == 4, "版本化候选保留 v3 和 v4 清单数据");
+                string contentSource = Path.Combine(root, "content-source.txt");
+                File.WriteAllText(contentSource, "旧内容");
+                var contentStore = new ImmutableContentStore();
+                var firstContent = await contentStore.PrepareAsync(versionProvider, "content-target", contentSource);
+                File.WriteAllText(contentSource, "新内容");
+                var secondContent = await contentStore.PrepareAsync(versionProvider, "content-target", contentSource);
+                string firstObject = Path.Combine(root, "content-target", firstContent.StoredRel.Replace('/', Path.DirectorySeparatorChar));
+                string secondObject = Path.Combine(root, "content-target", secondContent.StoredRel.Replace('/', Path.DirectorySeparatorChar));
+                Assert(firstContent.StoredRel != secondContent.StoredRel && File.ReadAllText(firstObject) == "旧内容" && File.ReadAllText(secondObject) == "新内容" &&
+                    HashHelper.ComputeFileSha256(firstObject) == firstContent.Sha256 && HashHelper.ComputeFileSha256(secondObject) == secondContent.Sha256,
+                    "独立内容对象保留修改前后的数据和校验值");
+                versionProvider.CorruptObjectUpload = true;
+                bool corruptedObjectRejected = false;
+                try { await contentStore.PrepareAsync(versionProvider, "content-target", contentSource); }
+                catch (InvalidDataException) { corruptedObjectRejected = true; }
+                versionProvider.CorruptObjectUpload = false;
+                Assert(corruptedObjectRejected && File.ReadAllText(firstObject) == "旧内容", "对象上传数据损坏时拒绝提交并保留旧对象");
+                bool busyObjectRejected = false;
+                using (var heldSource = new FileStream(contentSource, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    try { await contentStore.PrepareAsync(versionProvider, "content-locked", contentSource); }
+                    catch (IOException) { busyObjectRejected = true; }
+                }
+                Assert(busyObjectRejected && !Directory.Exists(Path.Combine(root, "content-locked")), "源文件独占写入时不创建内容对象");
+                string longSourceDirectory = Path.Combine(root, new string('a', 130), new string('b', 130));
+                Directory.CreateDirectory(PathHelper.EnsureLongPathPrefix(longSourceDirectory));
+                string longSourceFile = Path.Combine(longSourceDirectory, "sample.txt");
+                File.WriteAllText(PathHelper.EnsureLongPathPrefix(longSourceFile), "deep path content");
+                var deepContent = await contentStore.PrepareAsync(versionProvider, "content-deep", longSourceFile);
+                Assert(File.ReadAllText(Path.Combine(root, "content-deep", deepContent.StoredRel.Replace('/', Path.DirectorySeparatorChar))) == "deep path content",
+                    "内容对象支持超过 260 字符的源路径");
+                string longOriginal = new string('测', 100);
+                var oldHistory = new ManifestHistoryEntry { OriginalRel = longOriginal, StoredRel = firstContent.StoredRel, Size = firstContent.Size, Sha256 = firstContent.Sha256 };
+                var currentContent = new ManifestFileEntry { OriginalRel = longOriginal, StoredRel = secondContent.StoredRel, Size = secondContent.Size, Sha256 = secondContent.Sha256 };
+                await versions.SaveAsync(versionProvider, "content-target", new Manifest { Files = new() { currentContent }, History = new() { oldHistory } }, null);
+                var contentManifest = await versions.LoadAsync(versionProvider, "content-target");
+                var historyEngine = new RestoreEngine(new ManifestManager());
+                string restoredOld = Path.Combine(root, "content-restored-old");
+                string restoredNew = Path.Combine(root, "content-restored-new");
+                bool oldRestored = await historyEngine.RunRestoreHistoryFileAsync(versionProvider, "content-target", restoredOld, contentManifest!.Manifest.History.Single());
+                var currentForRestore = new ManifestHistoryEntry { OriginalRel = longOriginal, StoredRel = currentContent.StoredRel, Size = currentContent.Size, Sha256 = currentContent.Sha256 };
+                bool newRestored = await historyEngine.RunRestoreHistoryFileAsync(versionProvider, "content-target", restoredNew, currentForRestore);
+                Assert(oldRestored && newRestored && File.ReadAllText(Path.Combine(restoredOld, longOriginal)) == "旧内容" &&
+                    File.ReadAllText(Path.Combine(restoredNew, longOriginal)) == "新内容", "原型清单和内容对象恢复 300 字节名称的旧版及新版");
+                async Task<bool> TestAmbiguousRenameAsync(string suffix, bool duplicateOld, string content = "same content")
+                {
+                    string source = Path.Combine(root, $"ambiguous-source-{suffix}");
+                    string target = $"ambiguous-target-{suffix}";
+                    Directory.CreateDirectory(source);
+                    File.WriteAllText(Path.Combine(source, "old-a.txt"), content);
+                    if (duplicateOld) File.WriteAllText(Path.Combine(source, "old-b.txt"), content);
+                    var provider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+                    var initial = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
+                    await initial.RunSyncAsync(source, target, provider, BackupStrategy.Smart, null, CancellationToken.None);
+                    File.Move(Path.Combine(source, "old-a.txt"), Path.Combine(source, "new-a.txt"));
+                    if (duplicateOld) File.Delete(Path.Combine(source, "old-b.txt"));
+                    else File.WriteAllText(Path.Combine(source, "new-b.txt"), content);
+                    bool warned = false;
+                    var changed = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
+                    changed.LogEmitted += (_, message) => { if (message.Contains("待处理差异", StringComparison.Ordinal)) warned = true; };
+                    bool stopped = false;
+                    try { await changed.RunSyncAsync(source, target, provider, BackupStrategy.Smart, null, CancellationToken.None); }
+                    catch (InvalidDataException) { stopped = true; }
+                    var manifest = await manifestManager.LoadManifestAsync(provider, target);
+                    return stopped && warned &&
+                        manifest.Files.Any(f => f.OriginalRel == "old-a.txt") &&
+                        (!duplicateOld || manifest.Files.Any(f => f.OriginalRel == "old-b.txt")) &&
+                        !manifest.History.Any(h => h.OriginalRel == "old-a.txt" || h.OriginalRel == "old-b.txt") &&
+                        !manifest.Files.Any(f => f.OriginalRel.StartsWith("new-", StringComparison.Ordinal)) &&
+                        !File.Exists(Path.Combine(root, target, "new-a.txt"));
+                }
+                Assert(await TestAmbiguousRenameAsync("old-duplicates", true), "多个同内容旧文件无法唯一匹配时保留旧记录");
+                Assert(await TestAmbiguousRenameAsync("new-duplicates", false), "多个同内容新文件无法唯一匹配时保留旧记录");
+                Assert(await TestAmbiguousRenameAsync("empty-duplicates", true, ""), "多个零字节旧文件无法唯一匹配时停止备份");
+                string uniqueSource = Path.Combine(root, "unique-rename-source");
+                Directory.CreateDirectory(uniqueSource);
+                File.WriteAllText(Path.Combine(uniqueSource, "old.txt"), "unique rename");
+                var uniqueProvider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+                await new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService())
+                    .RunSyncAsync(uniqueSource, "unique-rename-target", uniqueProvider, BackupStrategy.Smart, null, CancellationToken.None);
+                File.Move(Path.Combine(uniqueSource, "old.txt"), Path.Combine(uniqueSource, "new.txt"));
+                var uniqueResult = await new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService())
+                    .RunSyncAsync(uniqueSource, "unique-rename-target", uniqueProvider, BackupStrategy.Smart, null, CancellationToken.None);
+                var uniqueManifest = await manifestManager.LoadManifestAsync(uniqueProvider, "unique-rename-target");
+                Assert(uniqueResult.State == SyncState.Completed && uniqueManifest.Files.Single().PreviousRel == "old.txt" &&
+                    uniqueManifest.History.Any(h => h.OriginalRel == "old.txt" && h.Reason == "renamed"), "唯一的离线重命名仍能识别");
+                string legacyRenameSource = Path.Combine(root, "legacy-rename-source");
+                string legacyRenameTarget = Path.Combine(root, "legacy-rename-target");
+                Directory.CreateDirectory(legacyRenameSource);
+                Directory.CreateDirectory(legacyRenameTarget);
+                File.WriteAllText(Path.Combine(legacyRenameSource, "new.txt"), "legacy content");
+                File.WriteAllText(Path.Combine(legacyRenameTarget, "old.txt"), "legacy content");
+                var legacyProvider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+                await manifestManager.SaveManifestAtomicAsync(legacyProvider, "legacy-rename-target", new Manifest { Version = 3,
+                    Files = new() { new ManifestFileEntry { OriginalRel = "old.txt", StoredRel = "old.txt", Size = 14, Sha256 = "" } } });
+                bool unknownLegacyStopped = false;
+                try { await new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService())
+                    .RunSyncAsync(legacyRenameSource, "legacy-rename-target", legacyProvider, BackupStrategy.Smart, null, CancellationToken.None); }
+                catch (InvalidDataException) { unknownLegacyStopped = true; }
+                var legacyRetained = await manifestManager.LoadManifestAsync(legacyProvider, "legacy-rename-target");
+                Assert(unknownLegacyStopped && legacyRetained.Files.Single().OriginalRel == "old.txt" &&
+                    File.Exists(Path.Combine(legacyRenameTarget, "old.txt")) && !File.Exists(Path.Combine(legacyRenameTarget, "new.txt")),
+                    "旧清单缺少哈希且出现新文件时不猜测重命名或删除");
+                string renameSource = Path.Combine(root, "rename-source");
+                string renameTarget = Path.Combine(root, "rename-target");
+                Directory.CreateDirectory(renameSource);
+                Directory.CreateDirectory(renameTarget);
+                File.WriteAllText(Path.Combine(renameSource, "new.txt"), "rename content");
+                File.WriteAllText(Path.Combine(renameTarget, "old.txt"), "rename content");
+                var renameProvider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+                var oldFile = new FileInfo(Path.Combine(renameTarget, "old.txt"));
+                var oldManifest = new Manifest { Files = new() { new ManifestFileEntry {
+                    OriginalRel = "old.txt", StoredRel = "old.txt", Size = oldFile.Length,
+                    Sha256 = HashHelper.ComputeFileSha256(oldFile.FullName)
+                } } };
+                await manifestManager.SaveManifestAtomicAsync(renameProvider, "rename-target", oldManifest);
+                renameProvider.FailUploadSuffix = "/new.txt";
+                var renameSync = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
+                var failedRename = await renameSync.RunSyncAsync(renameSource, "rename-target", renameProvider, BackupStrategy.Smart, null, CancellationToken.None);
+                var retainedManifest = await manifestManager.LoadManifestAsync(renameProvider, "rename-target");
+                Assert(failedRename.State == SyncState.Failed && retainedManifest.Files.Count == 1 &&
+                    retainedManifest.Files[0].OriginalRel == "old.txt" && File.Exists(oldFile.FullName),
+                    "重命名新文件上传失败时不提交移除旧项的清单");
+                renameProvider.FailUploadSuffix = null;
+                using var uploadCancellation = new CancellationTokenSource();
+                renameProvider.CancelUploadSuffix = "/new.txt";
+                renameProvider.UploadCancellation = uploadCancellation;
+                bool canceled = false;
+                try
+                {
+                    var canceledSync = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
+                    await canceledSync.RunSyncAsync(renameSource, "rename-target", renameProvider, BackupStrategy.Smart, null, uploadCancellation.Token);
+                }
+                catch (OperationCanceledException) { canceled = true; }
+                retainedManifest = await manifestManager.LoadManifestAsync(renameProvider, "rename-target");
+                Assert(canceled && retainedManifest.Files.Count == 1 && retainedManifest.Files[0].OriginalRel == "old.txt",
+                    "重命名上传中取消时不提交移除旧项的清单");
+                renameProvider.CancelUploadSuffix = null;
+                bool busyBlocked = false;
+                using (var heldSource = new FileStream(Path.Combine(renameSource, "new.txt"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    var busySync = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
+                    var busyReport = await busySync.RunSyncAsync(renameSource, "rename-target", renameProvider, BackupStrategy.Smart,
+                        new Dictionary<string, string> { ["old.txt"] = "new.txt" }, CancellationToken.None);
+                    busyBlocked = busyReport.State == SyncState.Failed && busySync.FailedItems.Any(x => x.ErrorMessage.Contains("未稳定", StringComparison.Ordinal));
+                }
+                retainedManifest = await manifestManager.LoadManifestAsync(renameProvider, "rename-target");
+                Assert(busyBlocked && retainedManifest.Files.Count == 1 && retainedManifest.Files[0].OriginalRel == "old.txt" &&
+                    !File.Exists(Path.Combine(renameTarget, "new.txt")), "源文件被独占时停止同步并保留旧清单");
+                string lockedSource = Path.Combine(root, "locked-source");
+                string lockedTarget = Path.Combine(root, "locked-target");
+                Directory.CreateDirectory(lockedSource);
+                Directory.CreateDirectory(lockedTarget);
+                File.WriteAllText(Path.Combine(lockedSource, "sample.txt"), "must not upload");
+                using var heldLock = await manifestManager.TryAcquireTargetLockAsync(lockedTarget);
+                bool lockBlocked = false;
+                try
+                {
+                    var sync = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
+                    await sync.RunSyncAsync(lockedSource, lockedTarget);
+                }
+                catch (IOException) { lockBlocked = true; }
+                Assert(heldLock != null && lockBlocked && !File.Exists(Path.Combine(lockedTarget, "sample.txt")), "目标锁被占用时拒绝同步而不写入文件");
+                var offlineSettings = AppSettings.CreateInMemory();
+                var offlineTask = new SyncTask
+                {
+                    TaskName = "隔离离线测试", SourceFolder = lockedSource,
+                    DestinationFolder = "我的文件/offline-test", ProviderType = StorageProviderType.FnOsPersonal,
+                    ScheduleMode = TaskSyncScheduleMode.ManualOnly
+                };
+                offlineSettings.Tasks.Add(offlineTask);
+                string previousDirectory = Environment.CurrentDirectory;
+                try
+                {
+                    Environment.CurrentDirectory = root;
+                    using var manager = new TaskManager(offlineSettings, new SmbAuthService(), new LogService(Path.Combine(root, "logs")));
+                    var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    manager.TaskStateChanged += t => { if (t.State == TaskSyncState.OfflineWaiting) done.TrySetResult(); };
+                    manager.TriggerSync(offlineTask.TaskId);
+                    bool signaled = await Task.WhenAny(done.Task, Task.Delay(5000)) == done.Task;
+                    Assert(signaled && offlineTask.State == TaskSyncState.OfflineWaiting &&
+                        !Directory.Exists(Path.Combine(root, "我的文件")), "飞牛未连接时等待重连，不误写本地目录或报告成功");
+                }
+                finally { Environment.CurrentDirectory = previousDirectory; }
+                await Task.Delay(200);
+                string localTarget = Path.Combine(root, "local-target");
+                var localSettings = AppSettings.CreateInMemory();
+                var localTask = new SyncTask
+                {
+                    TaskName = "隔离本地目标测试", SourceFolder = lockedSource,
+                    DestinationFolder = localTarget, ProviderType = StorageProviderType.LocalFileSystem,
+                    ScheduleMode = TaskSyncScheduleMode.ManualOnly
+                };
+                localSettings.Tasks.Add(localTask);
+                using (var manager = new TaskManager(localSettings, new SmbAuthService(), new LogService(Path.Combine(root, "local-logs"))))
+                {
+                    manager.StorageProviderSupplier = () => renameProvider;
+                    var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    manager.TaskStateChanged += t => { if (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error) done.TrySetResult(); };
+                    manager.TriggerSync(localTask.TaskId);
+                    bool signaled = await Task.WhenAny(done.Task, Task.Delay(10000)) == done.Task;
+                    Assert(signaled && localTask.State == TaskSyncState.Completed && File.Exists(Path.Combine(localTarget, "sample.txt")),
+                        "飞牛已连接时本地任务仍写入本地目标");
+                }
+                await Task.Delay(200);
+            }
+            finally
+            {
+                Directory.Delete(root, true);
+            }
+        }
+
+        sealed class FaultInjectingProvider : INasStorageProvider
+        {
+            private readonly SmbStorageProvider inner;
+            public bool InterruptMainUpload { get; set; }
+            public bool ClaimFnOs { get; set; }
+            public string? FailUploadSuffix { get; set; }
+            public string? CancelUploadSuffix { get; set; }
+            public CancellationTokenSource? UploadCancellation { get; set; }
+            public string? InterruptUploadContains { get; set; }
+            public string? ErrorAfterCompleteContains { get; set; }
+            public string? FailReadContains { get; set; }
+            public bool CorruptObjectUpload { get; set; }
+            public FaultInjectingProvider(string root) => inner = new SmbStorageProvider(rootUncPath: root);
+            public StorageProviderType ProviderType => ClaimFnOs ? StorageProviderType.FnOsPersonal : StorageProviderType.LocalFileSystem;
+            public bool IsAuthenticated => inner.IsAuthenticated;
+            public string RootDisplayPath => inner.RootDisplayPath;
+            public Task<StorageAuthResult> ConnectAndAuthenticateAsync(string server, string username, string password, string? twoFactorCode = null, CancellationToken ct = default) => inner.ConnectAndAuthenticateAsync(server, username, password, twoFactorCode, ct);
+            public Task<IReadOnlyList<NasStorageItem>> ListEntriesAsync(string? path = null, CancellationToken ct = default) => inner.ListEntriesAsync(path, ct);
+            public Task<StorageOperationResult> CreateDirectoryAsync(string path, CancellationToken ct = default) => inner.CreateDirectoryAsync(path, ct);
+            public Task<bool> ExistsAsync(string path, CancellationToken ct = default) => inner.ExistsAsync(path, ct);
+            public Task<NasStorageItem?> GetItemAsync(string path, CancellationToken ct = default) => inner.GetItemAsync(path, ct);
+            public async Task<StorageOperationResult> UploadFileAsync(string path, Stream stream, long size, DateTime modified, bool overwrite = true, IProgress<long>? progress = null, CancellationToken ct = default)
+            {
+                if (CorruptObjectUpload && path.Contains("/.fnsync/objects/obj-", StringComparison.Ordinal))
+                {
+                    using var corrupt = new MemoryStream(Encoding.UTF8.GetBytes("corrupted"));
+                    return await inner.UploadFileAsync(path, corrupt, corrupt.Length, modified, overwrite, progress, ct);
+                }
+                if (InterruptUploadContains != null && path.Contains(InterruptUploadContains, StringComparison.Ordinal))
+                {
+                    using var partial = new MemoryStream(Encoding.UTF8.GetBytes("{"));
+                    await inner.UploadFileAsync(path, partial, partial.Length, modified, overwrite, progress, ct);
+                    return StorageOperationResult.Fail("模拟上传中断");
+                }
+                if (ErrorAfterCompleteContains != null && path.Contains(ErrorAfterCompleteContains, StringComparison.Ordinal))
+                {
+                    await inner.UploadFileAsync(path, stream, size, modified, overwrite, progress, ct);
+                    return StorageOperationResult.Fail("模拟提交后响应丢失");
+                }
+                if (CancelUploadSuffix != null && path.EndsWith(CancelUploadSuffix, StringComparison.Ordinal))
+                {
+                    UploadCancellation?.Cancel();
+                    ct.ThrowIfCancellationRequested();
+                }
+                if (FailUploadSuffix != null && path.EndsWith(FailUploadSuffix, StringComparison.Ordinal))
+                    return StorageOperationResult.Fail("403 模拟上传失败");
+                if (InterruptMainUpload && path.EndsWith("/manifest.json", StringComparison.Ordinal))
+                {
+                    using var partial = new MemoryStream(Encoding.UTF8.GetBytes("{}"));
+                    await inner.UploadFileAsync(path, partial, partial.Length, modified, overwrite, progress, ct);
+                    return StorageOperationResult.Fail("模拟上传中断");
+                }
+                return await inner.UploadFileAsync(path, stream, size, modified, overwrite, progress, ct);
+            }
+            public Task<Stream> OpenReadAsync(string path, CancellationToken ct = default)
+            {
+                if (FailReadContains != null && path.Contains(FailReadContains, StringComparison.Ordinal))
+                    throw new IOException("模拟网络读取失败");
+                return inner.OpenReadAsync(path, ct);
+            }
+            public Task<bool> VerifyFileIntegrityAsync(string path, string hash, long size, CancellationToken ct = default) => inner.VerifyFileIntegrityAsync(path, hash, size, ct);
+            public Task<StorageOperationResult> DeleteAsync(string path, bool moveToTrash = true, CancellationToken ct = default) => inner.DeleteAsync(path, moveToTrash, ct);
+            public ValueTask DisposeAsync() => inner.DisposeAsync();
         }
 
         static void Assert(bool condition, string testName, string? detail = null)
@@ -699,10 +1125,10 @@ namespace FNSyncPlus.Tests
         static async Task TestSyncWithRealTestFilesAsync()
         {
             Console.WriteLine("\n--- 14. 真实样本目录 (FN_Sync_Test) 模拟增量与恢复测试 ---");
-            string realDir = @"D:\FN_AutoSync_Package\FN_Sync_Test";
-            if (!Directory.Exists(realDir))
+            string? realDir = Environment.GetEnvironmentVariable("FNSYNC_ISOLATED_TEST_SOURCE");
+            if (string.IsNullOrWhiteSpace(realDir) || !Directory.Exists(realDir))
             {
-                Console.WriteLine("FN_Sync_Test 目录不存在，跳过此项。");
+                Skip("样本目录同步与恢复", "未提供隔离的样本目录");
                 return;
             }
 
@@ -1348,20 +1774,10 @@ namespace FNSyncPlus.Tests
         static void BuildApplicationIcons()
         {
             Console.WriteLine("\n--- 28. 原创应用图标方案生成与多尺寸 ICO 资产校验 ---");
-            string currentDir = AppDomain.CurrentDomain.BaseDirectory;
-            // 向上回溯定位工程根目录
-            string repoRoot = Path.GetFullPath(Path.Combine(currentDir, "..", "..", "..", ".."));
-            string assetsDir = Path.Combine(repoRoot, "FNSyncPlus", "FNSyncPlus.WinUI", "Assets");
-            if (!Directory.Exists(assetsDir))
-            {
-                assetsDir = Path.Combine(AppContext.BaseDirectory, "Assets");
-            }
+            string isolatedRoot = Path.Combine(Path.GetTempPath(), "FNSyncPlus_Icons_" + Guid.NewGuid().ToString("N"));
+            string assetsDir = Path.Combine(isolatedRoot, "Assets");
             Directory.CreateDirectory(assetsDir);
-
-            string defaultArtifactDir = @"C:\Users\S\.gemini\antigravity\brain\eacd3aa8-c774-45a0-b5d4-d23d66a0eaa6";
-            string artifactDir = Directory.Exists(defaultArtifactDir)
-                ? defaultArtifactDir
-                : Path.Combine(repoRoot, "Artifacts");
+            string artifactDir = Path.Combine(isolatedRoot, "Artifacts");
             Directory.CreateDirectory(artifactDir);
 
             IconBuilder.GenerateIcons(artifactDir, assetsDir);

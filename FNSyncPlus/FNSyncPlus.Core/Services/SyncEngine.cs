@@ -167,34 +167,39 @@ namespace FNSyncPlus.Core.Services
             if (!File.Exists(fullPath)) return false;
             var sw = Stopwatch.StartNew();
             long prevSize = -1;
+            DateTime prevModified = DateTime.MinValue;
             while (sw.Elapsed.TotalSeconds < maxWaitSeconds)
             {
-                if (token.IsCancellationRequested) return false;
+                token.ThrowIfCancellationRequested();
                 try
                 {
                     var fi = new FileInfo(fullPath);
                     if (!fi.Exists) return false;
                     long curSize = fi.Length;
-                    using (var s = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    var curModified = fi.LastWriteTimeUtc;
+                    using (var s = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read))
                     {
-                        if (prevSize >= 0 && curSize == prevSize)
+                        if (prevSize >= 0 && curSize == prevSize && curModified == prevModified)
                         {
                             return true;
                         }
                         prevSize = curSize;
+                        prevModified = curModified;
                     }
                     await Task.Delay(300, token).ConfigureAwait(false);
                 }
                 catch (IOException)
                 {
+                    prevSize = -1;
                     await Task.Delay(500, token).ConfigureAwait(false);
                 }
                 catch (UnauthorizedAccessException)
                 {
+                    prevSize = -1;
                     await Task.Delay(500, token).ConfigureAwait(false);
                 }
             }
-            return File.Exists(fullPath);
+            return false;
         }
 
         private Dictionary<string, string> DetectRenamesAndProcessDeletions(
@@ -249,38 +254,53 @@ namespace FNSyncPlus.Core.Services
                 }
             }
 
-            // 2. 基于文件大小与 SHA-256 内容哈希进行精准重命名比对
-            foreach (var missing in missingManifestEntries)
+            // 2. 离线匹配必须在旧项和新项两侧均唯一；重复内容不能推断身份。
+            var ambiguousOldRels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var candidateHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var unmatchedNew = candidateNewRelList.Where(r => !matchedNewRels.Contains(r)).ToList();
+            if (unmatchedNew.Count > 0)
             {
-                if (detectedRenames.ContainsKey(missing.OriginalRel)) continue;
-
-                var sameSizeCandidates = candidateNewRelList
-                    .Where(newRel => !matchedNewRels.Contains(newRel) && localRelMap[newRel].Length == missing.Size)
-                    .ToList();
-
-                if (sameSizeCandidates.Count == 1)
+                foreach (var old in missingManifestEntries.Where(m => !detectedRenames.ContainsKey(m.OriginalRel) &&
+                    (m.Sha256 == null || m.Sha256.Length != 64 || !m.Sha256.All(Uri.IsHexDigit))))
                 {
-                    string candidate = sameSizeCandidates[0];
-                    string candidateHash = HashHelper.ComputeFileSha256(localRelMap[candidate].FullName);
-                    if (!string.IsNullOrEmpty(missing.Sha256) && string.Equals(candidateHash, missing.Sha256, StringComparison.OrdinalIgnoreCase))
-                    {
-                        detectedRenames[missing.OriginalRel] = candidate;
-                        matchedNewRels.Add(candidate);
-                    }
+                    ambiguousOldRels.Add(old.OriginalRel);
+                    Log("WARN", $"[待处理差异] 旧文件缺少有效 SHA-256，无法与新增文件可靠比对: {old.OriginalRel}");
                 }
-                else if (sameSizeCandidates.Count > 1)
+            }
+            var remainingGroups = missingManifestEntries
+                .Where(m => !detectedRenames.ContainsKey(m.OriginalRel) && m.Sha256 != null && m.Sha256.Length == 64 && m.Sha256.All(Uri.IsHexDigit))
+                .GroupBy(m => (m.Size, Hash: m.Sha256.ToUpperInvariant()));
+            foreach (var group in remainingGroups)
+            {
+                var matches = new List<string>();
+                foreach (string candidate in candidateNewRelList.Where(r => !matchedNewRels.Contains(r) && localRelMap[r].Length == group.Key.Size))
                 {
-                    foreach (var candidate in sameSizeCandidates)
+                    if (!candidateHashes.TryGetValue(candidate, out string? hash))
                     {
-                        string candidateHash = HashHelper.ComputeFileSha256(localRelMap[candidate].FullName);
-                        if (!string.IsNullOrEmpty(missing.Sha256) && string.Equals(candidateHash, missing.Sha256, StringComparison.OrdinalIgnoreCase))
-                        {
-                            detectedRenames[missing.OriginalRel] = candidate;
-                            matchedNewRels.Add(candidate);
-                            break;
-                        }
+                        hash = HashHelper.ComputeFileSha256(localRelMap[candidate].FullName);
+                        candidateHashes[candidate] = hash;
                     }
+                    if (string.Equals(hash, group.Key.Hash, StringComparison.OrdinalIgnoreCase)) matches.Add(candidate);
                 }
+                if (matches.Count == 1 && group.Count() == 1)
+                {
+                    string oldRel = group.Single().OriginalRel;
+                    detectedRenames[oldRel] = matches[0];
+                    matchedNewRels.Add(matches[0]);
+                }
+                else if (matches.Count > 0)
+                {
+                    foreach (var old in group) ambiguousOldRels.Add(old.OriginalRel);
+                    Log("WARN", $"[待处理差异] {group.Count()} 个旧文件与 {matches.Count} 个新文件内容相同，无法唯一确认重命名；保留旧记录。");
+                }
+            }
+
+            if (ambiguousOldRels.Count > 0)
+            {
+                foreach (string oldRel in ambiguousOldRels)
+                    Log("WARN", $"[待处理差异] 无法确认旧文件的去向: {oldRel}");
+                CurrentState = SyncState.Failed;
+                throw new InvalidDataException("存在无法唯一确认的重命名，已停止本次备份并保留原清单；请检查任务日志。");
             }
 
             manifest.History ??= new List<ManifestHistoryEntry>();
@@ -313,7 +333,7 @@ namespace FNSyncPlus.Core.Services
             }
 
             // 4. 处理已删除项 (未匹配重命名的缺失文件)
-            var deletedEntries = missingManifestEntries.Where(m => !detectedRenames.ContainsKey(m.OriginalRel)).ToList();
+            var deletedEntries = missingManifestEntries.Where(m => !detectedRenames.ContainsKey(m.OriginalRel) && !ambiguousOldRels.Contains(m.OriginalRel)).ToList();
             foreach (var deleted in deletedEntries)
             {
                 if (strategy == BackupStrategy.Smart || strategy == BackupStrategy.Mirror)
@@ -519,7 +539,8 @@ namespace FNSyncPlus.Core.Services
                 targetLock = await _manifestManager.TryAcquireTargetLockAsync(targetNasFolder).ConfigureAwait(false);
                 if (targetLock == null)
                 {
-                    Log("WARN", "目标 NAS 目录已有其他同步实例在写入或处于锁定状态，将继续进行常规写入。");
+                    CurrentState = SyncState.Failed;
+                    throw new IOException("无法获取目标目录独占锁，已停止同步以保护现有备份。");
                 }
 
                 // 清理超过 1 小时的历史残留 staging 文件
@@ -628,7 +649,16 @@ namespace FNSyncPlus.Core.Services
                     string uploadError = "";
 
                     // 防写抖动安全检查：确保文件未被独占锁定且内容已完整写入
-                    await WaitForFileSettlingAsync(localFull, 3, token).ConfigureAwait(false);
+                    if (!await WaitForFileSettlingAsync(localFull, 3, token).ConfigureAwait(false))
+                    {
+                        const string settlingError = "文件仍被占用或未稳定";
+                        failedCount++;
+                        report.FailedFiles = failedCount;
+                        FailedItems.Add(new FailedSyncItem { RelativePath = originalRel, ErrorMessage = settlingError });
+                        Log("ERROR", $"[同步失败] {originalRel}: {settlingError}");
+                        ProgressChanged?.Invoke(report);
+                        continue;
+                    }
 
                     for (int attempt = 1; attempt <= 3; attempt++)
                     {
@@ -756,15 +786,18 @@ namespace FNSyncPlus.Core.Services
                     report.LongNameFiles = longNameCount;
                     ProgressChanged?.Invoke(report);
 
-                    // 定期（每 20 个文件）保存清单，防止意外中断
-                    if ((uploadedCount > 0 && uploadedCount % 20 == 0) || i == allLocalFiles.Count - 1)
-                    {
-                        manifest.Files = manifestFilesMap.Values.ToList();
-                        manifest.BackupPolicy = strategy.ToString();
-                        await _manifestManager.SaveManifestAtomicAsync(targetNasFolder, manifest, token).ConfigureAwait(false);
-                    }
                 }
 
+                token.ThrowIfCancellationRequested();
+                if (failedCount > 0)
+                {
+                    CurrentState = SyncState.Failed;
+                    report.State = CurrentState;
+                    report.StatusMessage = $"同步失败（{failedCount} 个文件未上传），未提交新清单。";
+                    Log("ERROR", report.StatusMessage);
+                    ProgressChanged?.Invoke(report);
+                    return report;
+                }
                 // 7. 保存目录结构信息与最终完整清单
                 try
                 {
@@ -792,10 +825,12 @@ namespace FNSyncPlus.Core.Services
                 }
                 catch (Exception ex)
                 {
-                    Log("WARN", $"保存目录清单时出现提示: {ex.Message}");
+                    CurrentState = SyncState.Failed;
+                    Log("ERROR", $"保存最终清单失败: {ex.Message}");
+                    throw;
                 }
 
-                CurrentState = failedCount > 0 ? SyncState.Completed : SyncState.Completed;
+                CurrentState = failedCount > 0 ? SyncState.Failed : SyncState.Completed;
                 report.State = CurrentState;
                 report.StatusMessage = $"同步已完成！已上传: {uploadedCount}, 跳过未修改: {unchangedCount}, 长文件名映射: {longNameCount}, 失败: {failedCount}";
                 Log("INFO", report.StatusMessage);
@@ -978,7 +1013,16 @@ namespace FNSyncPlus.Core.Services
                 string uploadError = "";
 
                 // 防写抖动安全检查：确保文件未被独占锁定且内容已完整写入
-                await WaitForFileSettlingAsync(localFull, 3, token).ConfigureAwait(false);
+                if (!await WaitForFileSettlingAsync(localFull, 3, token).ConfigureAwait(false))
+                {
+                    const string settlingError = "文件仍被占用或未稳定";
+                    failedCount++;
+                    report.FailedFiles = failedCount;
+                    FailedItems.Add(new FailedSyncItem { RelativePath = originalRel, ErrorMessage = settlingError });
+                    Log("ERROR", $"[同步失败] {originalRel}: {settlingError}");
+                    ProgressChanged?.Invoke(report);
+                    continue;
+                }
 
                 for (int attempt = 1; attempt <= 3; attempt++)
                 {
@@ -1079,14 +1123,18 @@ namespace FNSyncPlus.Core.Services
                 report.LongNameFiles = longNameCount;
                 ProgressChanged?.Invoke(report);
 
-                if ((uploadedCount > 0 && uploadedCount % 20 == 0) || i == allLocalFiles.Count - 1)
-                {
-                    manifest.Files = manifestFilesMap.Values.ToList();
-                    manifest.BackupPolicy = strategy.ToString();
-                    await _manifestManager.SaveManifestAtomicAsync(storageProvider, targetNasFolder, manifest, token).ConfigureAwait(false);
-                }
             }
 
+            token.ThrowIfCancellationRequested();
+            if (failedCount > 0)
+            {
+                CurrentState = SyncState.Failed;
+                report.State = CurrentState;
+                report.StatusMessage = $"同步失败（{failedCount} 个文件未上传），未提交新清单。";
+                Log("ERROR", report.StatusMessage);
+                ProgressChanged?.Invoke(report);
+                return report;
+            }
             // 保存目录清单与最终完整清单
             try
             {
@@ -1114,7 +1162,9 @@ namespace FNSyncPlus.Core.Services
             }
             catch (Exception ex)
             {
-                Log("WARN", $"持久化最终清单异常: {ex.Message}");
+                CurrentState = SyncState.Failed;
+                Log("ERROR", $"持久化最终清单失败: {ex.Message}");
+                throw;
             }
 
             CurrentState = failedCount > 0 ? SyncState.Failed : SyncState.Completed;

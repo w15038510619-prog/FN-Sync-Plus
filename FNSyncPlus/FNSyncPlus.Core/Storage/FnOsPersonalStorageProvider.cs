@@ -186,6 +186,8 @@ namespace FNSyncPlus.Core.Storage
             }
 
             var resp = await _apiClient.ListFilesAsync(queryPath, ct).ConfigureAwait(false);
+            if (!resp.IsSuccess)
+                throw new IOException($"读取远端目录失败: {resp.ErrMsg ?? resp.Result ?? "无响应"} (errno: {resp.ErrNo})");
             var results = new List<NasStorageItem>();
 
             if (resp.Files != null)
@@ -356,9 +358,13 @@ namespace FNSyncPlus.Core.Storage
             {
                 throw;
             }
-            catch
+            catch (OperationCanceledException)
             {
-                return null;
+                throw;
+            }
+            catch (Exception ex)
+            {
+                throw new IOException($"无法读取远端目录以确认路径是否存在: {relativePath}", ex);
             }
         }
 

@@ -327,11 +327,17 @@ namespace FNSyncPlus.WinUI.ViewModels
                 RestoreProgressReport report;
                 if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
                 {
-                    report = await _restoreEngine.RunRestoreSelectedFilesAsync(fnProvider, SelectedPackage.NasFolderUnc, LocalRestoreTarget, targetFiles, ConflictResolution.Overwrite);
+                    var policy = ConflictPolicyIndex switch
+                    {
+                        1 => ConflictResolution.Overwrite,
+                        2 => ConflictResolution.RenameWithTimestamp,
+                        _ => ConflictResolution.SkipExisting
+                    };
+                    report = await _restoreEngine.RunRestoreSelectedFilesAsync(fnProvider, SelectedPackage.NasFolderUnc, LocalRestoreTarget, targetFiles, policy);
                 }
                 else
                 {
-                    report = new RestoreProgressReport();
+                    throw new NotSupportedException("当前存储类型尚不支持重试，请重新执行恢复。");
                 }
 
                 UIThreadHelper.RunOnUIThread(() =>

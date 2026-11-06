@@ -43,6 +43,9 @@ namespace FNSyncPlus.Core.Services
         [JsonIgnore]
         public string? CustomConfigPath { get; set; } = null;
 
+        [JsonIgnore]
+        public string? IsolatedCredentialPath { get; set; }
+
         public static AppSettings CreateInMemory() => new AppSettings { IsInMemoryOnly = true };
         public static AppSettings CreateForTest(string testFilePath) => new AppSettings { CustomConfigPath = testFilePath };
 
@@ -66,55 +69,38 @@ namespace FNSyncPlus.Core.Services
 
         public static AppSettings Load()
         {
-            try
-            {
-                string path = GetConfigFilePath();
-                if (File.Exists(path))
-                {
-                    string json = File.ReadAllText(path);
-                    var settings = FromJson(json);
-                    
-                    // 清理历史遗留的测试/伪造任务 (如 task_fail_, task_partial_, task_dup_, Fake 等)
-                    bool cleaned = PurgeTestArtifacts(settings);
-                    if (MigrateLegacySettings(settings) || cleaned)
-                    {
-                        settings.Save();
-                    }
-                    return settings;
-                }
-            }
-            catch
-            {
-                // 加载失败时使用默认配置
-            }
-            return new AppSettings();
+            var settings = LoadFromPath(GetConfigFilePath());
+            settings.CustomConfigPath = null;
+            return settings;
         }
 
-        /// <summary>
-        /// 严格清理真实配置中意外混入的自动化测试伪造任务
-        /// </summary>
-        public static bool PurgeTestArtifacts(AppSettings settings)
+        public static AppSettings LoadFromPath(string path)
         {
-            if (settings == null || settings.Tasks == null) return false;
-            int initialCount = settings.Tasks.Count;
-            settings.Tasks.RemoveAll(t => 
-                (t.TaskId != null && (t.TaskId.StartsWith("task_fail_") || 
-                                     t.TaskId.StartsWith("task_partial_") || 
-                                     t.TaskId.StartsWith("task_success") || 
-                                     t.TaskId.StartsWith("task_dup_") || 
-                                     t.TaskId.StartsWith("task_dummy_") ||
-                                     t.TaskId.StartsWith("task_test_"))) ||
-                (t.SourceFolder != null && (t.SourceFolder.Contains("Fake", StringComparison.OrdinalIgnoreCase) ||
-                                           t.SourceFolder.Contains(@"C:\App1", StringComparison.OrdinalIgnoreCase) ||
-                                           t.SourceFolder.Contains(@"D:\WorkSpace\Projects\App1", StringComparison.OrdinalIgnoreCase))) ||
-                (t.TaskName != null && (t.TaskName.Contains("失败测试") || t.TaskName.Contains("成功测试"))));
-
-            return settings.Tasks.Count != initialCount;
+            if (!File.Exists(path))
+            {
+                return new AppSettings { CustomConfigPath = path };
+            }
+            try
+            {
+                var settings = FromJson(File.ReadAllText(path));
+                settings.CustomConfigPath = path;
+                if (MigrateLegacySettings(settings))
+                {
+                    File.Copy(path, path + ".pre-migration-" + Guid.NewGuid().ToString("N") + ".bak");
+                    settings.Save();
+                }
+                return settings;
+            }
+            catch (Exception ex)
+            {
+                throw new IOException($"无法读取或迁移配置文件，原文件未自动重置：{path}", ex);
+            }
         }
 
         public static AppSettings FromJson(string json)
         {
-            var settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? new AppSettings();
+            var settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? throw new JsonException("配置为空");
+            if (settings.Tasks == null) throw new JsonException("任务列表无效");
             return settings;
         }
 
@@ -156,21 +142,20 @@ namespace FNSyncPlus.Core.Services
         {
             if (IsInMemoryOnly) return; // 单元测试或沙盒模式绝不写入磁盘配置文件
 
+            string path = !string.IsNullOrEmpty(CustomConfigPath) ? CustomConfigPath : GetConfigFilePath();
+            string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
             {
-                string path = !string.IsNullOrEmpty(CustomConfigPath) ? CustomConfigPath : GetConfigFilePath();
-                string json = JsonSerializer.Serialize(this, JsonOptions);
-                File.WriteAllText(path, json);
-                
-                if (string.IsNullOrEmpty(CustomConfigPath))
-                {
-                    ApplyStartupRegistry(StartWithWindows);
-                }
+                File.WriteAllText(temp, JsonSerializer.Serialize(this, JsonOptions));
+                if (File.Exists(path)) File.Replace(temp, path, path + ".bak");
+                else File.Move(temp, path);
             }
-            catch
+            finally
             {
-                // 保存失败不崩溃
+                if (File.Exists(temp)) File.Delete(temp);
             }
+            if (string.IsNullOrEmpty(CustomConfigPath))
+                ApplyStartupRegistry(StartWithWindows);
         }
 
         public static void ApplyStartupRegistry(bool enable)

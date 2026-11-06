@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -115,31 +117,22 @@ namespace FNSyncPlus.Core.Services
                 string backupPath = Path.Combine(metaDir, Manifest.IsolatedManifestFileName + ".bak");
 
                 // 1. 优先从隔离元数据目录 .fnsync/manifest.json 读取
-                if (File.Exists(isolatedPath))
+                if (File.Exists(isolatedPath) || File.Exists(backupPath))
                 {
-                    try
+                    Exception? lastError = null;
+                    foreach (string candidate in new[] { isolatedPath, backupPath })
                     {
-                        string json = await File.ReadAllTextAsync(isolatedPath, cancellationToken).ConfigureAwait(false);
-                        var manifest = JsonSerializer.Deserialize<Manifest>(json, JsonOptions);
-                        if (manifest != null && manifest.Files != null)
+                        if (!File.Exists(candidate)) continue;
+                        try
                         {
+                            string json = await File.ReadAllTextAsync(candidate, cancellationToken).ConfigureAwait(false);
+                            var manifest = ParseManifest(Encoding.UTF8.GetBytes(json));
                             return manifest;
                         }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex) { lastError = ex; }
                     }
-                    catch
-                    {
-                        // 主清单文件可能在异常断电时损坏，尝试读取备用清单 .bak
-                        if (File.Exists(backupPath))
-                        {
-                            try
-                            {
-                                string bakJson = await File.ReadAllTextAsync(backupPath, cancellationToken).ConfigureAwait(false);
-                                var bakManifest = JsonSerializer.Deserialize<Manifest>(bakJson, JsonOptions);
-                                if (bakManifest != null) return bakManifest;
-                            }
-                            catch { }
-                        }
-                    }
+                    throw new InvalidDataException("已有清单及其备份均无法读取，拒绝创建空清单", lastError);
                 }
 
                 // 2. 兼容并自动迁移 v1/v2 位于备份根目录下的 __FN_SYNC_MANIFEST__.json
@@ -149,17 +142,17 @@ namespace FNSyncPlus.Core.Services
                     try
                     {
                         string legacyJson = await File.ReadAllTextAsync(legacyRootPath, cancellationToken).ConfigureAwait(false);
-                        var manifest = JsonSerializer.Deserialize<Manifest>(legacyJson, JsonOptions);
+                        var manifest = ParseManifest(Encoding.UTF8.GetBytes(legacyJson));
                         if (manifest != null)
                         {
-                            manifest.Note = "已自动从旧版本根目录清单迁移到 .fnsync 专用隔离空间";
+                            manifest.Note = "已读取旧版本根目录清单";
                             manifest.Version = Manifest.CurrentVersion;
-                            // 迁移完成后尝试保存到新目录
-                            _ = SaveManifestAtomicInternalAsync(targetRootDirectory, manifest, cancellationToken);
                             return manifest;
                         }
+                        throw new InvalidDataException("旧版清单为空");
                     }
-                    catch { }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex) { throw new InvalidDataException("无法读取旧版清单，拒绝创建空清单", ex); }
                 }
 
                 // 3. 兼容旧版 Go 清单 __FN_ORIGINAL_NAMES__.json
@@ -170,10 +163,10 @@ namespace FNSyncPlus.Core.Services
                     {
                         string legacyJson = await File.ReadAllTextAsync(legacyGoPath, cancellationToken).ConfigureAwait(false);
                         var manifest = ParseLegacyGoManifest(legacyJson);
-                        _ = SaveManifestAtomicInternalAsync(targetRootDirectory, manifest, cancellationToken);
                         return manifest;
                     }
-                    catch { }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex) { throw new InvalidDataException("无法读取旧版 Go 清单，拒绝创建空清单", ex); }
                 }
 
                 // 4. 全新备份，返回初始清单对象
@@ -226,60 +219,31 @@ namespace FNSyncPlus.Core.Services
             {
                 string cleanFolder = targetFolder.Trim().TrimEnd('/', '\\').Replace('\\', '/');
                 string manifestRelPath = string.IsNullOrEmpty(cleanFolder) ? ".fnsync/manifest.json" : $"{cleanFolder}/.fnsync/manifest.json";
+                string metaDir = string.IsNullOrEmpty(cleanFolder) ? ".fnsync" : $"{cleanFolder}/.fnsync";
+                if (!await storageProvider.ExistsAsync(metaDir, cancellationToken).ConfigureAwait(false))
+                    return new Manifest { Version = Manifest.CurrentVersion, TargetRoot = targetFolder, UpdatedAt = DateTimeOffset.UtcNow };
 
-                if (await storageProvider.ExistsAsync(manifestRelPath, cancellationToken).ConfigureAwait(false))
+                string bakRelPath = manifestRelPath + ".bak";
+                bool hasMain = await storageProvider.ExistsAsync(manifestRelPath, cancellationToken).ConfigureAwait(false);
+                bool hasBackup = await storageProvider.ExistsAsync(bakRelPath, cancellationToken).ConfigureAwait(false);
+                if (hasMain || hasBackup)
                 {
-                    try
+                    Exception? lastError = null;
+                    foreach (string candidate in new[] { manifestRelPath, bakRelPath })
                     {
-                        using var stream = await storageProvider.OpenReadAsync(manifestRelPath, cancellationToken).ConfigureAwait(false);
-                        var manifest = await JsonSerializer.DeserializeAsync<Manifest>(stream, JsonOptions, cancellationToken).ConfigureAwait(false);
-                        if (manifest != null && manifest.Files != null)
+                        if (candidate == manifestRelPath ? !hasMain : !hasBackup) continue;
+                        try
                         {
-                            // 异步缓存至本地离线副本
-                            try
-                            {
-                                string cacheFile = GetLocalCachePath(targetFolder);
-                                string cacheDir = Path.GetDirectoryName(cacheFile)!;
-                                if (!Directory.Exists(cacheDir)) Directory.CreateDirectory(cacheDir);
-                                File.WriteAllText(cacheFile, JsonSerializer.Serialize(manifest, JsonOptions), Encoding.UTF8);
-                            }
-                            catch { }
-
+                            using var stream = await storageProvider.OpenReadAsync(candidate, cancellationToken).ConfigureAwait(false);
+                            using var buffer = new MemoryStream();
+                            await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+                            var manifest = ParseManifest(buffer.ToArray());
                             return manifest;
                         }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex) { lastError = ex; }
                     }
-                    catch
-                    {
-                        // 若主清单读取异常，尝试读取 .bak 备份清单
-                        string bakRelPath = manifestRelPath + ".bak";
-                        if (await storageProvider.ExistsAsync(bakRelPath, cancellationToken).ConfigureAwait(false))
-                        {
-                            try
-                            {
-                                using var bakStream = await storageProvider.OpenReadAsync(bakRelPath, cancellationToken).ConfigureAwait(false);
-                                var bakManifest = await JsonSerializer.DeserializeAsync<Manifest>(bakStream, JsonOptions, cancellationToken).ConfigureAwait(false);
-                                if (bakManifest != null) return bakManifest;
-                            }
-                            catch { }
-                        }
-                    }
-                }
-
-                // 远端尚未建立或网络不可达时，优先读取最近一次本地缓存
-                string fallbackCache = GetLocalCachePath(targetFolder);
-                if (File.Exists(fallbackCache))
-                {
-                    try
-                    {
-                        var cached = JsonSerializer.Deserialize<Manifest>(File.ReadAllText(fallbackCache, Encoding.UTF8), JsonOptions);
-                        if (cached != null)
-                        {
-                            cached.IsFromCache = true;
-                            cached.CachedAt = File.GetLastWriteTime(fallbackCache);
-                            return cached;
-                        }
-                    }
-                    catch { }
+                    throw new InvalidDataException("已有远端清单及其备份均无法读取，拒绝创建空清单", lastError);
                 }
 
                 // 远端尚未建立清单，初始化并返回全新清单
@@ -316,44 +280,63 @@ namespace FNSyncPlus.Core.Services
                 manifest.UpdatedAt = DateTimeOffset.UtcNow;
                 string cleanFolder = targetFolder.Trim().TrimEnd('/', '\\').Replace('\\', '/');
                 string metaDir = string.IsNullOrEmpty(cleanFolder) ? ".fnsync" : $"{cleanFolder}/.fnsync";
-                await storageProvider.CreateDirectoryAsync(metaDir, cancellationToken).ConfigureAwait(false);
+                var directoryResult = await storageProvider.CreateDirectoryAsync(metaDir, cancellationToken).ConfigureAwait(false);
+                if (!directoryResult.Success) throw new IOException($"无法创建清单目录: {directoryResult.ErrorMessage}");
 
                 byte[] manifestBytes = JsonSerializer.SerializeToUtf8Bytes(manifest, JsonOptions);
 
-                // 1. 上传主清单
                 string manifestPath = $"{metaDir}/manifest.json";
-                using (var ms = new MemoryStream(manifestBytes))
+                string bakPath = manifestPath + ".bak";
+                // 候选文件使用唯一名称，写入后重新读取验证；旧主清单此时仍未改变。
+                string candidatePath = $"{metaDir}/manifest-{Guid.NewGuid():N}.candidate";
+                await UploadAndVerifyAsync(storageProvider, candidatePath, manifestBytes, false, cancellationToken).ConfigureAwait(false);
+
+                if (await storageProvider.ExistsAsync(manifestPath, cancellationToken).ConfigureAwait(false))
                 {
-                    var res = await storageProvider.UploadFileAsync(manifestPath, ms, manifestBytes.Length, DateTime.UtcNow, overwrite: true, null, cancellationToken).ConfigureAwait(false);
-                    if (!res.Success)
+                    byte[] previous;
+                    using (var old = await storageProvider.OpenReadAsync(manifestPath, cancellationToken).ConfigureAwait(false))
+                    using (var buffer = new MemoryStream())
                     {
-                        throw new IOException($"远端清单元数据持久化失败: {res.ErrorMessage}");
+                        await old.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+                        previous = buffer.ToArray();
                     }
+                    // 不允许以损坏的主清单覆盖可能唯一有效的备份。
+                    try
+                    {
+                        _ = ParseManifest(previous);
+                    }
+                    catch (JsonException ex) { throw new InvalidDataException("旧主清单损坏，拒绝覆盖备份", ex); }
+                    await UploadAndVerifyAsync(storageProvider, bakPath, previous, true, cancellationToken).ConfigureAwait(false);
                 }
+                await UploadAndVerifyAsync(storageProvider, manifestPath, manifestBytes, true, cancellationToken).ConfigureAwait(false);
 
-                // 2. 异步保留一份 .bak 副本以防灾难性损坏
-                try
-                {
-                    string bakPath = $"{metaDir}/manifest.json.bak";
-                    using var bakMs = new MemoryStream(manifestBytes);
-                    await storageProvider.UploadFileAsync(bakPath, bakMs, manifestBytes.Length, DateTime.UtcNow, overwrite: true, null, cancellationToken).ConfigureAwait(false);
-                }
-                catch { }
-
-                // 3. 同时更新本地离线缓存副本
-                try
-                {
-                    string cacheFile = GetLocalCachePath(targetFolder);
-                    string cacheDir = Path.GetDirectoryName(cacheFile)!;
-                    if (!Directory.Exists(cacheDir)) Directory.CreateDirectory(cacheDir);
-                    File.WriteAllBytes(cacheFile, manifestBytes);
-                }
-                catch { }
             }
             finally
             {
                 _memoryLock.Release();
             }
+        }
+
+        private static async Task UploadAndVerifyAsync(INasStorageProvider provider, string path, byte[] bytes, bool overwrite, CancellationToken token)
+        {
+            using var source = new MemoryStream(bytes, writable: false);
+            var result = await provider.UploadFileAsync(path, source, bytes.Length, DateTime.UtcNow, overwrite, null, token).ConfigureAwait(false);
+            if (!result.Success) throw new IOException($"远端清单写入失败: {result.ErrorMessage}");
+            using var readback = await provider.OpenReadAsync(path, token).ConfigureAwait(false);
+            byte[] actual = await SHA256.HashDataAsync(readback, token).ConfigureAwait(false);
+            if (!CryptographicOperations.FixedTimeEquals(actual, SHA256.HashData(bytes)))
+                throw new InvalidDataException($"远端清单回读校验失败: {path}");
+        }
+
+        private static Manifest ParseManifest(byte[] bytes)
+        {
+            using var document = JsonDocument.Parse(bytes);
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.EnumerateObject().Any(p =>
+                    p.Name.Equals("files", StringComparison.OrdinalIgnoreCase) && p.Value.ValueKind == JsonValueKind.Array))
+                throw new InvalidDataException("清单缺少有效的 files 数组");
+            var manifest = JsonSerializer.Deserialize<Manifest>(bytes, JsonOptions);
+            return manifest?.Files != null ? manifest : throw new InvalidDataException("清单文件列表无效");
         }
 
         private async Task SaveManifestAtomicInternalAsync(string targetRootDirectory, Manifest manifest, CancellationToken cancellationToken)
@@ -381,14 +364,8 @@ namespace FNSyncPlus.Core.Services
             // 2. 备份原清单
             if (File.Exists(currentPath))
             {
-                try
-                {
-                    File.Copy(currentPath, bakPath, overwrite: true);
-                }
-                catch
-                {
-                    // 备份失败不阻塞主流程
-                }
+                _ = ParseManifest(await File.ReadAllBytesAsync(currentPath, cancellationToken).ConfigureAwait(false));
+                File.Copy(currentPath, bakPath, overwrite: true);
             }
 
             // 3. 原子移动覆盖
@@ -451,10 +428,7 @@ namespace FNSyncPlus.Core.Services
                     }
                 }
             }
-            catch (Exception ex)
-            {
-                manifest.Note = $"解析旧清单出现警告: {ex.Message}";
-            }
+            catch (Exception ex) { throw new InvalidDataException("旧版 Go 清单格式无效", ex); }
 
             return manifest;
         }

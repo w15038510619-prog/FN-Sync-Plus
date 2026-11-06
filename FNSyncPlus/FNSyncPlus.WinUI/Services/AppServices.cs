@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using FNSyncPlus.Core.Services;
 using FNSyncPlus.WinUI.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
@@ -8,6 +9,7 @@ namespace FNSyncPlus.WinUI.Services
     public static class AppServices
     {
         private static IServiceProvider? _serviceProvider;
+        public static bool IsIsolatedTestSession { get; private set; }
 
         public static IServiceProvider Provider => _serviceProvider 
             ?? throw new InvalidOperationException("AppServices has not been initialized.");
@@ -17,7 +19,17 @@ namespace FNSyncPlus.WinUI.Services
             var services = new ServiceCollection();
 
             // 1. Core Services & Data Configuration
-            var settings = AppSettings.Load();
+            IsIsolatedTestSession = Array.Exists(Environment.GetCommandLineArgs(),
+                arg => arg.Equals("--isolated-test-session", StringComparison.Ordinal));
+            var settings = IsIsolatedTestSession
+                ? AppSettings.CreateInMemory()
+                : AppSettings.Load();
+            if (IsIsolatedTestSession)
+            {
+                settings.IsolatedCredentialPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "FNSyncPlus", "test-session", "credentials.dat");
+                settings.RememberCredentials = File.Exists(settings.IsolatedCredentialPath);
+            }
             services.AddSingleton(settings);
 
             var smbService = new SmbAuthService();

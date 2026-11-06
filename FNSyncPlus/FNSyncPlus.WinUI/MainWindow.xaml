@@ -28,7 +28,7 @@
                 <Border Width="24" Height="24" Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="6">
                     <FontIcon Glyph="&#xE895;" FontSize="12" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
                 </Border>
-                <TextBlock Text="飞牛同步增强版 v0.4.0-beta" FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                <TextBlock x:Name="AppTitleText" Text="飞牛同步增强版 v0.4.0-beta" FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
             </StackPanel>
 
             <!-- Center: Connected NAS Status Pill Button -->

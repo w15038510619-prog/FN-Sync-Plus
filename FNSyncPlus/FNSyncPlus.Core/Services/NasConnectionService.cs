@@ -347,11 +347,11 @@ namespace FNSyncPlus.Core.Services
                         _settings.RememberCredentials = rememberCredentials;
                         _settings.Save();
 
-                        if (rememberCredentials)
+                        if (rememberCredentials && (!_settings.IsInMemoryOnly || !string.IsNullOrEmpty(_settings.IsolatedCredentialPath)))
                         {
-                            SmbAuthService.SaveCredentials(ServerAddress, Username, password);
+                            SmbAuthService.SaveCredentials(ServerAddress, Username, password, _settings.IsolatedCredentialPath);
                         }
-                        else
+                        else if (!_settings.IsInMemoryOnly)
                         {
                             SmbAuthService.ClearSavedCredentials();
                         }
@@ -385,11 +385,11 @@ namespace FNSyncPlus.Core.Services
                         _settings.RememberCredentials = rememberCredentials;
                         _settings.Save();
 
-                        if (rememberCredentials)
+                        if (rememberCredentials && (!_settings.IsInMemoryOnly || !string.IsNullOrEmpty(_settings.IsolatedCredentialPath)))
                         {
-                            SmbAuthService.SaveCredentials(ServerAddress, Username, password);
+                            SmbAuthService.SaveCredentials(ServerAddress, Username, password, _settings.IsolatedCredentialPath);
                         }
-                        else
+                        else if (!_settings.IsInMemoryOnly)
                         {
                             SmbAuthService.ClearSavedCredentials();
                         }

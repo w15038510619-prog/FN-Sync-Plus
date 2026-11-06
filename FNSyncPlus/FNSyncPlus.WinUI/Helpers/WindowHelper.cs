@@ -67,15 +67,8 @@ namespace FNSyncPlus.WinUI.Helpers
         {
             try
             {
-                var folderPicker = new Windows.Storage.Pickers.FolderPicker();
-                folderPicker.SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.Desktop;
-                folderPicker.FileTypeFilter.Add("*");
-
-                if (hwnd != IntPtr.Zero)
-                {
-                    InitializeWithWindow.Initialize(folderPicker, hwnd);
-                }
-
+                if (hwnd == IntPtr.Zero) throw new InvalidOperationException("无法确定文件夹选择窗口的宿主。");
+                var folderPicker = new Microsoft.Windows.Storage.Pickers.FolderPicker(Win32Interop.GetWindowIdFromWindow(hwnd));
                 var folder = await folderPicker.PickSingleFolderAsync();
                 return folder?.Path;
             }

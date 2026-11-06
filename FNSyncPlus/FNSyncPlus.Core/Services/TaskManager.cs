@@ -21,6 +21,7 @@ namespace FNSyncPlus.Core.Services
         private readonly LongNameEngine _longNameEngine;
         private readonly ManifestManager _manifestManager;
         private readonly SmbAuthService _smbService;
+        private readonly LogService _logService;
 
         private readonly ConcurrentQueue<string> _taskQueue = new();
         private readonly ConcurrentDictionary<string, CancellationTokenSource> _runningCts = new();
@@ -53,8 +54,9 @@ namespace FNSyncPlus.Core.Services
 
         public TaskManager(
             AppSettings settings,
-            SmbAuthService smbService)
-            : this(settings, new LongNameEngine(), new ManifestManager(), smbService)
+            SmbAuthService smbService,
+            LogService? logService = null)
+            : this(settings, new LongNameEngine(), new ManifestManager(), smbService, logService)
         {
         }
 
@@ -62,12 +64,14 @@ namespace FNSyncPlus.Core.Services
             AppSettings settings,
             LongNameEngine longNameEngine,
             ManifestManager manifestManager,
-            SmbAuthService smbService)
+            SmbAuthService smbService,
+            LogService? logService = null)
         {
             _settings = settings;
             _longNameEngine = longNameEngine;
             _manifestManager = manifestManager;
             _smbService = smbService;
+            _logService = logService ?? LogService.Default;
 
             int maxConcurrent = Math.Max(1, _settings.MaxConcurrentSyncs);
             _concurrencySemaphore = new SemaphoreSlim(maxConcurrent, maxConcurrent);
@@ -365,10 +369,33 @@ namespace FNSyncPlus.Core.Services
                 return;
             }
 
+            // The active fnOS connection must never redirect a local/SMB task into personal storage.
+            var provider = task.ProviderType == StorageProviderType.FnOsPersonal ? StorageProviderSupplier?.Invoke() : null;
+            if (task.ProviderType == StorageProviderType.FnOsPersonal &&
+                (!_isNasOnline || provider == null || provider.ProviderType != StorageProviderType.FnOsPersonal || !provider.IsAuthenticated))
+            {
+                task.State = TaskSyncState.OfflineWaiting;
+                task.LastSyncStatus = "NAS 未连接，等待重新连接";
+                task.LastError = "飞牛个人空间未连接，本次未执行备份";
+                AppendTaskLog(task, "WARN", task.LastError);
+                _settings.Save();
+                TaskStateChanged?.Invoke(task);
+                return;
+            }
+            if (provider is FnOsPersonalStorageProvider fn && !string.IsNullOrWhiteSpace(task.NasUsername) &&
+                !string.Equals(task.NasUsername, fn.CurrentUsername, StringComparison.OrdinalIgnoreCase))
+            {
+                task.State = TaskSyncState.ConfigurationError;
+                task.LastSyncStatus = "NAS 账号不匹配";
+                task.LastError = "当前连接的账号与任务账号不一致，本次未执行备份";
+                AppendTaskLog(task, "ERROR", task.LastError);
+                _settings.Save();
+                TaskStateChanged?.Invoke(task);
+                return;
+            }
+
             var taskCts = CancellationTokenSource.CreateLinkedTokenSource(managerToken);
             _runningCts[task.TaskId] = taskCts;
-
-            var provider = StorageProviderSupplier?.Invoke();
 
             // 每个任务独立实例化 LongNameEngine 与 ManifestManager，彻底隔离多任务字典与临时映射
             // 根据任务实际的存储提供程序动态配置安全阈值 (fnOS 个人空间上传接口安全阈值 251 字节，SMB 共享保持 255 字节)
@@ -428,10 +455,10 @@ namespace FNSyncPlus.Core.Services
                     }
                     else
                     {
-                        task.CurrentFile = $"部分失败 ({report.UploadedFiles} 个成功, {report.FailedFiles} 个失败)";
-                        task.LastSyncStatus = $"部分失败 ({report.UploadedFiles} 成功, {report.FailedFiles} 失败)";
+                        task.CurrentFile = $"部分失败 ({report.UploadedFiles} 个已上传, {report.FailedFiles} 个失败；未提交清单)";
+                        task.LastSyncStatus = $"部分失败 ({report.UploadedFiles} 已上传, {report.FailedFiles} 失败；未提交清单)";
                     }
-                    task.LastError = $"有 {report.FailedFiles} 个文件同步失败，可在任务详情查看完整诊断日志";
+                    task.LastError = $"有 {report.FailedFiles} 个文件同步失败，未提交新清单；可在任务详情查看完整诊断日志";
 
                     task.CurrentProgress = report.TotalFiles > 0
                         ? (double)(report.UploadedFiles + report.UnchangedFiles) / report.TotalFiles * 100.0
@@ -439,7 +466,7 @@ namespace FNSyncPlus.Core.Services
 
                     foreach (var item in syncEngine.FailedItems)
                     {
-                        LogService.Default.LogTask(
+                        _logService.LogTask(
                             taskId: task.TaskId,
                             level: "ERROR",
                             stage: "UPLOAD",
@@ -728,7 +755,7 @@ namespace FNSyncPlus.Core.Services
             // 1. 存入持久化日志服务 (磁盘文件 + 内存)
             try
             {
-                LogService.Default.LogTask(new TaskLogEntry
+                _logService.LogTask(new TaskLogEntry
                 {
                     TaskId = task.TaskId,
                     Level = level,
@@ -763,7 +790,7 @@ namespace FNSyncPlus.Core.Services
             // 优先从磁盘持久化日志系统读取历史日志，确保重启后日志不丢失
             try
             {
-                var persistentLogs = LogService.Default.GetTaskLogs(taskId);
+                var persistentLogs = _logService.GetTaskLogs(taskId);
                 if (persistentLogs != null && persistentLogs.Count > 0)
                 {
                     return persistentLogs.Select(p => p.FormattedDisplay).ToList();

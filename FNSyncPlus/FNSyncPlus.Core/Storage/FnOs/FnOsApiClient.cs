@@ -581,11 +581,6 @@ namespace FNSyncPlus.Core.Storage.FnOs
             };
 
             string responseJson = await SendSignedRpcAsync("file.checkUpload", payload, ct).ConfigureAwait(false);
-            if (responseJson.Contains("fail") || responseJson.Contains("err") || remotePath.Contains("25"))
-            {
-                Console.WriteLine($"[DEBUG checkUpload] path: {canonicalPath}, resp: {responseJson}");
-            }
-
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             using var doc = JsonDocument.Parse(responseJson);
             var resp = new FnOsCheckUploadResponse
@@ -671,7 +666,6 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 var checkRes = await CheckUploadAsync(canonicalPath, fileSize, mtim, ct).ConfigureAwait(false);
                 if (checkRes.Result == "fail" || (checkRes.ErrNo.HasValue && checkRes.ErrNo.Value != 0))
                 {
-                    Console.WriteLine($"[DEBUG checkUpload Failed] errno: {checkRes.ErrNo}, msg: {checkRes.ErrMsg}, path: {canonicalPath}");
                     if (checkRes.ErrNo == 4104)
                     {
                         return FnOsUploadResult.Fail(499, "fail", 4104, "Path Is Too Long", $"checkUpload 预检失败：文件名超长 (errno: 4104, errmsg: {checkRes.ErrMsg ?? "Path Is Too Long"})");
@@ -772,7 +766,6 @@ namespace FNSyncPlus.Core.Storage.FnOs
                     errMsg ??= "Path Is Too Long";
                 }
 
-                Console.WriteLine($"[DEBUG Upload Failed] HTTP {httpCode} {resp.ReasonPhrase}: {errContent}, uploadPath: {uploadPath}");
                 return FnOsUploadResult.Fail(httpCode, result, errNo, errMsg, $"HTTP {httpCode} {resp.ReasonPhrase}: {errContent}");
             }
 
@@ -789,7 +782,6 @@ namespace FNSyncPlus.Core.Storage.FnOs
 
                     if (resStr == "fail" || (errNo.HasValue && errNo.Value != 0))
                     {
-                        Console.WriteLine($"[DEBUG Upload Body Failed] {respBody}, uploadPath: {uploadPath}");
                         return FnOsUploadResult.Fail(200, resStr ?? "fail", errNo, errMsg, respBody);
                     }
                 }
@@ -871,7 +863,6 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 ["moveToTrashbin"] = moveToTrash
             };
             string responseJson = await SendSignedRpcAsync("file.rm", payload, ct).ConfigureAwait(false);
-            Console.WriteLine($"[DEBUG file.rm] payload: {canonicalPath}, resp: {responseJson}");
             return JsonSerializer.Deserialize<FnOsGenericRpcResponse>(responseJson)
                    ?? new FnOsGenericRpcResponse { Result = "failed" };
         }
