@@ -335,10 +335,7 @@ namespace FNSyncPlus.Core.Services
             Log("INFO", "正在读取 NAS 备份元数据清单 (.fnsync/manifest.json)...");
             var manifest = await _manifestManager.LoadManifestAsync(nasBackupFolder, cancellationToken).ConfigureAwait(false);
 
-            if (manifest.Files.Count == 0)
-            {
-                Log("WARN", "在 NAS 备份目录中未发现清单文件或记录为空，将尝试直接按物理文件名恢复。");
-            }
+            if (manifest.Files.Count == 0) Log("WARN", "活动清单为空，没有文件需要恢复。");
 
             // 2. 先行恢复目录结构（包含空目录）
             int restoredDirsCount = 0;
@@ -359,7 +356,7 @@ namespace FNSyncPlus.Core.Services
                     {
                         try
                         {
-                            Directory.CreateDirectory(dirTarget);
+                            EnsureSafeRestoreDirectory(longLocal, dirTarget);
                             restoredDirsCount++;
                         }
                         catch (Exception ex)
@@ -378,30 +375,13 @@ namespace FNSyncPlus.Core.Services
                 storedToEntry[PathHelper.NormalizeRelPath(f.StoredRel)] = f;
             }
 
-            // 3. 扫描 NAS 备份目录中的物理文件，严格排除 .fnsync 专用目录及其他元数据文件
+            // 3. 只恢复活动清单中的文件，不能把遗留物理文件当作当前版本。
             var nasFiles = new List<FileInfo>();
-            var nasDi = new DirectoryInfo(longNas);
-            foreach (var fi in nasDi.EnumerateFiles("*", SearchOption.AllDirectories))
+            foreach (var file in manifest.Files)
             {
-                string relToNas = PathHelper.NormalizeRelPath(Path.GetRelativePath(longNas, fi.FullName));
-                if (relToNas.StartsWith(Manifest.MetadataDirName + "/", StringComparison.OrdinalIgnoreCase) ||
-                    relToNas.Equals(Manifest.MetadataDirName, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                string fn = fi.Name;
-                if (fn.Equals(Manifest.LegacyManifestFileName, StringComparison.OrdinalIgnoreCase) ||
-                    fn.Equals(Manifest.LegacyGoManifestFileName, StringComparison.OrdinalIgnoreCase) ||
-                    fn.EndsWith(".bak", StringComparison.OrdinalIgnoreCase) ||
-                    fn.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) ||
-                    fn.Contains(".fn_part_") ||
-                    fn.Contains(".restore_tmp_") ||
-                    fn.StartsWith(".fnsync_rst_"))
-                {
-                    continue;
-                }
-                nasFiles.Add(fi);
+                if (!PathHelper.IsSafeRelativePath(file.StoredRel))
+                    throw new InvalidDataException($"清单包含不安全的存储路径: {file.StoredRel}");
+                nasFiles.Add(new FileInfo(Path.Combine(longNas, file.StoredRel.Replace('/', '\\'))));
             }
 
             report.TotalFiles = nasFiles.Count;
@@ -472,7 +452,7 @@ namespace FNSyncPlus.Core.Services
                         string dir = Path.GetDirectoryName(targetLocalFull)!;
                         string stem = Path.GetFileNameWithoutExtension(targetLocalFull);
                         string ext = Path.GetExtension(targetLocalFull);
-                        string timestamped = $"{stem}_恢复_{DateTime.Now:yyyyMMdd_HHmmss}{ext}";
+                        string timestamped = $"{stem}_恢复_{Guid.NewGuid():N}{ext}";
                         targetLocalFull = Path.Combine(dir, timestamped);
                     }
                 }
@@ -482,10 +462,8 @@ namespace FNSyncPlus.Core.Services
 
                 try
                 {
-                    if (!Directory.Exists(targetDir))
-                    {
-                        Directory.CreateDirectory(targetDir);
-                    }
+                    EnsureSafeRestoreDirectory(longLocal, targetDir);
+                    if (string.IsNullOrWhiteSpace(expectedSha256)) throw new IOException("清单缺少 SHA-256，无法验证恢复内容");
 
                     // 1. 先恢复到临时文件并实时计算 SHA-256
                     string computedHash = "";
@@ -539,7 +517,7 @@ namespace FNSyncPlus.Core.Services
                     }
 
                     // 4. 原子移动到最终目标位置
-                    File.Move(tempRestorePath, targetLocalFull, overwrite: true);
+                    File.Move(tempRestorePath, targetLocalFull, overwrite: conflictResolution == ConflictResolution.Overwrite);
 
                     restoredCount++;
                     report.RestoredFiles = restoredCount;
@@ -600,12 +578,12 @@ namespace FNSyncPlus.Core.Services
             foreach (var dir in manifest.Directories)
             {
                 string dirRel = PathHelper.NormalizeRelPath(dir.OriginalRel);
-                if (PathHelper.IsSafeRelativePath(dirRel))
+                if (PathHelper.IsSafeRelativePath(dir.OriginalRel))
                 {
                     string targetDir = Path.Combine(longLocal, dirRel.Replace('/', '\\'));
                     if (!Directory.Exists(targetDir))
                     {
-                        Directory.CreateDirectory(targetDir);
+                        EnsureSafeRestoreDirectory(longLocal, targetDir);
                         report.RestoredDirectories++;
                     }
                 }
@@ -619,7 +597,7 @@ namespace FNSyncPlus.Core.Services
                 report.CurrentFile = fileEntry.OriginalRel;
 
                 string targetRel = PathHelper.NormalizeRelPath(fileEntry.OriginalRel);
-                if (!PathHelper.IsSafeRelativePath(targetRel))
+                if (!PathHelper.IsSafeRelativePath(fileEntry.OriginalRel) || !PathHelper.IsSafeRelativePath(fileEntry.StoredRel))
                 {
                     report.FailedFiles++;
                     report.FileResults.Add(new RestoreFileResult
@@ -655,18 +633,15 @@ namespace FNSyncPlus.Core.Services
                     {
                         string stem = Path.GetFileNameWithoutExtension(targetLocalFull);
                         string ext = Path.GetExtension(targetLocalFull);
-                        targetLocalFull = Path.Combine(targetDir, $"{stem}_恢复_{DateTime.Now:yyyyMMdd_HHmmss}{ext}");
+                        targetLocalFull = Path.Combine(targetDir, $"{stem}_恢复_{Guid.NewGuid():N}{ext}");
                     }
-                }
-
-                if (!Directory.Exists(targetDir))
-                {
-                    Directory.CreateDirectory(targetDir);
                 }
 
                 string tempRestorePath = Path.Combine(targetDir, $".fnsync_rst_{Guid.NewGuid():N}.tmp");
                 try
                 {
+                    EnsureSafeRestoreDirectory(longLocal, targetDir);
+                    if (string.IsNullOrWhiteSpace(fileEntry.Sha256)) throw new IOException("清单缺少 SHA-256，无法验证恢复内容");
                     string remoteRel = string.IsNullOrEmpty(nasBackupFolderRel)
                         ? fileEntry.StoredRel
                         : $"{nasBackupFolderRel.TrimEnd('/', '\\')}/{fileEntry.StoredRel}";
@@ -717,7 +692,7 @@ namespace FNSyncPlus.Core.Services
                         File.SetLastWriteTimeUtc(tempRestorePath, new DateTime(fileEntry.ModTimeUtcTicks, DateTimeKind.Utc));
                     }
 
-                    File.Move(tempRestorePath, targetLocalFull, overwrite: true);
+                    File.Move(tempRestorePath, targetLocalFull, overwrite: conflictResolution == ConflictResolution.Overwrite);
                     report.RestoredFiles++;
                     if (fileEntry.IsLongName) report.LongNameRestoredFiles++;
 
@@ -771,7 +746,7 @@ namespace FNSyncPlus.Core.Services
             string nasBackupFolderRel,
             string localDestinationFolder,
             IEnumerable<string> originalRelsToRestore,
-            ConflictResolution conflictResolution = ConflictResolution.Overwrite,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
             CancellationToken cancellationToken = default)
         {
             var targetSet = new HashSet<string>(originalRelsToRestore, StringComparer.OrdinalIgnoreCase);
@@ -789,52 +764,17 @@ namespace FNSyncPlus.Core.Services
             string nasBackupFolderRel,
             string localDestinationFolder,
             ManifestHistoryEntry historyEntry,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting)
         {
             if (historyEntry == null) return false;
-            string longLocal = PathHelper.EnsureLongPathPrefix(localDestinationFolder);
-            string targetRel = PathHelper.NormalizeRelPath(historyEntry.OriginalRel);
-            string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
-            string targetDir = Path.GetDirectoryName(targetLocalFull)!;
-            if (!Directory.Exists(targetDir)) Directory.CreateDirectory(targetDir);
-
-            string tempRestorePath = Path.Combine(targetDir, $".fnsync_rst_hist_{Guid.NewGuid():N}.tmp");
-            try
-            {
-                string remoteRel = string.IsNullOrEmpty(nasBackupFolderRel)
-                    ? historyEntry.StoredRel
-                    : $"{nasBackupFolderRel.TrimEnd('/', '\\')}/{historyEntry.StoredRel}";
-
-                string computedHash = "";
-                using (var src = await storageProvider.OpenReadAsync(remoteRel, cancellationToken).ConfigureAwait(false))
-                using (var dest = new FileStream(tempRestorePath, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, FileOptions.WriteThrough | FileOptions.Asynchronous))
-                using (var sha = SHA256.Create())
-                {
-                    byte[] buf = new byte[128 * 1024];
-                    int r;
-                    while ((r = await src.ReadAsync(buf, 0, buf.Length, cancellationToken).ConfigureAwait(false)) > 0)
-                    {
-                        await dest.WriteAsync(buf.AsMemory(0, r), cancellationToken).ConfigureAwait(false);
-                        sha.TransformBlock(buf, 0, r, null, 0);
-                    }
-                    sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-                    computedHash = Convert.ToHexString(sha.Hash!).ToLowerInvariant();
-                }
-
-                if (!string.IsNullOrEmpty(historyEntry.Sha256) && !string.Equals(historyEntry.Sha256, computedHash, StringComparison.OrdinalIgnoreCase))
-                {
-                    if (File.Exists(tempRestorePath)) File.Delete(tempRestorePath);
-                    return false;
-                }
-
-                File.Move(tempRestorePath, targetLocalFull, overwrite: true);
-                return true;
-            }
-            catch
-            {
-                if (File.Exists(tempRestorePath)) try { File.Delete(tempRestorePath); } catch { }
-                return false;
-            }
+            var manifest = new Manifest { Files = new() { new ManifestFileEntry {
+                OriginalRel = historyEntry.OriginalRel, StoredRel = historyEntry.StoredRel,
+                Sha256 = historyEntry.Sha256, Size = historyEntry.Size
+            } } };
+            var result = await RunRestoreFilteredAsync(storageProvider, nasBackupFolderRel, localDestinationFolder,
+                manifest, conflictResolution, cancellationToken).ConfigureAwait(false);
+            return result.RestoredFiles == 1;
         }
 
         private async Task<RestoreProgressReport> RunRestoreFilteredAsync(
@@ -852,14 +792,31 @@ namespace FNSyncPlus.Core.Services
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 report.CurrentFile = fileEntry.OriginalRel;
+                if (!PathHelper.IsSafeRelativePath(fileEntry.OriginalRel) || !PathHelper.IsSafeRelativePath(fileEntry.StoredRel))
+                {
+                    report.FailedFiles++;
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = fileEntry.OriginalRel, StoredRel = fileEntry.StoredRel, Success = false, ErrorMessage = "不安全的清单路径" });
+                    continue;
+                }
                 string targetRel = PathHelper.NormalizeRelPath(fileEntry.OriginalRel);
                 string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
                 string targetDir = Path.GetDirectoryName(targetLocalFull)!;
-                if (!Directory.Exists(targetDir)) Directory.CreateDirectory(targetDir);
-
                 string tempRestorePath = Path.Combine(targetDir, $".fnsync_rst_retry_{Guid.NewGuid():N}.tmp");
                 try
                 {
+                    EnsureSafeRestoreDirectory(longLocal, targetDir);
+                    if (File.Exists(targetLocalFull))
+                    {
+                        if (conflictResolution == ConflictResolution.SkipExisting)
+                        {
+                            report.SkippedFiles++;
+                            report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = fileEntry.StoredRel, Skipped = true, Success = true });
+                            continue;
+                        }
+                        if (conflictResolution == ConflictResolution.RenameWithTimestamp)
+                            targetLocalFull = Path.Combine(targetDir, $"{Path.GetFileNameWithoutExtension(targetLocalFull)}_恢复_{Guid.NewGuid():N}{Path.GetExtension(targetLocalFull)}");
+                    }
+                    if (string.IsNullOrWhiteSpace(fileEntry.Sha256)) throw new IOException("清单缺少 SHA-256，无法验证恢复内容");
                     string remoteRel = string.IsNullOrEmpty(nasBackupFolderRel)
                         ? fileEntry.StoredRel
                         : $"{nasBackupFolderRel.TrimEnd('/', '\\')}/{fileEntry.StoredRel}";
@@ -884,14 +841,16 @@ namespace FNSyncPlus.Core.Services
                     {
                         if (File.Exists(tempRestorePath)) File.Delete(tempRestorePath);
                         report.FailedFiles++;
+                        report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = fileEntry.StoredRel, Success = false, ErrorMessage = "SHA-256 校验失败" });
                         continue;
                     }
 
-                    File.Move(tempRestorePath, targetLocalFull, overwrite: true);
+                    File.Move(tempRestorePath, targetLocalFull, overwrite: conflictResolution == ConflictResolution.Overwrite);
                     report.RestoredFiles++;
                     report.IntegrityVerifiedFiles++;
                     report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, Success = true, HashVerified = true });
                 }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
                 {
                     if (File.Exists(tempRestorePath)) try { File.Delete(tempRestorePath); } catch { }
@@ -903,6 +862,27 @@ namespace FNSyncPlus.Core.Services
             }
 
             return report;
+        }
+
+        private static void EnsureSafeRestoreDirectory(string root, string directory)
+        {
+            string fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string fullDirectory = Path.GetFullPath(directory);
+            if (!fullDirectory.Equals(fullRoot, StringComparison.OrdinalIgnoreCase) &&
+                !fullDirectory.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("恢复路径越过目标目录");
+            Directory.CreateDirectory(fullRoot);
+            var current = new DirectoryInfo(fullRoot);
+            if ((current.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("恢复目录不能是链接或联接点");
+            string relative = Path.GetRelativePath(fullRoot, fullDirectory);
+            foreach (string part in relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+            {
+                if (part == ".") continue;
+                current = new DirectoryInfo(Path.Combine(current.FullName, part));
+                if (!current.Exists) current.Create();
+                current.Refresh();
+                if ((current.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("恢复路径包含链接或联接点");
+            }
         }
     }
 }

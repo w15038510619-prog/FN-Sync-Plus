@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main", "master", "feature/**" ]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: [ "main", "master", "feature/v2.1-multitask-and-modern-ui" ]
   workflow_dispatch:
 
 jobs:
@@ -26,10 +26,14 @@ jobs:
     - name: Build Solution
       run: dotnet build FNSyncPlus/FNSyncPlus.sln -c Release --no-restore
 
+    - name: Run Isolated Integrity Regressions
+      run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release -- --integrity-regressions
+
     - name: Run Automated Tests
       run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release
 
     - name: Publish WinUI 3 Desktop Application (v0.4.0-beta)
+      if: github.event_name != 'pull_request' || github.base_ref != 'feature/v2.1-multitask-and-modern-ui'
       run: >
         dotnet publish FNSyncPlus/FNSyncPlus.WinUI/FNSyncPlus.WinUI.csproj
         -c Release
@@ -39,6 +43,7 @@ jobs:
         -o publish_winui/
 
     - name: Ensure Resources PRI in Publish Output
+      if: github.event_name != 'pull_request' || github.base_ref != 'feature/v2.1-multitask-and-modern-ui'
       shell: pwsh
       run: |
         if ((Test-Path "publish_winui/FNSyncPlus.WinUI.pri") -and !(Test-Path "publish_winui/resources.pri")) {
@@ -46,11 +51,13 @@ jobs:
         }
 
     - name: Compress WinUI 3 Release to ZIP
+      if: github.event_name != 'pull_request' || github.base_ref != 'feature/v2.1-multitask-and-modern-ui'
       shell: pwsh
       run: |
         Compress-Archive -Path publish_winui/* -DestinationPath publish_winui/FN_Sync_Plus_v0.4.0-beta_WinUI3_x64.zip -Force
 
     - name: Publish Legacy WPF Single-File Executable
+      if: github.event_name != 'pull_request' || github.base_ref != 'feature/v2.1-multitask-and-modern-ui'
       run: >
         dotnet publish FNSyncPlus/FNSyncPlus.App/FNSyncPlus.App.csproj
         -c Release
@@ -62,6 +69,7 @@ jobs:
         -o publish/
 
     - name: Rename Output Executable
+      if: github.event_name != 'pull_request' || github.base_ref != 'feature/v2.1-multitask-and-modern-ui'
       shell: pwsh
       run: |
         if (Test-Path publish/FNSyncPlus.App.exe) {
@@ -69,12 +77,14 @@ jobs:
         }
 
     - name: Upload WinUI 3 Artifact
+      if: github.event_name != 'pull_request' || github.base_ref != 'feature/v2.1-multitask-and-modern-ui'
       uses: actions/upload-artifact@v4
       with:
         name: FN_Sync_Plus_v0.4.0-beta_WinUI3_x64
         path: publish_winui/FN_Sync_Plus_v0.4.0-beta_WinUI3_x64.zip
 
     - name: Upload Legacy WPF Artifact
+      if: github.event_name != 'pull_request' || github.base_ref != 'feature/v2.1-multitask-and-modern-ui'
       uses: actions/upload-artifact@v4
       with:
         name: FN_Sync_Plus_v2.2_WPF

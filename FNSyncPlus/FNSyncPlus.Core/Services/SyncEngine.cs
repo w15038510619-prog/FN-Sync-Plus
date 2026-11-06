@@ -792,10 +792,12 @@ namespace FNSyncPlus.Core.Services
                 }
                 catch (Exception ex)
                 {
-                    Log("WARN", $"保存目录清单时出现提示: {ex.Message}");
+                    CurrentState = SyncState.Failed;
+                    Log("ERROR", $"保存最终清单失败: {ex.Message}");
+                    throw;
                 }
 
-                CurrentState = failedCount > 0 ? SyncState.Completed : SyncState.Completed;
+                CurrentState = failedCount > 0 ? SyncState.Failed : SyncState.Completed;
                 report.State = CurrentState;
                 report.StatusMessage = $"同步已完成！已上传: {uploadedCount}, 跳过未修改: {unchangedCount}, 长文件名映射: {longNameCount}, 失败: {failedCount}";
                 Log("INFO", report.StatusMessage);
@@ -1114,7 +1116,9 @@ namespace FNSyncPlus.Core.Services
             }
             catch (Exception ex)
             {
-                Log("WARN", $"持久化最终清单异常: {ex.Message}");
+                CurrentState = SyncState.Failed;
+                Log("ERROR", $"持久化最终清单失败: {ex.Message}");
+                throw;
             }
 
             CurrentState = failedCount > 0 ? SyncState.Failed : SyncState.Completed;

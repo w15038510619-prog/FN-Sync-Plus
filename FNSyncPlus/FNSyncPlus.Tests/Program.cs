@@ -43,6 +43,13 @@ namespace FNSyncPlus.Tests
         {
             Console.OutputEncoding = Encoding.UTF8;
 
+            if (args.Contains("--integrity-regressions"))
+            {
+                await TestIntegrityRegressionsAsync();
+                Console.WriteLine($"PASS: {_passed}, FAIL: {_failed}, SKIP: {_skipped}");
+                return _failed == 0 ? 0 : 1;
+            }
+
             if (args.Any(a => a.Equals("--poc", StringComparison.OrdinalIgnoreCase) || 
                               a.Equals("poc", StringComparison.OrdinalIgnoreCase) ||
                               a.Equals("--unicode-suite", StringComparison.OrdinalIgnoreCase)))
@@ -166,6 +173,99 @@ namespace FNSyncPlus.Tests
             Console.WriteLine("================================================================================");
 
             return _failed == 0 ? 0 : 1;
+        }
+
+        static async Task TestIntegrityRegressionsAsync()
+        {
+            string root = Path.Combine(Path.GetTempPath(), "FNSync_integrity_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try
+            {
+                string config = Path.Combine(root, "settings.json");
+                var settings = AppSettings.CreateForTest(config);
+                settings.Tasks.Add(new SyncTask { TaskName = "失败测试", TaskId = "task_fail_legitimate", SourceFolder = @"C:\Fake" });
+                settings.Save();
+                Assert(AppSettings.LoadFromPath(config).Tasks.Single().TaskName == "失败测试", "合法任务名称和路径在加载后保留");
+                File.WriteAllText(config, "{broken");
+                bool failed = false;
+                try { AppSettings.LoadFromPath(config); } catch (IOException) { failed = true; }
+                Assert(failed && File.ReadAllText(config) == "{broken", "损坏的配置报错并保留原文");
+                string legacyConfig = Path.Combine(root, "legacy.json");
+                string legacyJson = "{\"SourceFolder\":\"C:\\\\MyData\",\"TargetShare\":\"backup\"}";
+                File.WriteAllText(legacyConfig, legacyJson);
+                var migrated = AppSettings.LoadFromPath(legacyConfig);
+                var migrationBackup = Directory.GetFiles(root, "legacy.json.pre-migration-*.bak");
+                Assert(migrated.Tasks.Count == 1 && migrationBackup.Length == 1 && File.ReadAllText(migrationBackup[0]) == legacyJson, "迁移配置前保留原始备份");
+
+                string backup = Path.Combine(root, "backup");
+                string target = Path.Combine(root, "restore");
+                Directory.CreateDirectory(backup);
+                Directory.CreateDirectory(target);
+                File.WriteAllText(Path.Combine(backup, "history.txt"), "old content");
+                File.WriteAllText(Path.Combine(target, "file.txt"), "user content");
+                var provider = new SmbStorageProvider(rootUncPath: root);
+                var engine = new RestoreEngine(new ManifestManager());
+                var entry = new ManifestHistoryEntry { OriginalRel = "file.txt", StoredRel = "history.txt", Sha256 = HashHelper.ComputeFileSha256(Path.Combine(backup, "history.txt")) };
+                bool skipped = await engine.RunRestoreHistoryFileAsync(provider, "backup", target, entry);
+                Assert(!skipped && File.ReadAllText(Path.Combine(target, "file.txt")) == "user content", "历史恢复默认不覆盖现有文件");
+                bool renamed = await engine.RunRestoreHistoryFileAsync(provider, "backup", target, entry, conflictResolution: ConflictResolution.RenameWithTimestamp);
+                Assert(renamed && File.ReadAllText(Path.Combine(target, "file.txt")) == "user content" && Directory.GetFiles(target).Length == 2, "历史恢复可选择重命名并保留现有文件");
+                entry.OriginalRel = "../escape.txt";
+                bool escaped = await engine.RunRestoreHistoryFileAsync(provider, "backup", target, entry, conflictResolution: ConflictResolution.Overwrite);
+                Assert(!escaped && !File.Exists(Path.Combine(root, "escape.txt")), "历史恢复拦截路径穿越");
+                entry.OriginalRel = "bad.txt";
+                entry.Sha256 = new string('0', 64);
+                bool badHash = await engine.RunRestoreHistoryFileAsync(provider, "backup", target, entry);
+                Assert(!badHash && !File.Exists(Path.Combine(target, "bad.txt")), "哈希不匹配时不生成最终文件");
+
+                var faultProvider = new FaultInjectingProvider(root);
+                var manifestManager = new ManifestManager();
+                await manifestManager.SaveManifestAtomicAsync(faultProvider, "backup", new Manifest { SourceRoot = "old" });
+                faultProvider.InterruptMainUpload = true;
+                bool interrupted = false;
+                try { await manifestManager.SaveManifestAtomicAsync(faultProvider, "backup", new Manifest { SourceRoot = "new" }); }
+                catch (IOException) { interrupted = true; }
+                var recovered = await manifestManager.LoadManifestAsync(faultProvider, "backup");
+                Assert(interrupted && recovered.SourceRoot == "old", "主清单上传中断后回退到上一份清单");
+                File.WriteAllText(Path.Combine(backup, ".fnsync", "manifest.json.bak"), "broken too");
+                bool refused = false;
+                try { await manifestManager.LoadManifestAsync(faultProvider, "backup"); }
+                catch (InvalidDataException) { refused = true; }
+                Assert(refused, "主备清单均损坏时拒绝返回空清单");
+            }
+            finally
+            {
+                Directory.Delete(root, true);
+            }
+        }
+
+        sealed class FaultInjectingProvider : INasStorageProvider
+        {
+            private readonly SmbStorageProvider inner;
+            public bool InterruptMainUpload { get; set; }
+            public FaultInjectingProvider(string root) => inner = new SmbStorageProvider(rootUncPath: root);
+            public StorageProviderType ProviderType => StorageProviderType.LocalFileSystem;
+            public bool IsAuthenticated => inner.IsAuthenticated;
+            public string RootDisplayPath => inner.RootDisplayPath;
+            public Task<StorageAuthResult> ConnectAndAuthenticateAsync(string server, string username, string password, string? twoFactorCode = null, CancellationToken ct = default) => inner.ConnectAndAuthenticateAsync(server, username, password, twoFactorCode, ct);
+            public Task<IReadOnlyList<NasStorageItem>> ListEntriesAsync(string? path = null, CancellationToken ct = default) => inner.ListEntriesAsync(path, ct);
+            public Task<StorageOperationResult> CreateDirectoryAsync(string path, CancellationToken ct = default) => inner.CreateDirectoryAsync(path, ct);
+            public Task<bool> ExistsAsync(string path, CancellationToken ct = default) => inner.ExistsAsync(path, ct);
+            public Task<NasStorageItem?> GetItemAsync(string path, CancellationToken ct = default) => inner.GetItemAsync(path, ct);
+            public async Task<StorageOperationResult> UploadFileAsync(string path, Stream stream, long size, DateTime modified, bool overwrite = true, IProgress<long>? progress = null, CancellationToken ct = default)
+            {
+                if (InterruptMainUpload && path.EndsWith("/manifest.json", StringComparison.Ordinal))
+                {
+                    using var partial = new MemoryStream(Encoding.UTF8.GetBytes("{"));
+                    await inner.UploadFileAsync(path, partial, partial.Length, modified, overwrite, progress, ct);
+                    return StorageOperationResult.Fail("模拟上传中断");
+                }
+                return await inner.UploadFileAsync(path, stream, size, modified, overwrite, progress, ct);
+            }
+            public Task<Stream> OpenReadAsync(string path, CancellationToken ct = default) => inner.OpenReadAsync(path, ct);
+            public Task<bool> VerifyFileIntegrityAsync(string path, string hash, long size, CancellationToken ct = default) => inner.VerifyFileIntegrityAsync(path, hash, size, ct);
+            public Task<StorageOperationResult> DeleteAsync(string path, bool moveToTrash = true, CancellationToken ct = default) => inner.DeleteAsync(path, moveToTrash, ct);
+            public ValueTask DisposeAsync() => inner.DisposeAsync();
         }
 
         static void Assert(bool condition, string testName, string? detail = null)
@@ -699,10 +799,10 @@ namespace FNSyncPlus.Tests
         static async Task TestSyncWithRealTestFilesAsync()
         {
             Console.WriteLine("\n--- 14. 真实样本目录 (FN_Sync_Test) 模拟增量与恢复测试 ---");
-            string realDir = @"D:\FN_AutoSync_Package\FN_Sync_Test";
-            if (!Directory.Exists(realDir))
+            string? realDir = Environment.GetEnvironmentVariable("FNSYNC_ISOLATED_TEST_SOURCE");
+            if (string.IsNullOrWhiteSpace(realDir) || !Directory.Exists(realDir))
             {
-                Console.WriteLine("FN_Sync_Test 目录不存在，跳过此项。");
+                Skip("样本目录同步与恢复", "未提供隔离的样本目录");
                 return;
             }
 
@@ -1348,20 +1448,10 @@ namespace FNSyncPlus.Tests
         static void BuildApplicationIcons()
         {
             Console.WriteLine("\n--- 28. 原创应用图标方案生成与多尺寸 ICO 资产校验 ---");
-            string currentDir = AppDomain.CurrentDomain.BaseDirectory;
-            // 向上回溯定位工程根目录
-            string repoRoot = Path.GetFullPath(Path.Combine(currentDir, "..", "..", "..", ".."));
-            string assetsDir = Path.Combine(repoRoot, "FNSyncPlus", "FNSyncPlus.WinUI", "Assets");
-            if (!Directory.Exists(assetsDir))
-            {
-                assetsDir = Path.Combine(AppContext.BaseDirectory, "Assets");
-            }
+            string isolatedRoot = Path.Combine(Path.GetTempPath(), "FNSyncPlus_Icons_" + Guid.NewGuid().ToString("N"));
+            string assetsDir = Path.Combine(isolatedRoot, "Assets");
             Directory.CreateDirectory(assetsDir);
-
-            string defaultArtifactDir = @"C:\Users\S\.gemini\antigravity\brain\eacd3aa8-c774-45a0-b5d4-d23d66a0eaa6";
-            string artifactDir = Directory.Exists(defaultArtifactDir)
-                ? defaultArtifactDir
-                : Path.Combine(repoRoot, "Artifacts");
+            string artifactDir = Path.Combine(isolatedRoot, "Artifacts");
             Directory.CreateDirectory(artifactDir);
 
             IconBuilder.GenerateIcons(artifactDir, assetsDir);
