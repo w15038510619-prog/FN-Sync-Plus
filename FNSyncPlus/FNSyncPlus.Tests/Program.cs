@@ -201,6 +201,8 @@ namespace FNSyncPlus.Tests
                 var isolatedSaved = SmbAuthService.LoadCredentials(isolatedCredentials);
                 Assert(isolatedSaved.HasValue && isolatedSaved.Value.Server == "test.invalid" && isolatedSaved.Value.Password == "test-secret" &&
                     !Encoding.UTF8.GetString(File.ReadAllBytes(isolatedCredentials)).Contains("test-secret"), "独立测试凭据可由当前 Windows 用户加密保存并读取");
+                SmbAuthService.ClearSavedCredentials(isolatedCredentials);
+                Assert(!File.Exists(isolatedCredentials), "只清除明确指定的隔离测试凭据");
 
                 string backup = Path.Combine(root, "backup");
                 string target = Path.Combine(root, "restore");
@@ -239,6 +241,76 @@ namespace FNSyncPlus.Tests
                 Assert(refused, "主备清单均损坏时拒绝返回空清单");
                 Assert(new FnOsFileListResponse { Files = new() }.IsSuccess, "fnOS 文件列表允许省略 result 的有效响应");
                 Assert(!new FnOsFileListResponse().IsSuccess && !new FnOsFileListResponse { Result = "fail", Files = new() }.IsSuccess, "fnOS 文件列表拒绝空响应或明确失败");
+                string renameSource = Path.Combine(root, "rename-source");
+                string renameTarget = Path.Combine(root, "rename-target");
+                Directory.CreateDirectory(renameSource);
+                Directory.CreateDirectory(renameTarget);
+                File.WriteAllText(Path.Combine(renameSource, "new.txt"), "rename content");
+                File.WriteAllText(Path.Combine(renameTarget, "old.txt"), "rename content");
+                var renameProvider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+                var oldFile = new FileInfo(Path.Combine(renameTarget, "old.txt"));
+                var oldManifest = new Manifest { Files = new() { new ManifestFileEntry {
+                    OriginalRel = "old.txt", StoredRel = "old.txt", Size = oldFile.Length,
+                    Sha256 = HashHelper.ComputeFileSha256(oldFile.FullName)
+                } } };
+                await manifestManager.SaveManifestAtomicAsync(renameProvider, "rename-target", oldManifest);
+                renameProvider.FailUploadSuffix = "/new.txt";
+                var renameSync = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
+                var failedRename = await renameSync.RunSyncAsync(renameSource, "rename-target", renameProvider, BackupStrategy.Smart, null, CancellationToken.None);
+                var retainedManifest = await manifestManager.LoadManifestAsync(renameProvider, "rename-target");
+                Assert(failedRename.State == SyncState.Failed && retainedManifest.Files.Count == 1 &&
+                    retainedManifest.Files[0].OriginalRel == "old.txt" && File.Exists(oldFile.FullName),
+                    "重命名新文件上传失败时不提交移除旧项的清单");
+                renameProvider.FailUploadSuffix = null;
+                using var uploadCancellation = new CancellationTokenSource();
+                renameProvider.CancelUploadSuffix = "/new.txt";
+                renameProvider.UploadCancellation = uploadCancellation;
+                bool canceled = false;
+                try
+                {
+                    var canceledSync = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
+                    await canceledSync.RunSyncAsync(renameSource, "rename-target", renameProvider, BackupStrategy.Smart, null, uploadCancellation.Token);
+                }
+                catch (OperationCanceledException) { canceled = true; }
+                retainedManifest = await manifestManager.LoadManifestAsync(renameProvider, "rename-target");
+                Assert(canceled && retainedManifest.Files.Count == 1 && retainedManifest.Files[0].OriginalRel == "old.txt",
+                    "重命名上传中取消时不提交移除旧项的清单");
+                string lockedSource = Path.Combine(root, "locked-source");
+                string lockedTarget = Path.Combine(root, "locked-target");
+                Directory.CreateDirectory(lockedSource);
+                Directory.CreateDirectory(lockedTarget);
+                File.WriteAllText(Path.Combine(lockedSource, "sample.txt"), "must not upload");
+                using var heldLock = await manifestManager.TryAcquireTargetLockAsync(lockedTarget);
+                bool lockBlocked = false;
+                try
+                {
+                    var sync = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
+                    await sync.RunSyncAsync(lockedSource, lockedTarget);
+                }
+                catch (IOException) { lockBlocked = true; }
+                Assert(heldLock != null && lockBlocked && !File.Exists(Path.Combine(lockedTarget, "sample.txt")), "目标锁被占用时拒绝同步而不写入文件");
+                var offlineSettings = AppSettings.CreateInMemory();
+                var offlineTask = new SyncTask
+                {
+                    TaskName = "隔离离线测试", SourceFolder = lockedSource,
+                    DestinationFolder = "我的文件/offline-test", ProviderType = StorageProviderType.FnOsPersonal,
+                    ScheduleMode = TaskSyncScheduleMode.ManualOnly
+                };
+                offlineSettings.Tasks.Add(offlineTask);
+                string previousDirectory = Environment.CurrentDirectory;
+                try
+                {
+                    Environment.CurrentDirectory = root;
+                    using var manager = new TaskManager(offlineSettings, new SmbAuthService(), new LogService(Path.Combine(root, "logs")));
+                    var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    manager.TaskStateChanged += t => { if (t.State == TaskSyncState.OfflineWaiting) done.TrySetResult(); };
+                    manager.TriggerSync(offlineTask.TaskId);
+                    bool signaled = await Task.WhenAny(done.Task, Task.Delay(5000)) == done.Task;
+                    Assert(signaled && offlineTask.State == TaskSyncState.OfflineWaiting &&
+                        !Directory.Exists(Path.Combine(root, "我的文件")), "飞牛未连接时等待重连，不误写本地目录或报告成功");
+                }
+                finally { Environment.CurrentDirectory = previousDirectory; }
+                await Task.Delay(200);
             }
             finally
             {
@@ -250,8 +322,12 @@ namespace FNSyncPlus.Tests
         {
             private readonly SmbStorageProvider inner;
             public bool InterruptMainUpload { get; set; }
+            public bool ClaimFnOs { get; set; }
+            public string? FailUploadSuffix { get; set; }
+            public string? CancelUploadSuffix { get; set; }
+            public CancellationTokenSource? UploadCancellation { get; set; }
             public FaultInjectingProvider(string root) => inner = new SmbStorageProvider(rootUncPath: root);
-            public StorageProviderType ProviderType => StorageProviderType.LocalFileSystem;
+            public StorageProviderType ProviderType => ClaimFnOs ? StorageProviderType.FnOsPersonal : StorageProviderType.LocalFileSystem;
             public bool IsAuthenticated => inner.IsAuthenticated;
             public string RootDisplayPath => inner.RootDisplayPath;
             public Task<StorageAuthResult> ConnectAndAuthenticateAsync(string server, string username, string password, string? twoFactorCode = null, CancellationToken ct = default) => inner.ConnectAndAuthenticateAsync(server, username, password, twoFactorCode, ct);
@@ -261,6 +337,13 @@ namespace FNSyncPlus.Tests
             public Task<NasStorageItem?> GetItemAsync(string path, CancellationToken ct = default) => inner.GetItemAsync(path, ct);
             public async Task<StorageOperationResult> UploadFileAsync(string path, Stream stream, long size, DateTime modified, bool overwrite = true, IProgress<long>? progress = null, CancellationToken ct = default)
             {
+                if (CancelUploadSuffix != null && path.EndsWith(CancelUploadSuffix, StringComparison.Ordinal))
+                {
+                    UploadCancellation?.Cancel();
+                    ct.ThrowIfCancellationRequested();
+                }
+                if (FailUploadSuffix != null && path.EndsWith(FailUploadSuffix, StringComparison.Ordinal))
+                    return StorageOperationResult.Fail("403 模拟上传失败");
                 if (InterruptMainUpload && path.EndsWith("/manifest.json", StringComparison.Ordinal))
                 {
                     using var partial = new MemoryStream(Encoding.UTF8.GetBytes("{}"));

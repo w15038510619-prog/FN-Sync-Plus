@@ -519,7 +519,8 @@ namespace FNSyncPlus.Core.Services
                 targetLock = await _manifestManager.TryAcquireTargetLockAsync(targetNasFolder).ConfigureAwait(false);
                 if (targetLock == null)
                 {
-                    Log("WARN", "目标 NAS 目录已有其他同步实例在写入或处于锁定状态，将继续进行常规写入。");
+                    CurrentState = SyncState.Failed;
+                    throw new IOException("无法获取目标目录独占锁，已停止同步以保护现有备份。");
                 }
 
                 // 清理超过 1 小时的历史残留 staging 文件
@@ -756,15 +757,18 @@ namespace FNSyncPlus.Core.Services
                     report.LongNameFiles = longNameCount;
                     ProgressChanged?.Invoke(report);
 
-                    // 定期（每 20 个文件）保存清单，防止意外中断
-                    if ((uploadedCount > 0 && uploadedCount % 20 == 0) || i == allLocalFiles.Count - 1)
-                    {
-                        manifest.Files = manifestFilesMap.Values.ToList();
-                        manifest.BackupPolicy = strategy.ToString();
-                        await _manifestManager.SaveManifestAtomicAsync(targetNasFolder, manifest, token).ConfigureAwait(false);
-                    }
                 }
 
+                token.ThrowIfCancellationRequested();
+                if (failedCount > 0)
+                {
+                    CurrentState = SyncState.Failed;
+                    report.State = CurrentState;
+                    report.StatusMessage = $"同步失败（{failedCount} 个文件未上传），未提交新清单。";
+                    Log("ERROR", report.StatusMessage);
+                    ProgressChanged?.Invoke(report);
+                    return report;
+                }
                 // 7. 保存目录结构信息与最终完整清单
                 try
                 {
@@ -1081,14 +1085,18 @@ namespace FNSyncPlus.Core.Services
                 report.LongNameFiles = longNameCount;
                 ProgressChanged?.Invoke(report);
 
-                if ((uploadedCount > 0 && uploadedCount % 20 == 0) || i == allLocalFiles.Count - 1)
-                {
-                    manifest.Files = manifestFilesMap.Values.ToList();
-                    manifest.BackupPolicy = strategy.ToString();
-                    await _manifestManager.SaveManifestAtomicAsync(storageProvider, targetNasFolder, manifest, token).ConfigureAwait(false);
-                }
             }
 
+            token.ThrowIfCancellationRequested();
+            if (failedCount > 0)
+            {
+                CurrentState = SyncState.Failed;
+                report.State = CurrentState;
+                report.StatusMessage = $"同步失败（{failedCount} 个文件未上传），未提交新清单。";
+                Log("ERROR", report.StatusMessage);
+                ProgressChanged?.Invoke(report);
+                return report;
+            }
             // 保存目录清单与最终完整清单
             try
             {

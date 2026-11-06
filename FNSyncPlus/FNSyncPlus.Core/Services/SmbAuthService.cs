@@ -1083,11 +1083,11 @@ namespace FNSyncPlus.Core.Services
             return null;
         }
 
-        public static void ClearSavedCredentials()
+        public static void ClearSavedCredentials(string? isolatedPath = null)
         {
             try
             {
-                string path = GetCredentialStoragePath();
+                string path = isolatedPath ?? GetCredentialStoragePath();
                 if (File.Exists(path))
                 {
                     File.Delete(path);

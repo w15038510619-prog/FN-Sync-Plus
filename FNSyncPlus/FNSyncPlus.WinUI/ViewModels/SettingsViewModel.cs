@@ -58,8 +58,9 @@ namespace FNSyncPlus.WinUI.ViewModels
         [RelayCommand]
         public void ClearCredentials()
         {
-            SmbAuthService.ClearSavedCredentials();
-            StatusNotice = "已成功清除本机使用 Windows DPAPI 加密保存的所有 NAS 登录密码。";
+            if (!_settings.IsInMemoryOnly || !string.IsNullOrEmpty(_settings.IsolatedCredentialPath))
+                SmbAuthService.ClearSavedCredentials(_settings.IsolatedCredentialPath);
+            StatusNotice = _settings.IsInMemoryOnly ? "已清除隔离测试会话保存的凭据。" : "已清除本机保存的 NAS 登录凭据。";
         }
     }
 }
