@@ -1,5 +1,6 @@
 using System;
 using System.Text.Json.Serialization;
+using FNSyncPlus.Core.Storage;
 
 namespace FNSyncPlus.Core.Models
 {
@@ -11,14 +12,16 @@ namespace FNSyncPlus.Core.Models
 
     public enum TaskSyncState
     {
-        Idle,            // 空闲待命
-        Queued,          // 排队等待同步
-        Scanning,        // 正在扫描本地与远端
-        Syncing,         // 正在上传同步
-        Paused,          // 已暂停
-        OfflineWaiting,  // NAS 离线等待
-        Completed,       // 同步完成
-        Error            // 同步异常
+        Idle,               // 空闲待命
+        Queued,             // 排队等待同步
+        Scanning,           // 正在扫描本地与远端
+        Syncing,            // 正在上传同步
+        Paused,             // 已暂停
+        OfflineWaiting,     // NAS 离线等待
+        Completed,          // 同步完成
+        Error,              // 同步异常
+        ConfigurationError, // 配置异常 (如源与目标冲突、路径非法等)
+        Removing            // 正在安全移除
     }
 
     /// <summary>
@@ -43,6 +46,12 @@ namespace FNSyncPlus.Core.Models
 
         [JsonPropertyName("destination_folder")]
         public string DestinationFolder { get; set; } = string.Empty;
+
+        [JsonPropertyName("provider_type")]
+        public StorageProviderType ProviderType { get; set; } = StorageProviderType.FnOsPersonal;
+
+        [JsonPropertyName("nas_username")]
+        public string NasUsername { get; set; } = string.Empty;
 
         [JsonPropertyName("sync_mode")]
         public SyncMode Mode { get; set; } = SyncMode.OneWayBackup;
@@ -128,6 +137,8 @@ namespace FNSyncPlus.Core.Models
             TaskSyncState.OfflineWaiting => "NAS离线等待恢复",
             TaskSyncState.Completed => "已就绪 (已最新)",
             TaskSyncState.Error => string.IsNullOrEmpty(LastError) ? "同步出错" : $"出错: {LastError}",
+            TaskSyncState.ConfigurationError => string.IsNullOrEmpty(LastError) ? "配置异常" : $"配置异常: {LastError}",
+            TaskSyncState.Removing => "正在安全移除...",
             _ => State.ToString()
         };
 
@@ -140,6 +151,8 @@ namespace FNSyncPlus.Core.Models
             TaskSyncState.Queued => "#6366F1",    // Indigo
             TaskSyncState.Paused => "#D97706",    // Amber
             TaskSyncState.Error => "#DC2626",     // Red
+            TaskSyncState.ConfigurationError => "#B91C1C", // Dark red
+            TaskSyncState.Removing => "#64748B",  // Slate
             TaskSyncState.OfflineWaiting => "#9333EA", // Purple
             _ => "#475569"                         // Slate
         };
@@ -153,8 +166,98 @@ namespace FNSyncPlus.Core.Models
             TaskSyncState.Queued => "#EEF2FF",
             TaskSyncState.Paused => "#FEF3C7",
             TaskSyncState.Error => "#FEE2E2",
+            TaskSyncState.ConfigurationError => "#FEE2E2",
+            TaskSyncState.Removing => "#F1F5F9",
             TaskSyncState.OfflineWaiting => "#F3E8FF",
             _ => "#F1F5F9"
         };
+
+        /// <summary>
+        /// 验证同步任务配置的合法性与边界隔离，杜绝自同步死循环、盘符越界或无效路径伪造成功
+        /// </summary>
+        public bool ValidateConfiguration(out string errorMessage)
+        {
+            if (string.IsNullOrWhiteSpace(SourceFolder))
+            {
+                errorMessage = "本地源文件夹路径不能为空";
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(DestinationFolder))
+            {
+                errorMessage = "NAS 目标备份路径不能为空";
+                return false;
+            }
+
+            // 检查本地源文件夹是否存在
+            try
+            {
+                if (!System.IO.Directory.Exists(SourceFolder))
+                {
+                    errorMessage = $"本地源文件夹不存在或不可访问: {SourceFolder}";
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                errorMessage = $"校验本地源文件夹异常: {ex.Message}";
+                return false;
+            }
+
+            // 规范化路径比对
+            string normSource = SourceFolder.TrimEnd('\\', '/').Replace('/', '\\');
+            string normDest = DestinationFolder.TrimEnd('\\', '/');
+
+            // 1. 严格禁止源目录与目标目录相同（自同步死循环防护）
+            if (string.Equals(normSource, normDest.Replace('/', '\\'), StringComparison.OrdinalIgnoreCase))
+            {
+                errorMessage = "严重配置错误：源文件夹与目标备份路径完全相同，严禁自同步！";
+                return false;
+            }
+
+            // 2. 根据存储类型校验目标路径规范
+            if (ProviderType == StorageProviderType.FnOsPersonal)
+            {
+                // 飞牛个人空间目标路径必须是相对路径或以「我的文件」开头，绝对不能是 Windows 盘符路径 (如 D:\...) 或 Windows UNC 路径 (\\...)
+                if ((normDest.Length >= 2 && normDest[1] == ':') || normDest.StartsWith(@"\\") || normDest.StartsWith("//"))
+                {
+                    errorMessage = $"配置错误：飞牛个人空间任务的目标路径不能是 Windows 本地或 UNC 共享路径 ({normDest})，必须指向官方「我的文件」";
+                    return false;
+                }
+            }
+            else if (ProviderType == StorageProviderType.SmbShare)
+            {
+                // SMB 共享目标路径必须是规范的 UNC 路径
+                if (!normDest.StartsWith(@"\\") && !normDest.StartsWith("//"))
+                {
+                    errorMessage = $"配置错误：SMB 共享任务的目标路径必须为有效的 UNC 路径 ({normDest})";
+                    return false;
+                }
+
+                // 嵌套关系拦截
+                if (normDest.StartsWith(normSource + "\\", StringComparison.OrdinalIgnoreCase))
+                {
+                    errorMessage = "安全拦截：目标备份目录不能位于源文件夹内部，否则会导致无限嵌套！";
+                    return false;
+                }
+            }
+            else if (ProviderType == StorageProviderType.LocalFileSystem)
+            {
+                // 本地/沙盒测试存储：拦截源与目标相互嵌套
+                if (normDest.StartsWith(normSource + "\\", StringComparison.OrdinalIgnoreCase))
+                {
+                    errorMessage = "安全拦截：目标备份目录不能位于源文件夹内部，否则会导致无限嵌套！";
+                    return false;
+                }
+                if (normSource.StartsWith(normDest + "\\", StringComparison.OrdinalIgnoreCase))
+                {
+                    errorMessage = "安全拦截：源文件夹不能位于备份目录内部，否则会导致无限嵌套！";
+                    return false;
+                }
+            }
+
+            errorMessage = string.Empty;
+            return true;
+        }
     }
 }

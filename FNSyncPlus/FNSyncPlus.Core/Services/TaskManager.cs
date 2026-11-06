@@ -111,21 +111,77 @@ namespace FNSyncPlus.Core.Services
         }
 
         /// <summary>
+        /// 异步安全删除同步任务（仅删除本地配置与调度，绝对不删除本地源文件或 NAS 已有备份数据）
+        /// </summary>
+        public async Task<bool> RemoveTaskAsync(string taskId)
+        {
+            if (string.IsNullOrWhiteSpace(taskId)) return false;
+
+            SyncTask? task;
+            lock (_settings.Tasks)
+            {
+                task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+            }
+            if (task == null) return false;
+
+            // 1. 标记状态为正在安全移除，通知界面
+            task.State = TaskSyncState.Removing;
+            task.LastSyncStatus = "正在移除任务配置...";
+            TaskStateChanged?.Invoke(task);
+
+            // 2. 停止文件系统监听与定时器
+            StopTaskAutomation(taskId);
+
+            // 3. 安全停止正在运行的同步进程（等待工作线程优雅退出，杜绝提前 Dispose CTS 引发的崩溃）
+            if (_runningCts.TryRemove(taskId, out var cts))
+            {
+                try
+                {
+                    cts.Cancel();
+                    for (int i = 0; i < 20; i++)
+                    {
+                        if (!task.IsRunning) break;
+                        await Task.Delay(100).ConfigureAwait(false);
+                    }
+                }
+                catch { }
+                finally
+                {
+                    _ = Task.Delay(3000).ContinueWith(_ =>
+                    {
+                        try { cts.Dispose(); } catch { }
+                    });
+                }
+            }
+
+            // 4. 清除任务运行日志
+            ClearTaskLogs(taskId);
+
+            // 5. 从本地配置中移除并持久化（绝对不删除本地源文件或 NAS 备份文件）
+            bool removed;
+            lock (_settings.Tasks)
+            {
+                removed = _settings.Tasks.Remove(task);
+                if (removed)
+                {
+                    _settings.Save();
+                }
+            }
+
+            if (removed)
+            {
+                TaskListChanged?.Invoke();
+            }
+
+            return removed;
+        }
+
+        /// <summary>
         /// 删除同步任务（仅删除本地配置与调度，绝对不删除本地源文件或 NAS 已有备份数据）
         /// </summary>
         public void RemoveTask(string taskId)
         {
-            var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-            if (task == null) return;
-
-            // 停止监控与取消正在运行的同步
-            StopTaskAutomation(taskId);
-            CancelTaskSync(taskId);
-
-            _settings.Tasks.Remove(task);
-            _settings.Save();
-
-            TaskListChanged?.Invoke();
+            _ = RemoveTaskAsync(taskId);
         }
 
         /// <summary>
@@ -159,12 +215,23 @@ namespace FNSyncPlus.Core.Services
         public void TriggerSync(string taskId)
         {
             var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-            if (task == null || !task.Enabled || task.State == TaskSyncState.Paused)
+            if (task == null || !task.Enabled || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing)
             {
                 if (task != null && task.State == TaskSyncState.Paused)
                 {
                     AppendTaskLog(task, "INFO", "任务处于暂停状态，已忽略触发。");
                 }
+                return;
+            }
+
+            // 任务配置合法性校验拦截（杜绝自同步死循环、盘符越界或无效路径伪造成功）
+            if (!task.ValidateConfiguration(out string configError))
+            {
+                task.State = TaskSyncState.ConfigurationError;
+                task.LastError = configError;
+                task.LastSyncStatus = "配置异常";
+                AppendTaskLog(task, "ERROR", $"任务配置异常，无法执行同步：{configError}");
+                TaskStateChanged?.Invoke(task);
                 return;
             }
 
@@ -230,9 +297,12 @@ namespace FNSyncPlus.Core.Services
                 try
                 {
                     cts.Cancel();
-                    cts.Dispose();
                 }
                 catch { }
+                _ = Task.Delay(3000).ContinueWith(_ =>
+                {
+                    try { cts.Dispose(); } catch { }
+                });
             }
         }
 
@@ -247,7 +317,7 @@ namespace FNSyncPlus.Core.Services
                     if (_taskQueue.TryDequeue(out string? taskId))
                     {
                         var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-                        if (task == null || !task.Enabled || task.State == TaskSyncState.Paused) continue;
+                        if (task == null || !task.Enabled || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing || task.State == TaskSyncState.ConfigurationError) continue;
 
                         // 等待获取全局并发信号量槽位
                         await _concurrencySemaphore.WaitAsync(token).ConfigureAwait(false);
@@ -279,6 +349,18 @@ namespace FNSyncPlus.Core.Services
 
         private async Task ExecuteSingleTaskSyncAsync(SyncTask task, CancellationToken managerToken)
         {
+            // 运行时二次安全配置校验拦截
+            if (!task.ValidateConfiguration(out string valErr))
+            {
+                task.State = TaskSyncState.ConfigurationError;
+                task.LastError = valErr;
+                task.LastSyncStatus = "配置异常";
+                AppendTaskLog(task, "ERROR", $"任务配置异常，无法执行同步：{valErr}");
+                _settings.Save();
+                TaskStateChanged?.Invoke(task);
+                return;
+            }
+
             var taskCts = CancellationTokenSource.CreateLinkedTokenSource(managerToken);
             _runningCts[task.TaskId] = taskCts;
 
@@ -366,6 +448,16 @@ namespace FNSyncPlus.Core.Services
         {
             foreach (var task in _settings.Tasks)
             {
+                // 首先校验任务配置是否合法
+                if (!task.ValidateConfiguration(out string configError))
+                {
+                    task.State = TaskSyncState.ConfigurationError;
+                    task.LastError = configError;
+                    task.LastSyncStatus = "配置异常";
+                    AppendTaskLog(task, "WARN", $"任务配置异常：{configError}");
+                    continue;
+                }
+
                 // 若任务处于暂停状态，软件重启后坚决保持暂停，绝不擅自启动后台监控或定时器
                 if (task.Enabled && task.State != TaskSyncState.Paused)
                 {

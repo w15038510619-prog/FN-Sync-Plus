@@ -139,6 +139,11 @@ namespace FNSyncPlus.Core.Storage
 
             try
             {
+                if (File.Exists(longPath))
+                {
+                    return Task.FromResult(StorageOperationResult.Fail($"创建 SMB 目录失败：已存在同名普通文件 ({targetPath})", path: targetPath));
+                }
+
                 if (!Directory.Exists(longPath))
                 {
                     Directory.CreateDirectory(longPath);
@@ -161,6 +166,50 @@ namespace FNSyncPlus.Core.Storage
 
             bool exists = File.Exists(longPath) || Directory.Exists(longPath);
             return Task.FromResult(exists);
+        }
+
+        public Task<NasStorageItem?> GetItemAsync(string relativePath, CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (string.IsNullOrWhiteSpace(relativePath))
+            {
+                return Task.FromResult<NasStorageItem?>(new NasStorageItem
+                {
+                    Name = "",
+                    RelativePath = "",
+                    IsDirectory = true
+                });
+            }
+
+            string targetPath = CombineUnc(relativePath);
+            string longPath = PathHelper.EnsureLongPathPrefix(targetPath);
+
+            if (Directory.Exists(longPath))
+            {
+                var di = new DirectoryInfo(longPath);
+                return Task.FromResult<NasStorageItem?>(new NasStorageItem
+                {
+                    Name = di.Name,
+                    RelativePath = relativePath.Replace('\\', '/').Trim('/'),
+                    IsDirectory = true,
+                    LastModifiedUtc = di.LastWriteTimeUtc
+                });
+            }
+
+            if (File.Exists(longPath))
+            {
+                var fi = new FileInfo(longPath);
+                return Task.FromResult<NasStorageItem?>(new NasStorageItem
+                {
+                    Name = fi.Name,
+                    RelativePath = relativePath.Replace('\\', '/').Trim('/'),
+                    IsDirectory = false,
+                    Size = fi.Length,
+                    LastModifiedUtc = fi.LastWriteTimeUtc
+                });
+            }
+
+            return Task.FromResult<NasStorageItem?>(null);
         }
 
         public async Task<StorageOperationResult> UploadFileAsync(

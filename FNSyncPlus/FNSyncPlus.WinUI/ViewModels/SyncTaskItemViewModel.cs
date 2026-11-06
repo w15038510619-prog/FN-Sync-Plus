@@ -59,6 +59,12 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private string _currentProgressText = "0%";
 
+        [ObservableProperty]
+        private bool _isConfigurationError;
+
+        [ObservableProperty]
+        private bool _canRunSync;
+
         public event Action<SyncTaskItemViewModel>? RequestViewDetails;
         public event Action<SyncTaskItemViewModel>? RequestDelete;
 
@@ -86,6 +92,8 @@ namespace FNSyncPlus.WinUI.ViewModels
             CurrentProgressText = $"{Model.CurrentProgress:F0}%";
             IsSyncing = Model.State == TaskSyncState.Syncing || Model.State == TaskSyncState.Scanning;
             IsPaused = Model.State == TaskSyncState.Paused;
+            IsConfigurationError = Model.State == TaskSyncState.ConfigurationError;
+            CanRunSync = !IsConfigurationError && Model.State != TaskSyncState.Removing && Model.State != TaskSyncState.Paused && !IsSyncing;
 
             DisplayStatus = Model.DisplayStatus;
             StatusBadgeBgHex = Model.StateBadgeBgHex;
@@ -127,6 +135,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         [RelayCommand]
         private void RunSync()
         {
+            if (!CanRunSync) return;
             _taskManager.TriggerSync(TaskId);
         }
 

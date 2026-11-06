@@ -75,12 +75,12 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         private void OnTaskListChanged()
         {
-            _dispatcherQueue.TryEnqueue(() => ReloadTasks());
+            Helpers.UIThreadHelper.RunOnUIThread(() => ReloadTasks());
         }
 
         private void OnTaskStateChanged(SyncTask task)
         {
-            _dispatcherQueue.TryEnqueue(() =>
+            Helpers.UIThreadHelper.RunOnUIThread(() =>
             {
                 var vm = Tasks.FirstOrDefault(t => t.TaskId == task.TaskId);
                 if (vm != null)
@@ -93,7 +93,7 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         private void OnTaskProgressChanged(SyncTask task, SyncProgressReport report)
         {
-            _dispatcherQueue.TryEnqueue(() =>
+            Helpers.UIThreadHelper.RunOnUIThread(() =>
             {
                 var vm = Tasks.FirstOrDefault(t => t.TaskId == task.TaskId);
                 if (vm != null)

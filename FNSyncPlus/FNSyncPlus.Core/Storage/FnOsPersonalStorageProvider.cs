@@ -217,15 +217,82 @@ namespace FNSyncPlus.Core.Storage
             if (string.IsNullOrWhiteSpace(relativePath))
                 return StorageOperationResult.Fail("目录路径不能为空");
 
-            string fullPath = CombineWithPersonalRoot(relativePath);
-            var resp = await _apiClient.CreateDirectoryAsync(fullPath, ct).ConfigureAwait(false);
+            // 严格安全边界校验：任何包含 .. 或非法组件的越界遍历直接拦截并抛出 ArgumentException
+            string validatedFullPath = CombineWithPersonalRoot(relativePath);
 
-            if (resp.Result == "succ" || resp.ErrNo == 17) // 17 = EEXIST (已存在视为幂等成功)
+            string clean = relativePath.Trim().Replace('\\', '/').Trim('/');
+            if (clean.StartsWith("我的文件/", StringComparison.OrdinalIgnoreCase))
             {
-                return StorageOperationResult.Ok(fullPath);
+                clean = clean.Substring("我的文件/".Length).TrimStart('/');
+            }
+            else if (clean.Equals("我的文件", StringComparison.OrdinalIgnoreCase))
+            {
+                clean = "";
             }
 
-            return StorageOperationResult.Fail(resp.ErrMsg ?? "创建目录失败", resp.ErrNo, fullPath);
+            if (string.IsNullOrEmpty(clean))
+            {
+                return StorageOperationResult.Ok(CombineWithPersonalRoot(""));
+            }
+
+            // 1. 先快速检查目标是否已经存在
+            var existingItem = await GetItemAsync(clean, ct).ConfigureAwait(false);
+            if (existingItem != null)
+            {
+                if (existingItem.IsDirectory)
+                {
+                    // 目录已存在，100% 幂等复用成功，绝不报错
+                    return StorageOperationResult.Ok(validatedFullPath);
+                }
+                else
+                {
+                    // 冲突：已存在同名常规文件
+                    return StorageOperationResult.Fail($"路径冲突：目标 '{clean}' 已存在同名文件，无法创建为目录。", 17, validatedFullPath);
+                }
+            }
+
+            // 2. 逐级创建缺失目录 (mkdir -p 递归语义)
+            string[] segments = clean.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            string currentRel = "";
+
+            for (int i = 0; i < segments.Length; i++)
+            {
+                currentRel = string.IsNullOrEmpty(currentRel) ? segments[i] : $"{currentRel}/{segments[i]}";
+                string fullPath = CombineWithPersonalRoot(currentRel);
+
+                // 检查当前层级是否已存在
+                var segItem = await GetItemAsync(currentRel, ct).ConfigureAwait(false);
+                if (segItem != null)
+                {
+                    if (!segItem.IsDirectory)
+                    {
+                        return StorageOperationResult.Fail($"路径冲突：上级路径 '{currentRel}' 是文件而非目录。", 17, fullPath);
+                    }
+                    continue; // 当前层级已存在且是目录，继续下一级
+                }
+
+                // 调用 RPC 创建当前层级目录
+                var resp = await _apiClient.CreateDirectoryAsync(fullPath, ct).ConfigureAwait(false);
+
+                if (resp.Result == "succ" || resp.ErrNo == 17)
+                {
+                    continue;
+                }
+
+                // 容错二次确认：若 RPC 返回失败，再次检查远端是否实际已被创建（例如并发创建或已存在而状态码非 17）
+                var recheck = await GetItemAsync(currentRel, ct).ConfigureAwait(false);
+                if (recheck != null && recheck.IsDirectory)
+                {
+                    continue;
+                }
+
+                return StorageOperationResult.Fail(
+                    $"创建个人空间目标目录失败: {resp.ErrMsg ?? "未知错误"} (错误码: {resp.ErrNo})",
+                    resp.ErrNo,
+                    fullPath);
+            }
+
+            return StorageOperationResult.Ok(validatedFullPath);
         }
 
         public async Task<bool> ExistsAsync(string relativePath, CancellationToken ct = default)
@@ -233,27 +300,82 @@ namespace FNSyncPlus.Core.Storage
             EnsureAuthenticated();
             if (string.IsNullOrWhiteSpace(relativePath)) return true;
 
-            string normalized = relativePath.Trim('/', '\\').Replace('\\', '/');
-            string? parentDir = Path.GetDirectoryName(normalized)?.Replace('\\', '/');
-            string targetName = Path.GetFileName(normalized);
+            var item = await GetItemAsync(relativePath, ct).ConfigureAwait(false);
+            return item != null;
+        }
 
-            if (string.IsNullOrEmpty(targetName)) return true;
+        public async Task<NasStorageItem?> GetItemAsync(string relativePath, CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (string.IsNullOrWhiteSpace(relativePath))
+            {
+                return new NasStorageItem
+                {
+                    Name = "我的文件",
+                    RelativePath = "",
+                    IsDirectory = true
+                };
+            }
+
+            // 严格安全边界校验：任何包含 .. 或非法组件的越界遍历直接拦截并抛出 ArgumentException
+            CombineWithPersonalRoot(relativePath);
+
+            string clean = relativePath.Trim().Replace('\\', '/').Trim('/');
+            if (clean.StartsWith("我的文件/", StringComparison.OrdinalIgnoreCase))
+            {
+                clean = clean.Substring("我的文件/".Length).TrimStart('/');
+            }
+            else if (clean.Equals("我的文件", StringComparison.OrdinalIgnoreCase))
+            {
+                clean = "";
+            }
+
+            if (string.IsNullOrEmpty(clean))
+            {
+                return new NasStorageItem
+                {
+                    Name = "我的文件",
+                    RelativePath = "",
+                    IsDirectory = true
+                };
+            }
+
+            string? parentDir = Path.GetDirectoryName(clean)?.Replace('\\', '/');
+            string targetName = Path.GetFileName(clean);
+
+            if (string.IsNullOrEmpty(targetName))
+            {
+                return new NasStorageItem
+                {
+                    Name = "我的文件",
+                    RelativePath = "",
+                    IsDirectory = true
+                };
+            }
 
             try
             {
-                var entries = await ListEntriesAsync(parentDir, ct).ConfigureAwait(false);
+                var entries = await ListEntriesAsync(string.IsNullOrEmpty(parentDir) ? null : parentDir, ct).ConfigureAwait(false);
                 foreach (var item in entries)
                 {
                     if (string.Equals(item.Name, targetName, StringComparison.OrdinalIgnoreCase))
                     {
-                        return true;
+                        return item;
                     }
                 }
-                return false;
+                return null;
+            }
+            catch (ArgumentException)
+            {
+                throw;
+            }
+            catch (InvalidOperationException)
+            {
+                throw;
             }
             catch
             {
-                return false;
+                return null;
             }
         }
 

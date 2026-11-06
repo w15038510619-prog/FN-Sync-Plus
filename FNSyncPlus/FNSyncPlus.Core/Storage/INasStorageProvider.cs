@@ -14,7 +14,9 @@ namespace FNSyncPlus.Core.Storage
         /// <summary>飞牛 fnOS 账号原生个人空间 (「我的文件」)</summary>
         FnOsPersonal,
         /// <summary>Windows SMB / CIFS 网络共享存储</summary>
-        SmbShare
+        SmbShare,
+        /// <summary>本地文件系统 / 单元测试沙盒模拟存储</summary>
+        LocalFileSystem
     }
 
     /// <summary>
@@ -99,6 +101,11 @@ namespace FNSyncPlus.Core.Storage
         /// 检查远端文件或目录是否存在
         /// </summary>
         Task<bool> ExistsAsync(string relativePath, CancellationToken ct = default);
+
+        /// <summary>
+        /// 获取指定远端路径的元数据项（如不存在返回 null）
+        /// </summary>
+        Task<NasStorageItem?> GetItemAsync(string relativePath, CancellationToken ct = default);
 
         /// <summary>
         /// 流式上传文件（支持 SHA-256 完整性校验、修改时间保留与进度回调）

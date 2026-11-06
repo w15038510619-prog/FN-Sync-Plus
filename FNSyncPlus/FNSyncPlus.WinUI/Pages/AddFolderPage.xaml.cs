@@ -48,79 +48,23 @@ namespace FNSyncPlus.WinUI.Pages
             }
         }
 
-        private async void CategoryList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private async void BtnChangeParentFolder_Click(object sender, RoutedEventArgs e)
         {
-            if (e.AddedItems.Count > 0 && e.AddedItems[0] is CategoryItem category)
+            var dialog = new Dialogs.NasBrowserDialog
             {
-                await ViewModel.NasBrowser.SelectCategoryAsync(category);
-            }
-        }
-
-        private async void BtnApplyCustomPersonalRoot_Click(object sender, RoutedEventArgs e)
-        {
-            string path = TxtCustomPersonalRoot.Text.Trim();
-            if (string.IsNullOrWhiteSpace(path)) return;
-
-            bool ok = await ViewModel.NasBrowser.ApplyCustomPersonalPathAsync(path);
-            if (ok)
+                XamlRoot = this.XamlRoot
+            };
+            var res = await dialog.ShowAsync();
+            if (res == ContentDialogResult.Primary)
             {
-                TxtCustomPersonalRoot.Text = string.Empty;
-            }
-        }
+                string sel = !string.IsNullOrWhiteSpace(dialog.ViewModel.ConfirmedSelectedPath)
+                    ? dialog.ViewModel.ConfirmedSelectedPath
+                    : dialog.ViewModel.CurrentUncPath;
 
-        private async void BtnRefreshPersonalDetection_Click(object sender, RoutedEventArgs e)
-        {
-            await ViewModel.NasBrowser.InitializeAsync();
-        }
-
-        public Visibility GetExplorerVisibility(bool isGuidance) => isGuidance ? Visibility.Collapsed : Visibility.Visible;
-        public Visibility GetGuidanceVisibility(bool isGuidance) => isGuidance ? Visibility.Visible : Visibility.Collapsed;
-        public Visibility GetOfficialInfoVisibility(string? text) => !string.IsNullOrWhiteSpace(text) ? Visibility.Visible : Visibility.Collapsed;
-
-        private async void BreadcrumbBar_ItemClicked(BreadcrumbBar sender, BreadcrumbBarItemClickedEventArgs args)
-        {
-            if (args.Item is BreadcrumbItem item)
-            {
-                await ViewModel.NasBrowser.NavigateToFolderAsync(item.Path);
-            }
-        }
-
-        private async void FolderList_DoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
-        {
-            if (ViewModel.NasBrowser.SelectedFolder != null)
-            {
-                await ViewModel.NasBrowser.NavigateToFolderAsync(ViewModel.NasBrowser.SelectedFolder.FullUncPath);
-            }
-        }
-
-        private async void BtnRefreshFolder_Click(object sender, RoutedEventArgs e)
-        {
-            await ViewModel.NasBrowser.RefreshCurrentFolderAsync();
-        }
-
-        private async void BtnNavigateUp_Click(object sender, RoutedEventArgs e)
-        {
-            await ViewModel.NasBrowser.NavigateUpAsync();
-        }
-
-        private void BtnInlineCancel_Click(object sender, RoutedEventArgs e)
-        {
-            TxtInlineNewFolderName.Text = string.Empty;
-            ViewModel.NasBrowser.LastErrorMessage = string.Empty;
-            InlineNewFolderFlyout.Hide();
-        }
-
-        private async void BtnInlineCreateFolder_Click(object sender, RoutedEventArgs e)
-        {
-            string name = TxtInlineNewFolderName.Text.Trim();
-            if (string.IsNullOrWhiteSpace(name)) return;
-
-            bool success = await ViewModel.NasBrowser.CreateSubFolderAsync(name);
-            if (success)
-            {
-                TxtInlineNewFolderName.Text = string.Empty;
-                ViewModel.NasBrowser.LastErrorMessage = string.Empty;
-                InlineNewFolderFlyout.Hide();
+                if (!string.IsNullOrWhiteSpace(sel))
+                {
+                    await ViewModel.SetCustomNasDestinationRootAsync(sel);
+                }
             }
         }
 

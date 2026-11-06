@@ -56,10 +56,10 @@ namespace FNSyncPlus.WinUI.ViewModels
         public ObservableCollection<PlannedTaskItem> PlannedTasks { get; } = new();
 
         [ObservableProperty]
-        private int _currentStep = 1; // 1 = Local Folders, 2 = NAS Destination, 3 = Auto-Plan Preview
+        private int _currentStep = 1; // 1 = Local Folders, 2 = Auto-Plan Preview & Confirmation
 
         [ObservableProperty]
-        private string _stepIndicatorText = "步骤 1 / 3：选择本地备份源文件夹";
+        private string _stepIndicatorText = "步骤 1 / 2：选择本地待备份文件夹";
 
         [ObservableProperty]
         private bool _canGoBack = false;
@@ -255,92 +255,29 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 if (SelectedLocalFolders.Count == 0) return;
                 CurrentStep = 2;
-                StepIndicatorText = "步骤 2 / 3：选择 NAS 备份位置";
-                if (!string.IsNullOrWhiteSpace(NasDestinationRoot))
-                {
-                    _ = NasBrowser.NavigateToFolderAsync(NasDestinationRoot);
-                }
-                else
-                {
-                    await NasBrowser.InitializeAsync();
-                }
-            }
-            else if (CurrentStep == 2)
-            {
-                if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
-                {
-                    NasBrowser.ConfirmSelection();
-                    string sel = !string.IsNullOrWhiteSpace(NasBrowser.ConfirmedSelectedPath)
-                        ? NasBrowser.ConfirmedSelectedPath
-                        : NasBrowser.CurrentUncPath;
-
-                    if (string.IsNullOrWhiteSpace(sel) || sel.Contains("FN_PERSONAL_SPACE_GUIDANCE"))
-                    {
-                        sel = "我的文件";
-                    }
-
-                    NasDestinationRoot = sel;
-                    await EvaluateNasRootSecurityAsync();
-                    await RecomputePlannedTasksAsync();
-
-                    CurrentStep = 3;
-                    StepIndicatorText = "步骤 3 / 3：自动规划预览与确认";
-                    UpdateStepState();
-                    return;
-                }
-
-                if (NasBrowser.IsPersonalSpaceGuidanceActive)
-                {
-                    StatusMessage = "当前尚未配置个人专属 SMB 共享，无法继续。请根据指引配置或在左侧选择其他有效共享。";
-                    return;
-                }
-
-                NasBrowser.ConfirmSelection();
-                string selected = !string.IsNullOrWhiteSpace(NasBrowser.ConfirmedSelectedPath)
-                    ? NasBrowser.ConfirmedSelectedPath
-                    : NasBrowser.CurrentUncPath;
-
-                if (string.IsNullOrWhiteSpace(selected) || selected.Contains("FN_PERSONAL_SPACE_GUIDANCE"))
-                {
-                    StatusMessage = "请先选择有效的 NAS 共享目录后再继续。";
-                    return;
-                }
-
-                var (server, share, baseShareUnc, isServerRoot) = PathHelper.ParseUncShare(selected);
-                if (isServerRoot || string.IsNullOrEmpty(share))
-                {
-                    StatusMessage = "请先在下方列表中点击进入具体的 NAS 共享文件夹后再进入下一步。";
-                    return;
-                }
-
-                if (!NasBrowser.HasWritePermission)
-                {
-                    StatusMessage = "所选目录没有写入权限，无法作为备份存储位置。";
-                    return;
-                }
-
-                NasDestinationRoot = selected;
+                StepIndicatorText = "步骤 2 / 2：自动规划预览与确认";
                 await EvaluateNasRootSecurityAsync();
                 await RecomputePlannedTasksAsync();
-
-                CurrentStep = 3;
-                StepIndicatorText = "步骤 3 / 3：自动规划预览与确认";
             }
             UpdateStepState();
         }
 
         public void PreviousStep()
         {
-            if (CurrentStep == 3)
-            {
-                CurrentStep = 2;
-                StepIndicatorText = "步骤 2 / 3：选择 NAS 备份位置";
-            }
-            else if (CurrentStep == 2)
+            if (CurrentStep == 2)
             {
                 CurrentStep = 1;
-                StepIndicatorText = "步骤 1 / 3：选择本地备份源文件夹";
+                StepIndicatorText = "步骤 1 / 2：选择本地待备份文件夹";
             }
+            UpdateStepState();
+        }
+
+        public async Task SetCustomNasDestinationRootAsync(string newRoot)
+        {
+            if (string.IsNullOrWhiteSpace(newRoot)) return;
+            NasDestinationRoot = newRoot.Trim();
+            await EvaluateNasRootSecurityAsync();
+            await RecomputePlannedTasksAsync();
             UpdateStepState();
         }
 
@@ -348,40 +285,21 @@ namespace FNSyncPlus.WinUI.ViewModels
         {
             IsStep1 = CurrentStep == 1;
             IsStep2 = CurrentStep == 2;
-            IsStep3 = CurrentStep == 3;
+            IsStep3 = false;
 
             CanGoBack = CurrentStep > 1;
-            CanGoNext = CurrentStep switch
-            {
-                1 => SelectedLocalFolders.Count > 0,
-                2 => !NasBrowser.IsPersonalSpaceGuidanceActive 
-                     && !string.IsNullOrWhiteSpace(NasBrowser.CurrentUncPath) 
-                     && !NasBrowser.IsServerRoot 
-                     && NasBrowser.HasWritePermission,
-                3 => CanCreate && PlannedTasks.Count > 0,
-                _ => false
-            };
+            CanGoNext = CurrentStep == 1 && SelectedLocalFolders.Count > 0;
+            CanCreate = CurrentStep == 2 && PlannedTasks.Count > 0 && !string.IsNullOrWhiteSpace(NasDestinationRoot);
 
             if (CurrentStep == 1)
             {
                 StatusMessage = SelectedLocalFolders.Count == 0 
                     ? "请先添加至少一个本地待备份文件夹以继续下一步。" 
-                    : $"已选择 {SelectedLocalFolders.Count} 个待备份文件夹。";
+                    : $"已选择 {SelectedLocalFolders.Count} 个待备份文件夹。点击【下一步】将自动为您规划 NAS 备份目录。";
             }
             else if (CurrentStep == 2)
             {
-                if (NasBrowser.IsServerRoot)
-                {
-                    StatusMessage = "当前处于 NAS 服务器根目录，请在下方点击进入具体的共享文件夹后继续。";
-                }
-                else if (!NasBrowser.HasWritePermission)
-                {
-                    StatusMessage = "当前所选目录只读或无写入权限，请选择其他具备写入权限的文件夹。";
-                }
-                else
-                {
-                    StatusMessage = $"已选定 NAS 存储位置: {NasBrowser.CurrentUncPath}";
-                }
+                StatusMessage = $"已选定 NAS 存储位置: {NasDestinationRoot}，点击【确认创建并开始备份】即可启动。";
             }
         }
 
@@ -406,11 +324,27 @@ namespace FNSyncPlus.WinUI.ViewModels
                     if (string.IsNullOrEmpty(desiredName)) desiredName = "备份数据";
 
                     string uniqueName = desiredName;
-                    int counter = 1;
+                    int counter = 2;
+
+                    // 批次内同名去重
                     while (allocatedFn.Contains(uniqueName, StringComparer.OrdinalIgnoreCase))
                     {
                         uniqueName = $"{desiredName} ({counter++})";
                     }
+
+                    // 检查已有任务冲突去重（如果已有不同源文件夹的任务占用了同名目标，自动加序号避免冲突）
+                    var existingWithSameDest = _taskManager.Tasks.FirstOrDefault(t => 
+                        string.Equals(Path.GetFileName(t.DestinationFolder.TrimEnd('/', '\\')), uniqueName, StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(t.SourceFolder.TrimEnd('\\'), localPath.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));
+                    
+                    while (existingWithSameDest != null)
+                    {
+                        uniqueName = $"{desiredName} ({counter++})";
+                        existingWithSameDest = _taskManager.Tasks.FirstOrDefault(t => 
+                            string.Equals(Path.GetFileName(t.DestinationFolder.TrimEnd('/', '\\')), uniqueName, StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(t.SourceFolder.TrimEnd('\\'), localPath.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));
+                    }
+
                     allocatedFn.Add(uniqueName);
 
                     string rootPrefix = string.IsNullOrEmpty(NasDestinationRoot) || NasDestinationRoot == "我的文件"
@@ -419,6 +353,11 @@ namespace FNSyncPlus.WinUI.ViewModels
 
                     string fullTarget = $"{rootPrefix}/{uniqueName}";
 
+                    // 检查是否已有完全匹配的配置
+                    bool isExistingConfig = _taskManager.Tasks.Any(t =>
+                        string.Equals(t.SourceFolder.TrimEnd('\\'), localPath.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(t.DestinationFolder.TrimEnd('/', '\\'), fullTarget.TrimEnd('/', '\\'), StringComparison.OrdinalIgnoreCase));
+
                     PlannedTasks.Add(new PlannedTaskItem
                     {
                         SourcePath = localPath,
@@ -426,7 +365,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                         TargetSubFolder = uniqueName,
                         FullTargetUnc = fullTarget,
                         FinalTargetUnc = fullTarget,
-                        StatusText = uniqueName != desiredName ? "▲ 批次同名去重规划" : "✔ 自动规划同名备份",
+                        StatusText = isExistingConfig ? "✔ 复用已有备份配置" : (uniqueName != desiredName ? "▲ 批次同名去重规划" : "✔ 自动规划同名备份"),
                         IsConflict = uniqueName != desiredName
                     });
                 }
@@ -441,7 +380,7 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             foreach (var localPath in SelectedLocalFolders)
             {
-                string desiredName = Path.GetFileName(localPath);
+                string desiredName = Path.GetFileName(localPath.TrimEnd('\\'));
                 if (string.IsNullOrEmpty(desiredName)) desiredName = "备份数据";
 
                 var plan = await _smbService.PlanTargetSubFolderAsync(NasDestinationRoot, desiredName, localPath, allocated);
@@ -507,10 +446,14 @@ namespace FNSyncPlus.WinUI.ViewModels
                         SourceFolder = item.SourcePath,
                         DestinationRoot = NasDestinationRoot,
                         DestinationFolder = item.FullTargetUnc,
+                        ProviderType = StorageProviderType.FnOsPersonal,
+                        NasUsername = _settings.Username,
                         NasDeviceId = _settings.NasServer,
                         Mode = SyncMode.OneWayBackup,
+                        Enabled = true,
                         AutoSyncEnabled = true,
-                        RealtimeWatchEnabled = true
+                        RealtimeWatchEnabled = true,
+                        IntervalMinutes = 5
                     };
 
                     _taskManager.AddTask(task);
@@ -575,6 +518,9 @@ namespace FNSyncPlus.WinUI.ViewModels
                     SourceFolder = item.SourcePath,
                     DestinationRoot = NasDestinationRoot,
                     DestinationFolder = ensuredPath,
+                    ProviderType = StorageProviderType.SmbShare,
+                    NasUsername = _settings.Username,
+                    NasDeviceId = _settings.NasServer,
                     Enabled = true,
                     AutoSyncEnabled = true,
                     RealtimeWatchEnabled = true,

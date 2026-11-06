@@ -157,6 +157,7 @@
                                         </Button>
                                         <Button
                                             Command="{x:Bind RunSyncCommand}"
+                                            IsEnabled="{x:Bind CanRunSync, Mode=OneWay}"
                                             Visibility="{x:Bind IsPaused, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}"
                                             ToolTipService.ToolTip="立即执行增量同步"
                                             Padding="10,5">

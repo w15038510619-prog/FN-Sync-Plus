@@ -106,6 +106,7 @@ namespace FNSyncPlus.Tests
                 await TestPersonalSpaceSameNameBackupFolderAndRestoreLifecycleAsync();
                 await TestTargetCreationFailureAbortsTaskAndPreservesErrorsAsync(); // 新增：目标失败立即中止与错误保存测试
                 await TestSameNameDeduplicationRespectedInFolderCreationAsync(); // 新增：批次去重规划在自动创建同名目录中严格遵守
+                await TestP0FolderIdempotencyAndTaskValidationAsync(); // 新增：P0 目录幂等性、配置校验与安全删除生命周期验证
 
                 // ==================== 3. GUI 自动化测试 ====================
                 SetCategory(TestCategory.GuiAutomation);
@@ -877,6 +878,7 @@ namespace FNSyncPlus.Tests
                 TaskName = "任务A",
                 SourceFolder = srcA,
                 DestinationFolder = dstA,
+                ProviderType = StorageProviderType.LocalFileSystem,
                 AutoSyncEnabled = false,
                 RealtimeWatchEnabled = false
             };
@@ -887,6 +889,7 @@ namespace FNSyncPlus.Tests
                 TaskName = "任务B",
                 SourceFolder = srcB,
                 DestinationFolder = dstB,
+                ProviderType = StorageProviderType.LocalFileSystem,
                 AutoSyncEnabled = false,
                 RealtimeWatchEnabled = false
             };
@@ -903,7 +906,8 @@ namespace FNSyncPlus.Tests
                     TaskId = "task_invalid",
                     TaskName = "非法任务",
                     SourceFolder = Path.Combine(srcA, "SubChild"),
-                    DestinationFolder = Path.Combine(nasRoot, "Other")
+                    DestinationFolder = Path.Combine(nasRoot, "Other"),
+                    ProviderType = StorageProviderType.LocalFileSystem
                 };
                 taskManager.AddTask(invalidTask);
             }
@@ -1109,8 +1113,8 @@ namespace FNSyncPlus.Tests
                 var smbAuth = new SmbAuthService();
                 var taskManager = new TaskManager(settings, smbAuth);
 
-                var t1 = new SyncTask { TaskId = "iso_1", TaskName = "Task1", SourceFolder = src1, DestinationFolder = dst1, IntervalMinutes = 0 };
-                var t2 = new SyncTask { TaskId = "iso_2", TaskName = "Task2", SourceFolder = src2, DestinationFolder = dst2, IntervalMinutes = 0 };
+                var t1 = new SyncTask { TaskId = "iso_1", TaskName = "Task1", SourceFolder = src1, DestinationFolder = dst1, ProviderType = StorageProviderType.LocalFileSystem, IntervalMinutes = 0 };
+                var t2 = new SyncTask { TaskId = "iso_2", TaskName = "Task2", SourceFolder = src2, DestinationFolder = dst2, ProviderType = StorageProviderType.LocalFileSystem, IntervalMinutes = 0 };
                 taskManager.AddTask(t1);
                 taskManager.AddTask(t2);
 
@@ -1168,6 +1172,7 @@ namespace FNSyncPlus.Tests
                     TaskName = "PauseTest",
                     SourceFolder = src,
                     DestinationFolder = dst,
+                    ProviderType = StorageProviderType.LocalFileSystem,
                     IntervalMinutes = 10,
                     State = TaskSyncState.Idle
                 };
@@ -2107,6 +2112,177 @@ namespace FNSyncPlus.Tests
             Assert(reporting.Position == testData.Length, "流当前游标位置正确");
         }
 
+        static async Task TestP0FolderIdempotencyAndTaskValidationAsync()
+        {
+            Console.WriteLine("\n--- 44. P0 缺陷整改核心验证：目录幂等性、配置校验与安全删除生命周期 ---");
+            string testRoot = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Test_P0_Suite_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(testRoot);
+
+            try
+            {
+                // ==========================================
+                // 1. 目录幂等性验证 (10 轮连续创建完全安全，0 报错)
+                // ==========================================
+                Console.WriteLine("--> [1/4] 验证目录创建 100% 幂等与连续多次调用安全...");
+                var smbProvider = new SmbStorageProvider(rootUncPath: testRoot);
+                string testSubDir = "我的文件/工作资料";
+
+                bool all10Passed = true;
+                for (int i = 1; i <= 10; i++)
+                {
+                    var res = await smbProvider.CreateDirectoryAsync(testSubDir);
+                    if (!res.Success)
+                    {
+                        all10Passed = false;
+                        Assert(false, $"第 {i} 次目录创建幂等调用失败: {res.ErrorMessage}");
+                        break;
+                    }
+                }
+                Assert(all10Passed, "连续 10 轮目录创建幂等性调用均返回成功，完全消除「目录已存在仍然报错」缺陷");
+
+                var item = await smbProvider.GetItemAsync(testSubDir);
+                Assert(item != null && item.IsDirectory, "GetItemAsync 准确识别幂等目录存在且为目录");
+
+                // 验证文件同名冲突检测
+                string conflictFileRel = "文件冲突项";
+                File.WriteAllText(Path.Combine(testRoot, conflictFileRel), "Regular file content");
+                var conflictRes = await smbProvider.CreateDirectoryAsync(conflictFileRel);
+                Assert(!conflictRes.Success && conflictRes.ErrorMessage.Contains("已存在同名普通文件"), "目标为已存在文件时准确拦截并报告同名文件冲突");
+
+                // ==========================================
+                // 2. 任务配置验证 (严禁自同步、嵌套与非法路径)
+                // ==========================================
+                Console.WriteLine("--> [2/4] 验证任务配置强校验 (自同步拦截、嵌套防护、存储类型边界)...");
+                string localSrc = Path.Combine(testRoot, "LocalSource");
+                Directory.CreateDirectory(localSrc);
+
+                // A. 源目录与目标目录相同
+                var selfSyncTask = new SyncTask
+                {
+                    TaskId = "t_self",
+                    SourceFolder = localSrc,
+                    DestinationFolder = localSrc,
+                    ProviderType = StorageProviderType.LocalFileSystem
+                };
+                bool selfOk = selfSyncTask.ValidateConfiguration(out string errSelf);
+                Assert(!selfOk && errSelf.Contains("完全相同，严禁自同步"), "源目录与目标目录相同时成功拦截，杜绝自同步死循环");
+
+                // B. 目标目录嵌套在源目录内部
+                var nestedTask = new SyncTask
+                {
+                    TaskId = "t_nest",
+                    SourceFolder = localSrc,
+                    DestinationFolder = Path.Combine(localSrc, "NestedBackup"),
+                    ProviderType = StorageProviderType.LocalFileSystem
+                };
+                bool nestOk = nestedTask.ValidateConfiguration(out string errNest);
+                Assert(!nestOk && errNest.Contains("不能位于源文件夹内部"), "目标目录嵌套在源目录内部时成功拦截");
+
+                // C. fnOS 个人空间任务误填 Windows 盘符路径
+                var drivePersonalTask = new SyncTask
+                {
+                    TaskId = "t_fn_drive",
+                    SourceFolder = localSrc,
+                    DestinationFolder = @"D:\MyPersonalBackup",
+                    ProviderType = StorageProviderType.FnOsPersonal
+                };
+                bool driveOk = drivePersonalTask.ValidateConfiguration(out string errDrive);
+                Assert(!driveOk && errDrive.Contains("必须指向官方「我的文件」"), "飞牛个人空间任务填写 Windows 盘符时被强校验拦截");
+
+                // D. fnOS 个人空间任务误填 UNC 共享路径
+                var uncPersonalTask = new SyncTask
+                {
+                    TaskId = "t_fn_unc",
+                    SourceFolder = localSrc,
+                    DestinationFolder = @"\\192.168.8.120\share",
+                    ProviderType = StorageProviderType.FnOsPersonal
+                };
+                bool uncOk = uncPersonalTask.ValidateConfiguration(out string errUnc);
+                Assert(!uncOk && errUnc.Contains("必须指向官方「我的文件」"), "飞牛个人空间任务填写 UNC 路径时被强校验拦截");
+
+                // E. 合法的个人空间任务
+                var validPersonalTask = new SyncTask
+                {
+                    TaskId = "t_fn_valid",
+                    SourceFolder = localSrc,
+                    DestinationFolder = "工作资料",
+                    ProviderType = StorageProviderType.FnOsPersonal
+                };
+                bool validFnOk = validPersonalTask.ValidateConfiguration(out string errValidFn);
+                Assert(validFnOk && string.IsNullOrEmpty(errValidFn), "合法的飞牛官方「我的文件」相对路径通过校验");
+
+                // F. SMB 任务填非 UNC 路径
+                var invalidSmbTask = new SyncTask
+                {
+                    TaskId = "t_smb_invalid",
+                    SourceFolder = localSrc,
+                    DestinationFolder = "NotUNC",
+                    ProviderType = StorageProviderType.SmbShare
+                };
+                bool smbInvalidOk = invalidSmbTask.ValidateConfiguration(out string errSmbInvalid);
+                Assert(!smbInvalidOk && errSmbInvalid.Contains("必须为有效的 UNC 路径"), "SMB 任务目标非 UNC 时被强校验拦截");
+
+                // ==========================================
+                // 3. 安全删除任务配置生命周期 (绝不删除任何本地或 NAS 数据)
+                // ==========================================
+                Console.WriteLine("--> [3/4] 验证删除任务配置完整生命周期 (状态流转、纯配置删除、零数据损失)...");
+                string safeSrc = Path.Combine(testRoot, "SafeLocalSource");
+                string safeDst = Path.Combine(testRoot, "SafeNasDestination");
+                Directory.CreateDirectory(safeSrc);
+                Directory.CreateDirectory(safeDst);
+
+                string safeSrcFile = Path.Combine(safeSrc, "重要源文件.docx");
+                string safeDstFile = Path.Combine(safeDst, "重要备份文件.docx");
+                File.WriteAllText(safeSrcFile, "User Source Document Content");
+                File.WriteAllText(safeDstFile, "NAS Backup Document Content");
+
+                var testSettings = new AppSettings { MaxConcurrentSyncs = 1 };
+                var testSmb = new SmbAuthService();
+                using var mgr = new TaskManager(testSettings, testSmb);
+
+                var taskToDelete = new SyncTask
+                {
+                    TaskId = "task_to_delete",
+                    TaskName = "待删除任务",
+                    SourceFolder = safeSrc,
+                    DestinationFolder = safeDst,
+                    ProviderType = StorageProviderType.LocalFileSystem,
+                    AutoSyncEnabled = false
+                };
+                mgr.AddTask(taskToDelete);
+                Assert(mgr.Tasks.Any(t => t.TaskId == "task_to_delete"), "任务已成功加入 TaskManager");
+
+                // 执行异步安全删除
+                bool deleteResult = await mgr.RemoveTaskAsync("task_to_delete");
+                Assert(deleteResult, "RemoveTaskAsync 顺利执行完毕并返回 true");
+                Assert(!mgr.Tasks.Any(t => t.TaskId == "task_to_delete"), "任务已彻底从 TaskManager 列表中移除");
+
+                // 核心安全红线验证：本地源文件和 NAS 备份数据完好无损！
+                Assert(File.Exists(safeSrcFile), "[安全红线] 删除任务配置后，本地源文件绝对保留未受损");
+                Assert(File.Exists(safeDstFile), "[安全红线] 删除任务配置后，NAS 目标备份文件绝对保留未受损");
+                Assert(Directory.Exists(safeSrc), "[安全红线] 本地源文件夹完整保留");
+                Assert(Directory.Exists(safeDst), "[安全红线] NAS 目标备份文件夹完整保留");
+
+                // ==========================================
+                // 4. 自动同名规划与批次去重建议验证
+                // ==========================================
+                Console.WriteLine("--> [4/4] 验证用户无需手动建目录的自动规划与批次去重...");
+                var planRoot = Path.Combine(testRoot, "AutoPlanTest");
+                Directory.CreateDirectory(planRoot);
+
+                var (p1, e1, c1) = await testSmb.PlanTargetSubFolderAsync(planRoot, "工作资料", @"D:\工作资料");
+                Assert(p1 == "工作资料" && !e1 && !c1, "首次规划未创建过的目录，保持原名无冲突");
+
+                // 在同一批次中分配了工作资料后，第二项重名文件夹自动分配后缀
+                var (p2, e2, c2) = await testSmb.PlanTargetSubFolderAsync(planRoot, "工作资料", @"E:\其他项目\工作资料", new[] { "工作资料" });
+                Assert(p2 == "工作资料_2" && c2, "批次内已有同名项时，自动规划去重后缀并标记冲突提醒");
+            }
+            finally
+            {
+                try { if (Directory.Exists(testRoot)) Directory.Delete(testRoot, true); } catch { }
+            }
+        }
+
         static async Task<bool> VerifyP0RealNasLifecycleAsync()
         {
             Console.WriteLine("================================================================================");
@@ -2272,9 +2448,12 @@ namespace FNSyncPlus.Tests
                 }
                 Console.WriteLine("[PASS] 用户真实配置文件纯净，无任何伪造/演示任务残留。");
 
+                // ---- P0-5: 目录幂等性、配置校验、安全删除与自动规划 ----
+                await TestP0FolderIdempotencyAndTaskValidationAsync();
+
                 Console.WriteLine("\n================================================================================");
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("    [全部通过] P0 故障修复验证完成：登录证书安全就绪、断开零崩溃、压力测试完美通过！");
+                Console.WriteLine("    [全部通过] P0 故障修复验证完成：登录证书安全就绪、断开零崩溃、目录幂等创建、配置防伪与安全删除完美通过！");
                 Console.ResetColor();
                 Console.WriteLine("================================================================================\n");
                 return true;
