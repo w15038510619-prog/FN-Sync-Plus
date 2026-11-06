@@ -78,6 +78,12 @@ namespace FNSyncPlus.Core.Models
 
         [JsonPropertyName("is_long_name")]
         public bool IsLongName { get; set; }
+
+        [JsonPropertyName("utf8_bytes")]
+        public int? Utf8Bytes { get; set; }
+
+        [JsonPropertyName("stored_utf8_bytes")]
+        public int? StoredUtf8Bytes { get; set; }
     }
 
     /// <summary>
@@ -93,5 +99,11 @@ namespace FNSyncPlus.Core.Models
 
         [JsonPropertyName("is_long_name")]
         public bool IsLongName { get; set; }
+
+        [JsonPropertyName("utf8_bytes")]
+        public int? Utf8Bytes { get; set; }
+
+        [JsonPropertyName("stored_utf8_bytes")]
+        public int? StoredUtf8Bytes { get; set; }
     }
 }

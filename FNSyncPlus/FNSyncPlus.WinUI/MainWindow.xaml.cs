@@ -192,6 +192,10 @@ namespace FNSyncPlus.WinUI
             {
                 ContentFrame.Navigate(targetPageType);
             }
+            else if (ContentFrame.Content is AddFolderPage addPage)
+            {
+                addPage.CheckAndTriggerAutoFolderPicker();
+            }
         }
 
         private void ToggleAppTheme()
@@ -276,6 +280,8 @@ namespace FNSyncPlus.WinUI
 
             if (isConnected)
             {
+                connectionService.PendingOpenLocalFolderPicker = true;
+                connectionService.IsPreservingWizardDraft = false;
                 NavigateToTag("AddFolder");
             }
             else
@@ -294,8 +300,15 @@ namespace FNSyncPlus.WinUI
                 if (result == ContentDialogResult.Primary)
                 {
                     connectionService.PendingWizardOnConnected = true;
+                    connectionService.PendingOpenLocalFolderPicker = true;
                     connectionService.IsPreservingWizardDraft = false;
                     NavigateToTag("Device");
+                }
+                else
+                {
+                    connectionService.PendingWizardOnConnected = false;
+                    connectionService.PendingOpenLocalFolderPicker = false;
+                    connectionService.IsPreservingWizardDraft = false;
                 }
             }
         }

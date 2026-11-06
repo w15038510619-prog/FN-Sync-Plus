@@ -71,6 +71,12 @@ namespace FNSyncPlus.Core.Services
         public bool PendingWizardOnConnected { get; set; }
 
         /// <summary>
+        /// 当用户从「添加文件夹」触发流程时（不论直接进入向导或连接成功后跳转进入），
+        /// 页面加载完成后立即自动弹出 Windows 本地文件夹选择器的单次消费意图标记
+        /// </summary>
+        public bool PendingOpenLocalFolderPicker { get; set; }
+
+        /// <summary>
         /// 向导中途 NAS 断开后前往重连时，保留当前已选择的本地文件夹草稿
         /// </summary>
         public bool IsPreservingWizardDraft { get; set; }

@@ -61,7 +61,7 @@ namespace FNSyncPlus.Core.Services
 
     public class SyncEngine
     {
-        private readonly LongNameEngine _longNameEngine;
+        private LongNameEngine _longNameEngine;
         private readonly ManifestManager _manifestManager;
         private readonly SmbAuthService _smbService;
 
@@ -147,7 +147,10 @@ namespace FNSyncPlus.Core.Services
                 }
             }
 
-            if (ex.Message.Contains("401") ||
+            if (ex.Message.Contains("4104") ||
+                ex.Message.Contains("Path Is Too Long", StringComparison.OrdinalIgnoreCase) ||
+                ex.Message.Contains("499") ||
+                ex.Message.Contains("401") ||
                 ex.Message.Contains("403") ||
                 ex.Message.Contains("未授权") ||
                 ex.Message.Contains("禁止访问") ||
@@ -489,7 +492,9 @@ namespace FNSyncPlus.Core.Services
                                 ModTimeUtcTicks = localFi.LastWriteTimeUtc.Ticks,
                                 ModTimeIso = localFi.LastWriteTimeUtc,
                                 Sha256 = computedHash,
-                                IsLongName = isLong
+                                IsLongName = isLong,
+                                Utf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(originalRel)),
+                                StoredUtf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(storedRel))
                             };
                             manifestFilesMap[originalRel] = newEntry;
 
@@ -566,7 +571,9 @@ namespace FNSyncPlus.Core.Services
                         {
                             OriginalRel = relDir,
                             StoredRel = storedDir,
-                            IsLongName = isLongDir
+                            IsLongName = isLongDir,
+                            Utf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(relDir)),
+                            StoredUtf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(storedDir))
                         });
                     }
                     manifest.Directories = dirList;
@@ -651,6 +658,10 @@ namespace FNSyncPlus.Core.Services
                 report.StatusMessage = $"加载远端元数据清单失败: {ex.Message}";
                 Log("ERROR", report.StatusMessage);
                 throw new IOException(report.StatusMessage, ex);
+            }
+            if (storageProvider is FNSyncPlus.Core.Storage.FnOsPersonalStorageProvider && _longNameEngine.MaxFileUtf8Bytes > LongNameEngine.FnOsUploadMaxUtf8Bytes)
+            {
+                _longNameEngine = LongNameEngine.CreateForProvider(storageProvider);
             }
             manifest.SourceRoot = PathHelper.RemoveLongPathPrefix(sourceFolder);
             manifest.TargetRoot = targetNasFolder;
@@ -799,7 +810,9 @@ namespace FNSyncPlus.Core.Services
                             ModTimeUtcTicks = localFi.LastWriteTimeUtc.Ticks,
                             ModTimeIso = localFi.LastWriteTimeUtc,
                             Sha256 = sha256,
-                            IsLongName = isLong
+                            IsLongName = isLong,
+                            Utf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(originalRel)),
+                            StoredUtf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(storedRel))
                         };
                         manifestFilesMap[originalRel] = newEntry;
 
@@ -852,9 +865,27 @@ namespace FNSyncPlus.Core.Services
                 }
             }
 
-            // 保存最终完整清单
+            // 保存目录清单与最终完整清单
             try
             {
+                var dirList = new List<ManifestDirEntry>();
+                var srcDir = new DirectoryInfo(longSource);
+                foreach (var d in srcDir.EnumerateDirectories("*", SearchOption.AllDirectories))
+                {
+                    string relDir = PathHelper.NormalizeRelPath(Path.GetRelativePath(longSource, d.FullName));
+                    if (ShouldIgnoreRelativeDir(relDir)) continue;
+
+                    var (storedDir, isLongDir) = _longNameEngine.TranslateDirPath(relDir);
+                    dirList.Add(new ManifestDirEntry
+                    {
+                        OriginalRel = relDir,
+                        StoredRel = storedDir,
+                        IsLongName = isLongDir,
+                        Utf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(relDir)),
+                        StoredUtf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(storedDir))
+                    });
+                }
+                manifest.Directories = dirList;
                 manifest.Files = manifestFilesMap.Values.ToList();
                 await _manifestManager.SaveManifestAtomicAsync(storageProvider, targetNasFolder, manifest, token).ConfigureAwait(false);
             }

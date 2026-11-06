@@ -120,11 +120,32 @@ namespace FNSyncPlus.Core.Storage.FnOs
         [JsonPropertyName("from")]
         public long? FromOffset { get; set; }
 
+        [JsonPropertyName("uploadName")]
+        public string? UploadName { get; set; }
+
         [JsonPropertyName("errno")]
         public int? ErrNo { get; set; }
 
         [JsonPropertyName("errmsg")]
         public string? ErrMsg { get; set; }
+    }
+
+    /// <summary>
+    /// 飞牛 HTTP POST /upload 上传响应明细
+    /// 完整保留 HTTP 状态码、业务 result、errno 与 errmsg
+    /// </summary>
+    public class FnOsUploadResult
+    {
+        public bool Success { get; set; }
+        public int HttpStatusCode { get; set; } = 200;
+        public string? Result { get; set; }
+        public int? ErrNo { get; set; }
+        public string? ErrMsg { get; set; }
+        public string? DetailMessage { get; set; }
+
+        public static FnOsUploadResult Ok() => new() { Success = true, HttpStatusCode = 200, Result = "succ" };
+        public static FnOsUploadResult Fail(int httpCode, string? result, int? errNo, string? errMsg, string detail) =>
+            new() { Success = false, HttpStatusCode = httpCode, Result = result ?? "fail", ErrNo = errNo, ErrMsg = errMsg, DetailMessage = detail };
     }
 
     public class FnOsMultipleDownloadRequest

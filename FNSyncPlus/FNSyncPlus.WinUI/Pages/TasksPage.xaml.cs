@@ -50,6 +50,10 @@ namespace FNSyncPlus.WinUI.Pages
 
             if (isConnected)
             {
+                // 已连接：直接进入添加向导，并标记自动弹出文件夹选择窗口
+                connectionService.PendingOpenLocalFolderPicker = true;
+                connectionService.IsPreservingWizardDraft = false;
+
                 if (App.MainWindowInstance != null)
                 {
                     App.MainWindowInstance.NavigateToTag("AddFolder");
@@ -76,6 +80,7 @@ namespace FNSyncPlus.WinUI.Pages
                 if (result == ContentDialogResult.Primary)
                 {
                     connectionService.PendingWizardOnConnected = true;
+                    connectionService.PendingOpenLocalFolderPicker = true;
                     connectionService.IsPreservingWizardDraft = false;
                     if (App.MainWindowInstance != null)
                     {
@@ -85,6 +90,12 @@ namespace FNSyncPlus.WinUI.Pages
                     {
                         Frame.Navigate(typeof(DevicePage));
                     }
+                }
+                else
+                {
+                    connectionService.PendingWizardOnConnected = false;
+                    connectionService.PendingOpenLocalFolderPicker = false;
+                    connectionService.IsPreservingWizardDraft = false;
                 }
             }
         }

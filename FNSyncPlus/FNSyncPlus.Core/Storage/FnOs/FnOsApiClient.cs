@@ -593,9 +593,18 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 Result = doc.RootElement.TryGetProperty("result", out var rProp) ? rProp.GetString() : null,
                 FromOffset = doc.RootElement.TryGetProperty("from", out var fProp) ? fProp.GetInt64() : 0,
             };
+            if (doc.RootElement.TryGetProperty("errno", out var eProp))
+            {
+                resp.ErrNo = eProp.GetInt32();
+            }
+            if (doc.RootElement.TryGetProperty("errmsg", out var emProp))
+            {
+                resp.ErrMsg = emProp.GetString();
+            }
             if (doc.RootElement.TryGetProperty("uploadName", out var uProp))
             {
-                resp.ErrMsg = uProp.GetString(); // uploadName
+                resp.UploadName = uProp.GetString();
+                resp.ErrMsg ??= resp.UploadName;
             }
 
             return resp;
@@ -627,6 +636,22 @@ namespace FNSyncPlus.Core.Storage.FnOs
             IProgress<long>? progress = null,
             CancellationToken ct = default)
         {
+            var res = await UploadStreamDetailedAsync(remotePath, sourceStream, fileSize, lastWriteTimeUtc, overwrite, progress, ct).ConfigureAwait(false);
+            return res.Success;
+        }
+
+        /// <summary>
+        /// 真正的流式上传文件并返回结构化明细 (包含 HTTP 状态码、业务 result、errno 与 errmsg)
+        /// </summary>
+        public async Task<FnOsUploadResult> UploadStreamDetailedAsync(
+            string remotePath,
+            Stream sourceStream,
+            long fileSize,
+            DateTime lastWriteTimeUtc,
+            bool overwrite = true,
+            IProgress<long>? progress = null,
+            CancellationToken ct = default)
+        {
             if (!IsAuthenticated || _hmacKeyBytes == null || string.IsNullOrEmpty(AuthToken))
                 throw new InvalidOperationException("未登录鉴权，无法上传文件。");
 
@@ -644,16 +669,35 @@ namespace FNSyncPlus.Core.Storage.FnOs
             try
             {
                 var checkRes = await CheckUploadAsync(canonicalPath, fileSize, mtim, ct).ConfigureAwait(false);
+                if (checkRes.Result == "fail" || (checkRes.ErrNo.HasValue && checkRes.ErrNo.Value != 0))
+                {
+                    Console.WriteLine($"[DEBUG checkUpload Failed] errno: {checkRes.ErrNo}, msg: {checkRes.ErrMsg}, path: {canonicalPath}");
+                    if (checkRes.ErrNo == 4104)
+                    {
+                        return FnOsUploadResult.Fail(499, "fail", 4104, "Path Is Too Long", $"checkUpload 预检失败：文件名超长 (errno: 4104, errmsg: {checkRes.ErrMsg ?? "Path Is Too Long"})");
+                    }
+                    return FnOsUploadResult.Fail(400, "fail", checkRes.ErrNo, checkRes.ErrMsg, $"checkUpload 预检返回失败: errno={checkRes.ErrNo}, msg={checkRes.ErrMsg}");
+                }
+
                 if (checkRes.FromOffset.HasValue) fromOffset = checkRes.FromOffset.Value;
-                if (!string.IsNullOrEmpty(checkRes.ErrMsg)) // checkRes.ErrMsg 存放了 uploadName
+                if (!string.IsNullOrEmpty(checkRes.UploadName))
+                {
+                    string parentDir = Path.GetDirectoryName(canonicalPath.Replace('\\', '/'))?.Replace('\\', '/') ?? "";
+                    uploadPath = string.IsNullOrEmpty(parentDir) ? checkRes.UploadName : $"{parentDir}/{checkRes.UploadName}";
+                }
+                else if (!string.IsNullOrEmpty(checkRes.ErrMsg) && checkRes.ErrMsg.Contains("~#"))
                 {
                     string parentDir = Path.GetDirectoryName(canonicalPath.Replace('\\', '/'))?.Replace('\\', '/') ?? "";
                     uploadPath = string.IsNullOrEmpty(parentDir) ? checkRes.ErrMsg : $"{parentDir}/{checkRes.ErrMsg}";
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // checkUpload 失败降级使用规范化路径
+                if (ex.Message.Contains("4104") || ex.Message.Contains("Path Is Too Long"))
+                {
+                    return FnOsUploadResult.Fail(499, "fail", 4104, "Path Is Too Long", $"checkUpload 预检异常: {ex.Message}");
+                }
+                // 其他非关键异常降级使用规范化路径
             }
 
             // 3. 计算 Trim-Sign: HMAC-SHA256(SecretKey, Trim-Path)
@@ -708,8 +752,28 @@ namespace FNSyncPlus.Core.Storage.FnOs
             if (!resp.IsSuccessStatusCode)
             {
                 string errContent = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                Console.WriteLine($"[DEBUG Upload Failed] HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}: {errContent}, uploadPath: {uploadPath}");
-                return false;
+                int httpCode = (int)resp.StatusCode;
+                int? errNo = null;
+                string? errMsg = resp.ReasonPhrase;
+                string? result = "fail";
+
+                try
+                {
+                    using var errDoc = JsonDocument.Parse(errContent);
+                    if (errDoc.RootElement.TryGetProperty("errno", out var ep)) errNo = ep.GetInt32();
+                    if (errDoc.RootElement.TryGetProperty("errmsg", out var emp)) errMsg = emp.GetString();
+                    if (errDoc.RootElement.TryGetProperty("result", out var rp)) result = rp.GetString();
+                }
+                catch { }
+
+                if (httpCode == 499 || resp.ReasonPhrase?.Contains("Path Is Too Long") == true)
+                {
+                    errNo ??= 4104;
+                    errMsg ??= "Path Is Too Long";
+                }
+
+                Console.WriteLine($"[DEBUG Upload Failed] HTTP {httpCode} {resp.ReasonPhrase}: {errContent}, uploadPath: {uploadPath}");
+                return FnOsUploadResult.Fail(httpCode, result, errNo, errMsg, $"HTTP {httpCode} {resp.ReasonPhrase}: {errContent}");
             }
 
             // 校验业务响应内容
@@ -719,21 +783,20 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 try
                 {
                     using var doc = JsonDocument.Parse(respBody);
-                    if (doc.RootElement.TryGetProperty("result", out var resProp) && resProp.GetString() == "fail")
+                    string? resStr = doc.RootElement.TryGetProperty("result", out var resProp) ? resProp.GetString() : null;
+                    int? errNo = doc.RootElement.TryGetProperty("errno", out var errNoProp) ? errNoProp.GetInt32() : null;
+                    string? errMsg = doc.RootElement.TryGetProperty("errmsg", out var msgProp) ? msgProp.GetString() : null;
+
+                    if (resStr == "fail" || (errNo.HasValue && errNo.Value != 0))
                     {
                         Console.WriteLine($"[DEBUG Upload Body Failed] {respBody}, uploadPath: {uploadPath}");
-                        return false;
-                    }
-                    if (doc.RootElement.TryGetProperty("errno", out var errNoProp) && errNoProp.GetInt32() != 0)
-                    {
-                        Console.WriteLine($"[DEBUG Upload ErrNo Failed] {respBody}, uploadPath: {uploadPath}");
-                        return false;
+                        return FnOsUploadResult.Fail(200, resStr ?? "fail", errNo, errMsg, respBody);
                     }
                 }
                 catch { }
             }
 
-            return true;
+            return FnOsUploadResult.Ok();
         }
 
         /// <summary>

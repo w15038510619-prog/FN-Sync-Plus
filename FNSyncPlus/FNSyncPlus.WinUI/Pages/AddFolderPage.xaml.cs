@@ -13,11 +13,18 @@ namespace FNSyncPlus.WinUI.Pages
     public sealed partial class AddFolderPage : Page
     {
         public AddFolderWizardViewModel ViewModel { get; }
+        private bool _isPickingFolder = false;
 
         public AddFolderPage()
         {
             ViewModel = AppServices.GetService<AddFolderWizardViewModel>();
             InitializeComponent();
+            this.Loaded += OnPageLoaded;
+        }
+
+        private void OnPageLoaded(object sender, RoutedEventArgs e)
+        {
+            CheckAndTriggerAutoFolderPicker();
         }
 
         protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -34,6 +41,60 @@ namespace FNSyncPlus.WinUI.Pages
                 // 每次用户重新进入添加向导，必须创建全新的独立会话状态，清空临时选择，绝不残留上次记录
                 ViewModel.ResetSession();
             }
+
+            if (this.IsLoaded)
+            {
+                CheckAndTriggerAutoFolderPicker();
+            }
+        }
+
+        /// <summary>
+        /// 检查是否具备单次自动打开文件夹选择器的意图并安全触发
+        /// </summary>
+        public void CheckAndTriggerAutoFolderPicker()
+        {
+            var connectionService = AppServices.GetService<FNSyncPlus.Core.Services.NasConnectionService>();
+            if (connectionService.PendingOpenLocalFolderPicker)
+            {
+                // 立即消费该单次意图，确保只弹出一次，用户取消或之后重载绝不再弹
+                connectionService.PendingOpenLocalFolderPicker = false;
+                _ = TriggerFolderPickerSafeAsync();
+            }
+        }
+
+        private async Task TriggerFolderPickerSafeAsync()
+        {
+            if (_isPickingFolder) return;
+            _isPickingFolder = true;
+
+            try
+            {
+                IntPtr hwnd = App.MainWindowHandle;
+                if (hwnd == IntPtr.Zero && App.MainWindowInstance != null)
+                {
+                    hwnd = WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindowInstance);
+                }
+
+                var folder = await WindowHelper.PickFolderAsync(hwnd);
+                if (!string.IsNullOrWhiteSpace(folder))
+                {
+                    await ViewModel.AddLocalFolderAsync(folder);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[AddFolderPage] 打开文件夹选择器异常: {ex.Message}");
+                ViewModel.StatusMessage = $"打开文件夹选择器失败: {ex.Message}，您可以点击下方「选择本地文件夹」手动选择。";
+            }
+            finally
+            {
+                _isPickingFolder = false;
+            }
+        }
+
+        private async void BtnAddLocalFolder_Click(object sender, RoutedEventArgs e)
+        {
+            await TriggerFolderPickerSafeAsync();
         }
 
         private void BtnReconnectNas_Click(object sender, RoutedEventArgs e)
@@ -75,14 +136,6 @@ namespace FNSyncPlus.WinUI.Pages
             }
         }
 
-        private async void BtnAddLocalFolder_Click(object sender, RoutedEventArgs e)
-        {
-            var folder = await WindowHelper.PickFolderAsync(App.MainWindowHandle);
-            if (!string.IsNullOrWhiteSpace(folder))
-            {
-                await ViewModel.AddLocalFolderAsync(folder);
-            }
-        }
 
         private async void BtnRemoveFolder_Click(object sender, RoutedEventArgs e)
         {

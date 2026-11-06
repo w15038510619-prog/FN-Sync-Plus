@@ -364,8 +364,11 @@ namespace FNSyncPlus.Core.Services
             var taskCts = CancellationTokenSource.CreateLinkedTokenSource(managerToken);
             _runningCts[task.TaskId] = taskCts;
 
+            var provider = StorageProviderSupplier?.Invoke();
+
             // 每个任务独立实例化 LongNameEngine 与 ManifestManager，彻底隔离多任务字典与临时映射
-            var taskLongNameEngine = new LongNameEngine(maxUtf8Bytes: 255);
+            // 根据任务实际的存储提供程序动态配置安全阈值 (fnOS 个人空间上传接口安全阈值 251 字节，SMB 共享保持 255 字节)
+            var taskLongNameEngine = LongNameEngine.CreateForProvider(provider ?? (task.ProviderType == FNSyncPlus.Core.Storage.StorageProviderType.FnOsPersonal ? new FNSyncPlus.Core.Storage.FnOsPersonalStorageProvider() : null));
             var taskManifestManager = new ManifestManager();
             var syncEngine = new SyncEngine(taskLongNameEngine, taskManifestManager, _smbService);
 
@@ -388,7 +391,6 @@ namespace FNSyncPlus.Core.Services
                 task.LastError = null;
                 TaskStateChanged?.Invoke(task);
 
-                var provider = StorageProviderSupplier?.Invoke();
                 var report = await syncEngine.RunSyncAsync(task.SourceFolder, task.DestinationFolder, provider, taskCts.Token).ConfigureAwait(false);
 
                 task.LastSyncTime = DateTime.Now;

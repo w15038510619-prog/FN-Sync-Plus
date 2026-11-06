@@ -220,16 +220,7 @@ namespace FNSyncPlus.Core.Storage
 
             // 严格安全边界校验：任何包含 .. 或非法组件的越界遍历直接拦截并抛出 ArgumentException
             string validatedFullPath = CombineWithPersonalRoot(relativePath);
-
-            string clean = relativePath.Trim().Replace('\\', '/').Trim('/');
-            if (clean.StartsWith("我的文件/", StringComparison.OrdinalIgnoreCase))
-            {
-                clean = clean.Substring("我的文件/".Length).TrimStart('/');
-            }
-            else if (clean.Equals("我的文件", StringComparison.OrdinalIgnoreCase))
-            {
-                clean = "";
-            }
+            string clean = NormalizeRelativePath(relativePath);
 
             if (string.IsNullOrEmpty(clean))
             {
@@ -321,16 +312,7 @@ namespace FNSyncPlus.Core.Storage
             // 严格安全边界校验：任何包含 .. 或非法组件的越界遍历直接拦截并抛出 ArgumentException
             CombineWithPersonalRoot(relativePath);
 
-            string clean = relativePath.Trim().Replace('\\', '/').Trim('/');
-            if (clean.StartsWith("我的文件/", StringComparison.OrdinalIgnoreCase))
-            {
-                clean = clean.Substring("我的文件/".Length).TrimStart('/');
-            }
-            else if (clean.Equals("我的文件", StringComparison.OrdinalIgnoreCase))
-            {
-                clean = "";
-            }
-
+            string clean = NormalizeRelativePath(relativePath);
             if (string.IsNullOrEmpty(clean))
             {
                 return new NasStorageItem
@@ -398,7 +380,7 @@ namespace FNSyncPlus.Core.Storage
             try
             {
                 // 1. 真正的分块流式上传并校验业务响应
-                bool success = await _apiClient.UploadStreamAsync(
+                var uploadRes = await _apiClient.UploadStreamDetailedAsync(
                     fullPath,
                     sourceStream,
                     fileSize,
@@ -407,14 +389,17 @@ namespace FNSyncPlus.Core.Storage
                     progress,
                     ct).ConfigureAwait(false);
 
-                if (!success)
+                if (!uploadRes.Success)
                 {
-                    return StorageOperationResult.Fail("上传接口返回失败或业务校验未通过", path: fullPath);
+                    string detail = !string.IsNullOrEmpty(uploadRes.ErrMsg) ? uploadRes.ErrMsg : uploadRes.DetailMessage ?? "未知错误";
+                    string err = $"[fnOS 上传失败] HTTP {uploadRes.HttpStatusCode} (result: {uploadRes.Result ?? "fail"}), errno: {uploadRes.ErrNo}, errmsg: {detail}";
+                    return StorageOperationResult.Fail(err, uploadRes.ErrNo, fullPath);
                 }
 
                 // 2. 上传完成后的物理存在与文件大小强校验，杜绝虚假成功
-                string parentRel = Path.GetDirectoryName(relativePath.Replace('\\', '/'))?.Replace('\\', '/') ?? "";
-                string fileName = Path.GetFileName(relativePath.Replace('\\', '/'));
+                string clean = NormalizeRelativePath(relativePath);
+                string parentRel = Path.GetDirectoryName(clean)?.Replace('\\', '/') ?? "";
+                string fileName = Path.GetFileName(clean);
 
                 bool verified = false;
                 for (int attempt = 0; attempt < 3; attempt++)
@@ -494,7 +479,7 @@ namespace FNSyncPlus.Core.Storage
             }
 
             // 严格安全保护：正式个人空间暂时禁止物理删除，仅允许在用户明确授权的测试探测目录中清理
-            string clean = relativePath.Trim('/', '\\').Replace('\\', '/');
+            string clean = NormalizeRelativePath(relativePath);
             bool isAuthorizedTestFolder = clean.StartsWith("_FNSYNC_SAFETY_PROBE_", StringComparison.OrdinalIgnoreCase) ||
                                          clean.StartsWith("FN_SYNC_POC_", StringComparison.OrdinalIgnoreCase) ||
                                          clean.StartsWith("FN_TEST_", StringComparison.OrdinalIgnoreCase);
@@ -516,40 +501,46 @@ namespace FNSyncPlus.Core.Storage
             });
         }
 
-        private string CombineWithPersonalRoot(string? relativePath)
+        private string NormalizeRelativePath(string? relativePath)
         {
-            string root = _personalRootPath ?? $"vol1/{_apiClient.CurrentUid ?? 1000}";
             if (string.IsNullOrWhiteSpace(relativePath))
             {
-                return root;
+                return "";
             }
 
-            string clean = relativePath.Trim().Replace('\\', '/');
-            if (clean.StartsWith("/"))
-            {
-                clean = clean.TrimStart('/');
-            }
+            string clean = relativePath.Trim().Replace('\\', '/').Trim('/');
+            string root = _personalRootPath ?? $"vol1/{_apiClient.CurrentUid ?? 1000}";
 
             // 支持兼容「我的文件」或「我的文件/...」的前缀
             if (clean.Equals("我的文件", StringComparison.OrdinalIgnoreCase))
             {
-                return root;
+                return "";
             }
             if (clean.StartsWith("我的文件/", StringComparison.OrdinalIgnoreCase))
             {
                 clean = clean.Substring("我的文件/".Length).TrimStart('/');
-                if (string.IsNullOrEmpty(clean)) return root;
             }
 
             // 支持已包含 root 前缀 (例如 vol1/1006/...) 的路径
             if (clean.Equals(root, StringComparison.OrdinalIgnoreCase))
             {
-                return root;
+                return "";
             }
             if (clean.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase))
             {
                 clean = clean.Substring(root.Length + 1).TrimStart('/');
-                if (string.IsNullOrEmpty(clean)) return root;
+            }
+
+            return clean;
+        }
+
+        private string CombineWithPersonalRoot(string? relativePath)
+        {
+            string root = _personalRootPath ?? $"vol1/{_apiClient.CurrentUid ?? 1000}";
+            string clean = NormalizeRelativePath(relativePath);
+            if (string.IsNullOrEmpty(clean))
+            {
+                return root;
             }
 
             // 严格检查目录遍历与非法字符

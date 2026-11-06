@@ -174,6 +174,7 @@ namespace FNSyncPlus.WinUI.ViewModels
 
                 if (success && _connectionService.PendingWizardOnConnected)
                 {
+                    _connectionService.PendingWizardOnConnected = false;
                     RequestNavigateToAddFolder?.Invoke();
                 }
             }
@@ -204,6 +205,8 @@ namespace FNSyncPlus.WinUI.ViewModels
         public void CancelCertificateTrust()
         {
             _connectionService.ClearUntrustedCertificate();
+            _connectionService.PendingWizardOnConnected = false;
+            _connectionService.PendingOpenLocalFolderPicker = false;
             IsCertConfirmationRequired = false;
             StatusMessage = "已取消证书信任，连接中止。";
         }
@@ -231,6 +234,7 @@ namespace FNSyncPlus.WinUI.ViewModels
 
                 if (success && _connectionService.PendingWizardOnConnected)
                 {
+                    _connectionService.PendingWizardOnConnected = false;
                     RequestNavigateToAddFolder?.Invoke();
                 }
             }
@@ -253,6 +257,8 @@ namespace FNSyncPlus.WinUI.ViewModels
             IsBusy = true;
             try
             {
+                _connectionService.PendingWizardOnConnected = false;
+                _connectionService.PendingOpenLocalFolderPicker = false;
                 await _connectionService.DisconnectAsync();
                 IsSuccess = false;
                 IsCertConfirmationRequired = false;

@@ -602,53 +602,204 @@ namespace FNSyncPlus.Tests
             Console.ResetColor();
 
             // -------------------------------------------------------------
-            // 用例 8: 254 字节与 255 字节临界文件名
+            // 用例 8: 249B ~ 300B 临界与超长文件名正式 SyncEngine 端到端验证
+            // 包含 249B, 250B, 251B 原生直传极限，以及 252B, 253B, 254B, 255B, 256B, 300B 物理别名安全存储
             // -------------------------------------------------------------
-            Console.WriteLine("\n--- [用例 8/13] 254 字节与 255 字节临界文件名 (临界边界测试) ---");
-            string c8Dir = $"{pocRemoteDirPath}/临界测试";
-            await client.CreateDirectoryAsync(c8Dir);
+            Console.WriteLine("\n--- [用例 8/13] 249B ~ 300B 临界文件名正式 SyncEngine 同步与还原验证 (含真实 254B/255B 样本) ---");
 
-            // 1. 测试原生直传安全边界：250 字节与 251 字节
+            string localBoundaryDir = Path.Combine(Path.GetTempPath(), "FNSync_Boundary_Src_" + pocTag);
+            string localRestoreBoundaryDir = Path.Combine(Path.GetTempPath(), "FNSync_Boundary_Rst_" + pocTag);
+            Directory.CreateDirectory(localBoundaryDir);
+            Directory.CreateDirectory(localRestoreBoundaryDir);
+
+            // 1. 构建 9 个边界与超长测试文件
+            var boundaryFiles = new List<(string FileName, int ExpectedBytes, byte[] Content, string Sha256)>();
+
+            // 249 字节
+            string pfx249 = "Len249_";
+            string f249 = pfx249 + new string('X', 249 - Encoding.UTF8.GetByteCount(pfx249) - 4) + ".txt";
+            byte[] b249 = Encoding.UTF8.GetBytes("Boundary test 249 bytes content.");
+            boundaryFiles.Add((f249, 249, b249, HashHelper.ComputeSha256(b249)));
+
+            // 250 字节
             string pfx250 = "Len250_";
-            int pad250 = 250 - Encoding.UTF8.GetByteCount(pfx250) - 4;
-            string name250 = pfx250 + new string('X', pad250) + ".txt";
-            string remote250 = $"{c8Dir}/{name250}";
-            byte[] bytes250 = Encoding.UTF8.GetBytes("Boundary 250 bytes probe content.");
-            string sha250 = HashHelper.ComputeSha256(bytes250);
-            bool up250 = await client.UploadFileAsync(remote250, bytes250, nowUtc, true);
-            if (!up250) { Console.WriteLine("[FAIL] 250 字节直传失败"); return false; }
-            byte[] down250 = await client.DownloadFileAsync(remote250);
-            if (HashHelper.ComputeSha256(down250) != sha250) { Console.WriteLine("[FAIL] 250 字节下载 SHA-256 不一致"); return false; }
-            sampleFilesMap[$"临界测试/{name250}"] = (bytes250, sha250, nowUtc, $"临界测试/{name250}");
-            Console.WriteLine($"  -> [PASS] 250 字节文件原生直传成功，SHA-256 一致 ({sha250})");
+            string f250 = pfx250 + new string('X', 250 - Encoding.UTF8.GetByteCount(pfx250) - 4) + ".txt";
+            byte[] b250 = Encoding.UTF8.GetBytes("Boundary test 250 bytes content.");
+            boundaryFiles.Add((f250, 250, b250, HashHelper.ComputeSha256(b250)));
 
+            // 251 字节
             string pfx251 = "Len251_";
-            int pad251 = 251 - Encoding.UTF8.GetByteCount(pfx251) - 4;
-            string name251 = pfx251 + new string('Y', pad251) + ".txt";
-            string remote251 = $"{c8Dir}/{name251}";
-            byte[] bytes251 = Encoding.UTF8.GetBytes("Boundary 251 bytes probe content.");
-            string sha251 = HashHelper.ComputeSha256(bytes251);
-            bool up251 = await client.UploadFileAsync(remote251, bytes251, nowUtc, true);
-            if (!up251) { Console.WriteLine("[FAIL] 251 字节直传失败"); return false; }
-            byte[] down251 = await client.DownloadFileAsync(remote251);
-            if (HashHelper.ComputeSha256(down251) != sha251) { Console.WriteLine("[FAIL] 251 字节下载 SHA-256 不一致"); return false; }
-            sampleFilesMap[$"临界测试/{name251}"] = (bytes251, sha251, nowUtc, $"临界测试/{name251}");
-            Console.WriteLine($"  -> [PASS] 251 字节文件原生直传极限成功，SHA-256 一致 ({sha251})");
+            string f251 = pfx251 + new string('X', 251 - Encoding.UTF8.GetByteCount(pfx251) - 4) + ".txt";
+            byte[] b251 = Encoding.UTF8.GetBytes("Boundary test 251 bytes content.");
+            boundaryFiles.Add((f251, 251, b251, HashHelper.ComputeSha256(b251)));
 
-            // 2. 验证 254 字节与 255 字节在 fnOS 服务端的物理边界特性：
-            // 实测表明：Linux 内核 NAME_MAX = 255 字节。fnOS 服务端在上传处理中会附加临时暂存后缀（如 .part 或 .tmp），
-            // 导致原始名称 >= 252 字节时中间临时文件名超过 255 字节，被服务端返回 errno 4104 (Path Is Too Long)。
-            string pfx254 = "Len254_";
-            int pad254 = 254 - Encoding.UTF8.GetByteCount(pfx254) - 4;
-            string name254 = pfx254 + new string('Z', pad254) + ".txt";
-            string remote254 = $"{c8Dir}/{name254}";
-            byte[] bytes254 = Encoding.UTF8.GetBytes("Boundary 254 bytes direct attempt.");
-            bool up254Direct = await client.UploadFileAsync(remote254, bytes254, nowUtc, true);
-            Console.WriteLine($"  -> [物理实测] 254 字节直接上传探测结果 = {up254Direct} (预期触发 fnOS 暂存后缀保护上限，由 LongNameEngine 纳管)");
+            // 252 字节
+            string pfx252 = "Len252_";
+            string f252 = pfx252 + new string('X', 252 - Encoding.UTF8.GetByteCount(pfx252) - 4) + ".txt";
+            byte[] b252 = Encoding.UTF8.GetBytes("Boundary test 252 bytes content.");
+            boundaryFiles.Add((f252, 252, b252, HashHelper.ComputeSha256(b252)));
+
+            // 253 字节
+            string pfx253 = "Len253_";
+            string f253 = pfx253 + new string('X', 253 - Encoding.UTF8.GetByteCount(pfx253) - 4) + ".txt";
+            byte[] b253 = Encoding.UTF8.GetBytes("Boundary test 253 bytes content.");
+            boundaryFiles.Add((f253, 253, b253, HashHelper.ComputeSha256(b253)));
+
+            // 254 字节 (用户此前真实失败样本: 83个汉字 + 'a' + '.txt' = 249 + 1 + 4 = 254 字节)
+            string f254 = new string('汉', 83) + "a.txt";
+            byte[] b254 = Encoding.UTF8.GetBytes("User 254 bytes real test sample content.");
+            boundaryFiles.Add((f254, 254, b254, HashHelper.ComputeSha256(b254)));
+
+            // 255 字节 (用户此前真实失败样本: 83个汉字 + 'ab' + '.txt' = 249 + 2 + 4 = 255 字节)
+            string f255 = new string('汉', 83) + "ab.txt";
+            byte[] b255 = Encoding.UTF8.GetBytes("User 255 bytes real test sample content.");
+            boundaryFiles.Add((f255, 255, b255, HashHelper.ComputeSha256(b255)));
+
+            // 256 字节超长中文
+            string f256 = "超长256字节_" + new string('中', 75) + "_结尾.docx";
+            while (Encoding.UTF8.GetByteCount(f256) < 256) f256 = f256.Insert(10, "A");
+            while (Encoding.UTF8.GetByteCount(f256) > 256) f256 = f256.Remove(10, 1);
+            byte[] b256 = Encoding.UTF8.GetBytes("Chinese long name 256 bytes content.");
+            boundaryFiles.Add((f256, 256, b256, HashHelper.ComputeSha256(b256)));
+
+            // 300 字节超长中文
+            string f300 = "超长300字节_" + new string('华', 90) + "_财务总结.pdf";
+            while (Encoding.UTF8.GetByteCount(f300) < 300) f300 = f300.Insert(10, "B");
+            while (Encoding.UTF8.GetByteCount(f300) > 300) f300 = f300.Remove(10, 1);
+            byte[] b300 = Encoding.UTF8.GetBytes("Chinese long name 300 bytes content.");
+            boundaryFiles.Add((f300, 300, b300, HashHelper.ComputeSha256(b300)));
+
+            // 写入本地源目录并核对实际 UTF-8 字节数
+            foreach (var item in boundaryFiles)
+            {
+                int actualBytes = PathHelper.GetUtf8ByteCount(item.FileName);
+                if (actualBytes != item.ExpectedBytes)
+                {
+                    Console.WriteLine($"[FAIL] 测试样本构建字节数不匹配: 期望 {item.ExpectedBytes}, 实际 {actualBytes} (文件名: {item.FileName})");
+                    return false;
+                }
+                string localPath = PathHelper.EnsureLongPathPrefix(Path.Combine(localBoundaryDir, item.FileName));
+                await File.WriteAllBytesAsync(localPath, item.Content);
+            }
+            Console.WriteLine($"[PASS] 成功构建 9 项严格边界测试文件 (249B, 250B, 251B, 252B, 253B, 254B, 255B, 256B, 300B)");
+
+            // 2. 使用正式 SyncEngine 执行真实同步
+            string remoteBoundaryFolder = $"{pocRemoteDirPath}/临界测试";
+            var boundaryLongEngine = LongNameEngine.CreateForProvider(provider);
+            var boundaryManifestMgr = new ManifestManager();
+            var boundarySyncEngine = new SyncEngine(boundaryLongEngine, boundaryManifestMgr, new SmbAuthService());
+
+            Console.WriteLine($"  -> 正式 SyncEngine 配置: MaxFileUtf8Bytes={boundaryLongEngine.MaxFileUtf8Bytes}, MaxDirUtf8Bytes={boundaryLongEngine.MaxDirUtf8Bytes}");
+            var syncReport = await boundarySyncEngine.RunSyncAsync(localBoundaryDir, remoteBoundaryFolder, provider, CancellationToken.None);
+
+            if (syncReport.TotalFiles != 9 || syncReport.UploadedFiles != 9 || syncReport.FailedFiles != 0 || syncReport.LongNameFiles != 6)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[FAIL] 正式 SyncEngine 执行结果异常: Total={syncReport.TotalFiles}, Uploaded={syncReport.UploadedFiles}, Failed={syncReport.FailedFiles}, LongNameFiles={syncReport.LongNameFiles} (期望: 上传 9, 长名映射 6, 失败 0)");
+                Console.ResetColor();
+                return false;
+            }
+            Console.WriteLine($"[PASS] 正式 SyncEngine 备份成功: 全部 9 个文件上传成功 (3 个原名直传，6 个别名安全存储)，0 失败！");
+
+            // 3. 读取远端 Manifest 并校验 9 个文件的映射明细
+            var loadedBoundaryManifest = await boundaryManifestMgr.LoadManifestAsync(provider, remoteBoundaryFolder);
+            if (loadedBoundaryManifest == null || loadedBoundaryManifest.Files.Count != 9)
+            {
+                Console.WriteLine($"[FAIL] 远端清单条目数异常: {loadedBoundaryManifest?.Files.Count ?? 0} (期望 9)");
+                return false;
+            }
+
+            foreach (var item in boundaryFiles)
+            {
+                var entry = loadedBoundaryManifest.Files.FirstOrDefault(f => f.OriginalRel == item.FileName);
+                if (entry == null)
+                {
+                    Console.WriteLine($"[FAIL] 清单中未检索到原始文件: {item.FileName}");
+                    return false;
+                }
+
+                bool expectLong = item.ExpectedBytes > LongNameEngine.FnOsUploadMaxUtf8Bytes; // > 251B
+                if (entry.IsLongName != expectLong)
+                {
+                    Console.WriteLine($"[FAIL] 文件 {item.ExpectedBytes}B 长名标记不符: 实际 IsLongName={entry.IsLongName}, 期望={expectLong}");
+                    return false;
+                }
+
+                if (expectLong && !entry.StoredRel.Contains(LongNameEngine.LongNamePrefix))
+                {
+                    Console.WriteLine($"[FAIL] 文件 {item.ExpectedBytes}B 未生成安全物理别名: {entry.StoredRel}");
+                    return false;
+                }
+
+                if (!expectLong && entry.StoredRel != entry.OriginalRel)
+                {
+                    Console.WriteLine($"[FAIL] 文件 {item.ExpectedBytes}B 本应原名直传却被转换: {entry.StoredRel}");
+                    return false;
+                }
+
+                if (entry.Sha256 != item.Sha256)
+                {
+                    Console.WriteLine($"[FAIL] 清单 SHA-256 不匹配: {entry.Sha256} vs {item.Sha256}");
+                    return false;
+                }
+
+                Console.WriteLine($"  -> [{item.ExpectedBytes}B] 原始: {item.FileName.Substring(0, Math.Min(30, item.FileName.Length))}... -> NAS 物理: {entry.StoredRel}, SHA-256: {entry.Sha256.Substring(0, 12)}... (映射: {entry.IsLongName})");
+            }
+            Console.WriteLine("[PASS] 远端 Manifest 映射表校验 100% 正确！");
+
+            // 4. 第二次同步验证：确认原有映射被复用且未修改文件 100% 跳过上传
+            Console.WriteLine("  -> 执行第 2 次正式增量同步，验证映射复用与增量跳过...");
+            var incReport = await boundarySyncEngine.RunSyncAsync(localBoundaryDir, remoteBoundaryFolder, provider, CancellationToken.None);
+            if (incReport.UnchangedFiles != 9 || incReport.UploadedFiles != 0 || incReport.FailedFiles != 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[FAIL] 增量同步异常: Unchanged={incReport.UnchangedFiles}, Uploaded={incReport.UploadedFiles}, Failed={incReport.FailedFiles} (期望: 跳过 9, 上传 0)");
+                Console.ResetColor();
+                return false;
+            }
+            Console.WriteLine("[PASS] 第 2 次增量同步 100% 跳过全部 9 个未修改文件，原有映射稳定复用！");
+
+            // 5. 正式 RestoreEngine 异机还原与逐字节比对
+            Console.WriteLine("  -> 执行正式 RestoreEngine 异机完整性还原...");
+            var boundaryRestoreEngine = new RestoreEngine(boundaryManifestMgr);
+            var restReport = await boundaryRestoreEngine.RunRestoreAsync(provider, remoteBoundaryFolder, localRestoreBoundaryDir);
+            if (restReport.RestoredFiles != 9 || restReport.IntegrityVerifiedFiles != 9 || restReport.FailedFiles != 0)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[FAIL] 异机还原异常: Restored={restReport.RestoredFiles}, IntegrityVerified={restReport.IntegrityVerifiedFiles}, Failed={restReport.FailedFiles}");
+                Console.ResetColor();
+                return false;
+            }
+
+            // 逐一比对本地落盘文件的完整原始长文件名与 SHA-256
+            foreach (var item in boundaryFiles)
+            {
+                string restoredFilePath = PathHelper.EnsureLongPathPrefix(Path.Combine(localRestoreBoundaryDir, item.FileName));
+                if (!File.Exists(restoredFilePath))
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[FAIL] 还原目标磁盘上未找到文件: {item.FileName}");
+                    Console.ResetColor();
+                    return false;
+                }
+
+                string restoredSha = HashHelper.ComputeFileSha256(restoredFilePath);
+                if (restoredSha != item.Sha256)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[FAIL] 还原文件 SHA-256 不一致！{item.FileName}: 期望 {item.Sha256}, 实际 {restoredSha}");
+                    Console.ResetColor();
+                    return false;
+                }
+            }
 
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("[PASS] 用例 8 成功！探测并验证了 250/251 字节直传极限与 254/255 字节边界特性");
+            Console.WriteLine("[PASS] 用例 8 成功！249B~300B（含真实 254B/255B 样本）正式 SyncEngine 同步、清单记录、增量跳过与异机还原 SHA-256 100% 强一致！");
             Console.ResetColor();
+
+            // 清理本地临时测试目录
+            try { Directory.Delete(localBoundaryDir, true); } catch { }
+            try { Directory.Delete(localRestoreBoundaryDir, true); } catch { }
 
             // -------------------------------------------------------------
             // 用例 9: 超过 255 字节（256 字节、300 字节）的中文文件名短名无损映射
@@ -658,19 +809,15 @@ namespace FNSyncPlus.Tests
             await client.CreateDirectoryAsync(c9Dir);
 
             // 256 字节原名
-            string orig256 = "超长256字节_" + new string('中', 75) + "_结尾.docx";
-            while (Encoding.UTF8.GetByteCount(orig256) < 256) orig256 = orig256.Insert(10, "A");
-            while (Encoding.UTF8.GetByteCount(orig256) > 256) orig256 = orig256.Remove(10, 1);
+            string orig256 = f256;
             int bCount256 = Encoding.UTF8.GetByteCount(orig256);
 
             // 300 字节原名
-            string orig300 = "超长300字节_" + new string('华', 90) + "_财务总结.pdf";
-            while (Encoding.UTF8.GetByteCount(orig300) < 300) orig300 = orig300.Insert(10, "B");
-            while (Encoding.UTF8.GetByteCount(orig300) > 300) orig300 = orig300.Remove(10, 1);
+            string orig300 = f300;
             int bCount300 = Encoding.UTF8.GetByteCount(orig300);
 
-            var (stored256, isLong256) = longEngine.TranslateFilePath($"超长文件名测试/{orig256}");
-            var (stored300, isLong300) = longEngine.TranslateFilePath($"超长文件名测试/{orig300}");
+            var (stored256, isLong256) = boundaryLongEngine.TranslateFilePath($"超长文件名测试/{orig256}");
+            var (stored300, isLong300) = boundaryLongEngine.TranslateFilePath($"超长文件名测试/{orig300}");
 
             if (!isLong256 || !isLong300) { Console.WriteLine($"[FAIL] 未正确识别超长文件名: isLong256={isLong256}, isLong300={isLong300}"); return false; }
             Console.WriteLine($"  -> 原始 256B 文件: {bCount256} 字节 -> 映射物理别名: {stored256} ({Encoding.UTF8.GetByteCount(stored256)} 字节)");
