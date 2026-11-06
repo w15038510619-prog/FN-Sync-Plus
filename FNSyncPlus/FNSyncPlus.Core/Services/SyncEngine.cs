@@ -167,34 +167,39 @@ namespace FNSyncPlus.Core.Services
             if (!File.Exists(fullPath)) return false;
             var sw = Stopwatch.StartNew();
             long prevSize = -1;
+            DateTime prevModified = DateTime.MinValue;
             while (sw.Elapsed.TotalSeconds < maxWaitSeconds)
             {
-                if (token.IsCancellationRequested) return false;
+                token.ThrowIfCancellationRequested();
                 try
                 {
                     var fi = new FileInfo(fullPath);
                     if (!fi.Exists) return false;
                     long curSize = fi.Length;
-                    using (var s = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    var curModified = fi.LastWriteTimeUtc;
+                    using (var s = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read))
                     {
-                        if (prevSize >= 0 && curSize == prevSize)
+                        if (prevSize >= 0 && curSize == prevSize && curModified == prevModified)
                         {
                             return true;
                         }
                         prevSize = curSize;
+                        prevModified = curModified;
                     }
                     await Task.Delay(300, token).ConfigureAwait(false);
                 }
                 catch (IOException)
                 {
+                    prevSize = -1;
                     await Task.Delay(500, token).ConfigureAwait(false);
                 }
                 catch (UnauthorizedAccessException)
                 {
+                    prevSize = -1;
                     await Task.Delay(500, token).ConfigureAwait(false);
                 }
             }
-            return File.Exists(fullPath);
+            return false;
         }
 
         private Dictionary<string, string> DetectRenamesAndProcessDeletions(
@@ -629,7 +634,8 @@ namespace FNSyncPlus.Core.Services
                     string uploadError = "";
 
                     // 防写抖动安全检查：确保文件未被独占锁定且内容已完整写入
-                    await WaitForFileSettlingAsync(localFull, 3, token).ConfigureAwait(false);
+                    if (!await WaitForFileSettlingAsync(localFull, 3, token).ConfigureAwait(false))
+                        throw new IOException($"文件仍被占用或未稳定，已停止备份: {originalRel}");
 
                     for (int attempt = 1; attempt <= 3; attempt++)
                     {
@@ -984,7 +990,8 @@ namespace FNSyncPlus.Core.Services
                 string uploadError = "";
 
                 // 防写抖动安全检查：确保文件未被独占锁定且内容已完整写入
-                await WaitForFileSettlingAsync(localFull, 3, token).ConfigureAwait(false);
+                if (!await WaitForFileSettlingAsync(localFull, 3, token).ConfigureAwait(false))
+                    throw new IOException($"文件仍被占用或未稳定，已停止备份: {originalRel}");
 
                 for (int attempt = 1; attempt <= 3; attempt++)
                 {

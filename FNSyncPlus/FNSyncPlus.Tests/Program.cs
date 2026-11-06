@@ -275,6 +275,21 @@ namespace FNSyncPlus.Tests
                 retainedManifest = await manifestManager.LoadManifestAsync(renameProvider, "rename-target");
                 Assert(canceled && retainedManifest.Files.Count == 1 && retainedManifest.Files[0].OriginalRel == "old.txt",
                     "重命名上传中取消时不提交移除旧项的清单");
+                renameProvider.CancelUploadSuffix = null;
+                bool busyBlocked = false;
+                using (var heldSource = new FileStream(Path.Combine(renameSource, "new.txt"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    try
+                    {
+                        var busySync = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
+                        await busySync.RunSyncAsync(renameSource, "rename-target", renameProvider, BackupStrategy.Smart,
+                            new Dictionary<string, string> { ["old.txt"] = "new.txt" }, CancellationToken.None);
+                    }
+                    catch (IOException ex) { busyBlocked = ex.Message.Contains("未稳定", StringComparison.Ordinal); }
+                }
+                retainedManifest = await manifestManager.LoadManifestAsync(renameProvider, "rename-target");
+                Assert(busyBlocked && retainedManifest.Files.Count == 1 && retainedManifest.Files[0].OriginalRel == "old.txt" &&
+                    !File.Exists(Path.Combine(renameTarget, "new.txt")), "源文件被独占时停止同步并保留旧清单");
                 string lockedSource = Path.Combine(root, "locked-source");
                 string lockedTarget = Path.Combine(root, "locked-target");
                 Directory.CreateDirectory(lockedSource);
