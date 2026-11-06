@@ -257,8 +257,18 @@ namespace FNSyncPlus.Core.Services
             // 2. 离线匹配必须在旧项和新项两侧均唯一；重复内容不能推断身份。
             var ambiguousOldRels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var candidateHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var unmatchedNew = candidateNewRelList.Where(r => !matchedNewRels.Contains(r)).ToList();
+            if (unmatchedNew.Count > 0)
+            {
+                foreach (var old in missingManifestEntries.Where(m => !detectedRenames.ContainsKey(m.OriginalRel) &&
+                    (m.Sha256 == null || m.Sha256.Length != 64 || !m.Sha256.All(Uri.IsHexDigit))))
+                {
+                    ambiguousOldRels.Add(old.OriginalRel);
+                    Log("WARN", $"[待处理差异] 旧文件缺少有效 SHA-256，无法与新增文件可靠比对: {old.OriginalRel}");
+                }
+            }
             var remainingGroups = missingManifestEntries
-                .Where(m => !detectedRenames.ContainsKey(m.OriginalRel) && !string.IsNullOrWhiteSpace(m.Sha256))
+                .Where(m => !detectedRenames.ContainsKey(m.OriginalRel) && m.Sha256 != null && m.Sha256.Length == 64 && m.Sha256.All(Uri.IsHexDigit))
                 .GroupBy(m => (m.Size, Hash: m.Sha256.ToUpperInvariant()));
             foreach (var group in remainingGroups)
             {

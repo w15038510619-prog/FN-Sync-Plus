@@ -403,6 +403,23 @@ namespace FNSyncPlus.Tests
                 var uniqueManifest = await manifestManager.LoadManifestAsync(uniqueProvider, "unique-rename-target");
                 Assert(uniqueResult.State == SyncState.Completed && uniqueManifest.Files.Single().PreviousRel == "old.txt" &&
                     uniqueManifest.History.Any(h => h.OriginalRel == "old.txt" && h.Reason == "renamed"), "唯一的离线重命名仍能识别");
+                string legacyRenameSource = Path.Combine(root, "legacy-rename-source");
+                string legacyRenameTarget = Path.Combine(root, "legacy-rename-target");
+                Directory.CreateDirectory(legacyRenameSource);
+                Directory.CreateDirectory(legacyRenameTarget);
+                File.WriteAllText(Path.Combine(legacyRenameSource, "new.txt"), "legacy content");
+                File.WriteAllText(Path.Combine(legacyRenameTarget, "old.txt"), "legacy content");
+                var legacyProvider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+                await manifestManager.SaveManifestAtomicAsync(legacyProvider, "legacy-rename-target", new Manifest { Version = 3,
+                    Files = new() { new ManifestFileEntry { OriginalRel = "old.txt", StoredRel = "old.txt", Size = 14, Sha256 = "" } } });
+                bool unknownLegacyStopped = false;
+                try { await new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService())
+                    .RunSyncAsync(legacyRenameSource, "legacy-rename-target", legacyProvider, BackupStrategy.Smart, null, CancellationToken.None); }
+                catch (InvalidDataException) { unknownLegacyStopped = true; }
+                var legacyRetained = await manifestManager.LoadManifestAsync(legacyProvider, "legacy-rename-target");
+                Assert(unknownLegacyStopped && legacyRetained.Files.Single().OriginalRel == "old.txt" &&
+                    File.Exists(Path.Combine(legacyRenameTarget, "old.txt")) && !File.Exists(Path.Combine(legacyRenameTarget, "new.txt")),
+                    "旧清单缺少哈希且出现新文件时不猜测重命名或删除");
                 string renameSource = Path.Combine(root, "rename-source");
                 string renameTarget = Path.Combine(root, "rename-target");
                 Directory.CreateDirectory(renameSource);
