@@ -48,6 +48,9 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _formattedLastSync = "--";
 
         [ObservableProperty]
+        private string _scheduleSummaryText = string.Empty;
+
+        [ObservableProperty]
         private bool _isSyncing;
 
         [ObservableProperty]
@@ -66,6 +69,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private bool _canRunSync;
 
         public event Action<SyncTaskItemViewModel>? RequestViewDetails;
+        public event Action<SyncTaskItemViewModel>? RequestEditSettings;
         public event Action<SyncTaskItemViewModel>? RequestDelete;
 
         public SyncTaskItemViewModel(SyncTask task, TaskManager taskManager)
@@ -117,6 +121,8 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 FormattedLastSync = "尚未进行初次同步";
             }
+
+            ScheduleSummaryText = Model.ScheduleSummary;
         }
 
         private static string FormatSpeed(double bytesPerSec)
@@ -157,6 +163,12 @@ namespace FNSyncPlus.WinUI.ViewModels
         private void ViewDetails()
         {
             RequestViewDetails?.Invoke(this);
+        }
+
+        [RelayCommand]
+        private void EditSettings()
+        {
+            RequestEditSettings?.Invoke(this);
         }
 
         [RelayCommand]

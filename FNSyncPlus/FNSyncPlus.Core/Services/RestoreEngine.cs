@@ -19,6 +19,17 @@ namespace FNSyncPlus.Core.Services
         RenameWithTimestamp
     }
 
+    public class RestoreFileResult
+    {
+        public string OriginalRel { get; set; } = string.Empty;
+        public string StoredRel { get; set; } = string.Empty;
+        public bool Success { get; set; }
+        public bool Skipped { get; set; }
+        public bool HashVerified { get; set; }
+        public string? ErrorMessage { get; set; }
+        public string? DetailedException { get; set; }
+    }
+
     public class RestoreProgressReport
     {
         public int TotalFiles { get; set; }
@@ -30,6 +41,8 @@ namespace FNSyncPlus.Core.Services
         public int RestoredDirectories { get; set; }
         public string CurrentFile { get; set; } = string.Empty;
         public string StatusMessage { get; set; } = string.Empty;
+        public List<RestoreFileResult> FileResults { get; } = new();
+        public List<RestoreFileResult> FailedItems => FileResults.Where(r => !r.Success && !r.Skipped).ToList();
     }
 
     public class RestorePreviewItem
@@ -609,6 +622,13 @@ namespace FNSyncPlus.Core.Services
                 if (!PathHelper.IsSafeRelativePath(targetRel))
                 {
                     report.FailedFiles++;
+                    report.FileResults.Add(new RestoreFileResult
+                    {
+                        OriginalRel = targetRel,
+                        StoredRel = fileEntry.StoredRel,
+                        Success = false,
+                        ErrorMessage = $"[安全拦截] 文件相对路径不安全: {targetRel}"
+                    });
                     Log("ERROR", $"[安全拦截] 文件相对路径不安全: {targetRel}");
                     continue;
                 }
@@ -621,6 +641,13 @@ namespace FNSyncPlus.Core.Services
                     if (conflictResolution == ConflictResolution.SkipExisting)
                     {
                         report.SkippedFiles++;
+                        report.FileResults.Add(new RestoreFileResult
+                        {
+                            OriginalRel = targetRel,
+                            StoredRel = fileEntry.StoredRel,
+                            Skipped = true,
+                            Success = true
+                        });
                         ProgressChanged?.Invoke(report);
                         continue;
                     }
@@ -669,6 +696,13 @@ namespace FNSyncPlus.Core.Services
                             try { File.Delete(tempRestorePath); } catch { }
                         }
                         report.FailedFiles++;
+                        report.FileResults.Add(new RestoreFileResult
+                        {
+                            OriginalRel = targetRel,
+                            StoredRel = fileEntry.StoredRel,
+                            Success = false,
+                            ErrorMessage = $"[SHA-256 校验失败] 预期 {fileEntry.Sha256}, 实收 {computedHash}"
+                        });
                         Log("ERROR", $"[SHA-256 校验失败] 恢复文件与原始数据哈希不一致！文件: {targetRel}");
                         ProgressChanged?.Invoke(report);
                         continue;
@@ -686,6 +720,14 @@ namespace FNSyncPlus.Core.Services
                     File.Move(tempRestorePath, targetLocalFull, overwrite: true);
                     report.RestoredFiles++;
                     if (fileEntry.IsLongName) report.LongNameRestoredFiles++;
+
+                    report.FileResults.Add(new RestoreFileResult
+                    {
+                        OriginalRel = targetRel,
+                        StoredRel = fileEntry.StoredRel,
+                        Success = true,
+                        HashVerified = true
+                    });
                 }
                 catch (Exception ex)
                 {
@@ -694,14 +736,172 @@ namespace FNSyncPlus.Core.Services
                         try { File.Delete(tempRestorePath); } catch { }
                     }
                     report.FailedFiles++;
+                    report.FileResults.Add(new RestoreFileResult
+                    {
+                        OriginalRel = targetRel,
+                        StoredRel = fileEntry.StoredRel,
+                        Success = false,
+                        ErrorMessage = ex.Message,
+                        DetailedException = ex.ToString()
+                    });
                     Log("ERROR", $"[恢复失败] {targetRel} : {ex.Message}");
                 }
 
                 ProgressChanged?.Invoke(report);
             }
 
-            report.StatusMessage = $"恢复操作完成！已成功恢复: {report.RestoredFiles}, 校验通过: {report.IntegrityVerifiedFiles}, 失败: {report.FailedFiles}";
-            Log("INFO", report.StatusMessage);
+            if (report.FailedFiles > 0)
+            {
+                report.StatusMessage = $"恢复操作完成（存在失败项）: 成功 {report.RestoredFiles}, 失败 {report.FailedFiles}, 校验通过 {report.IntegrityVerifiedFiles}";
+                Log("WARN", report.StatusMessage);
+            }
+            else
+            {
+                report.StatusMessage = $"恢复操作圆满完成！已成功恢复: {report.RestoredFiles}, 校验通过: {report.IntegrityVerifiedFiles}, 失败: 0";
+                Log("INFO", report.StatusMessage);
+            }
+            return report;
+        }
+
+        /// <summary>
+        /// 重新恢复之前失败的特定文件列表
+        /// </summary>
+        public async Task<RestoreProgressReport> RunRestoreSelectedFilesAsync(
+            INasStorageProvider storageProvider,
+            string nasBackupFolderRel,
+            string localDestinationFolder,
+            IEnumerable<string> originalRelsToRestore,
+            ConflictResolution conflictResolution = ConflictResolution.Overwrite,
+            CancellationToken cancellationToken = default)
+        {
+            var targetSet = new HashSet<string>(originalRelsToRestore, StringComparer.OrdinalIgnoreCase);
+            var manifest = await _manifestManager.LoadManifestAsync(storageProvider, nasBackupFolderRel, cancellationToken).ConfigureAwait(false);
+            manifest.Files = manifest.Files.Where(f => targetSet.Contains(f.OriginalRel)).ToList();
+
+            return await RunRestoreFilteredAsync(storageProvider, nasBackupFolderRel, localDestinationFolder, manifest, conflictResolution, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// 单独恢复一个特定的历史版本文件
+        /// </summary>
+        public async Task<bool> RunRestoreHistoryFileAsync(
+            INasStorageProvider storageProvider,
+            string nasBackupFolderRel,
+            string localDestinationFolder,
+            ManifestHistoryEntry historyEntry,
+            CancellationToken cancellationToken = default)
+        {
+            if (historyEntry == null) return false;
+            string longLocal = PathHelper.EnsureLongPathPrefix(localDestinationFolder);
+            string targetRel = PathHelper.NormalizeRelPath(historyEntry.OriginalRel);
+            string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
+            string targetDir = Path.GetDirectoryName(targetLocalFull)!;
+            if (!Directory.Exists(targetDir)) Directory.CreateDirectory(targetDir);
+
+            string tempRestorePath = Path.Combine(targetDir, $".fnsync_rst_hist_{Guid.NewGuid():N}.tmp");
+            try
+            {
+                string remoteRel = string.IsNullOrEmpty(nasBackupFolderRel)
+                    ? historyEntry.StoredRel
+                    : $"{nasBackupFolderRel.TrimEnd('/', '\\')}/{historyEntry.StoredRel}";
+
+                string computedHash = "";
+                using (var src = await storageProvider.OpenReadAsync(remoteRel, cancellationToken).ConfigureAwait(false))
+                using (var dest = new FileStream(tempRestorePath, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, FileOptions.WriteThrough | FileOptions.Asynchronous))
+                using (var sha = SHA256.Create())
+                {
+                    byte[] buf = new byte[128 * 1024];
+                    int r;
+                    while ((r = await src.ReadAsync(buf, 0, buf.Length, cancellationToken).ConfigureAwait(false)) > 0)
+                    {
+                        await dest.WriteAsync(buf.AsMemory(0, r), cancellationToken).ConfigureAwait(false);
+                        sha.TransformBlock(buf, 0, r, null, 0);
+                    }
+                    sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                    computedHash = Convert.ToHexString(sha.Hash!).ToLowerInvariant();
+                }
+
+                if (!string.IsNullOrEmpty(historyEntry.Sha256) && !string.Equals(historyEntry.Sha256, computedHash, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (File.Exists(tempRestorePath)) File.Delete(tempRestorePath);
+                    return false;
+                }
+
+                File.Move(tempRestorePath, targetLocalFull, overwrite: true);
+                return true;
+            }
+            catch
+            {
+                if (File.Exists(tempRestorePath)) try { File.Delete(tempRestorePath); } catch { }
+                return false;
+            }
+        }
+
+        private async Task<RestoreProgressReport> RunRestoreFilteredAsync(
+            INasStorageProvider storageProvider,
+            string nasBackupFolderRel,
+            string localDestinationFolder,
+            Manifest manifest,
+            ConflictResolution conflictResolution,
+            CancellationToken cancellationToken)
+        {
+            var report = new RestoreProgressReport { TotalFiles = manifest.Files.Count };
+            string longLocal = PathHelper.EnsureLongPathPrefix(localDestinationFolder);
+
+            foreach (var fileEntry in manifest.Files)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                report.CurrentFile = fileEntry.OriginalRel;
+                string targetRel = PathHelper.NormalizeRelPath(fileEntry.OriginalRel);
+                string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
+                string targetDir = Path.GetDirectoryName(targetLocalFull)!;
+                if (!Directory.Exists(targetDir)) Directory.CreateDirectory(targetDir);
+
+                string tempRestorePath = Path.Combine(targetDir, $".fnsync_rst_retry_{Guid.NewGuid():N}.tmp");
+                try
+                {
+                    string remoteRel = string.IsNullOrEmpty(nasBackupFolderRel)
+                        ? fileEntry.StoredRel
+                        : $"{nasBackupFolderRel.TrimEnd('/', '\\')}/{fileEntry.StoredRel}";
+
+                    string computedHash = "";
+                    using (var src = await storageProvider.OpenReadAsync(remoteRel, cancellationToken).ConfigureAwait(false))
+                    using (var dest = new FileStream(tempRestorePath, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, FileOptions.WriteThrough | FileOptions.Asynchronous))
+                    using (var sha = SHA256.Create())
+                    {
+                        byte[] buf = new byte[128 * 1024];
+                        int r;
+                        while ((r = await src.ReadAsync(buf, 0, buf.Length, cancellationToken).ConfigureAwait(false)) > 0)
+                        {
+                            await dest.WriteAsync(buf.AsMemory(0, r), cancellationToken).ConfigureAwait(false);
+                            sha.TransformBlock(buf, 0, r, null, 0);
+                        }
+                        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                        computedHash = Convert.ToHexString(sha.Hash!).ToLowerInvariant();
+                    }
+
+                    if (!string.IsNullOrEmpty(fileEntry.Sha256) && !string.Equals(fileEntry.Sha256, computedHash, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (File.Exists(tempRestorePath)) File.Delete(tempRestorePath);
+                        report.FailedFiles++;
+                        continue;
+                    }
+
+                    File.Move(tempRestorePath, targetLocalFull, overwrite: true);
+                    report.RestoredFiles++;
+                    report.IntegrityVerifiedFiles++;
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, Success = true, HashVerified = true });
+                }
+                catch (Exception ex)
+                {
+                    if (File.Exists(tempRestorePath)) try { File.Delete(tempRestorePath); } catch { }
+                    report.FailedFiles++;
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, Success = false, ErrorMessage = ex.Message, DetailedException = ex.ToString() });
+                }
+
+                ProgressChanged?.Invoke(report);
+            }
+
             return report;
         }
     }

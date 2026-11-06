@@ -27,6 +27,7 @@ namespace FNSyncPlus.Core.Services
         private readonly ConcurrentDictionary<string, FileSystemWatcher> _watchers = new();
         private readonly ConcurrentDictionary<string, Timer> _watcherDebounceTimers = new();
         private readonly ConcurrentDictionary<string, Timer> _intervalTimers = new();
+        private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, string>> _pendingRenames = new();
         private readonly ConcurrentDictionary<string, List<string>> _taskLogBuffers = new();
         private readonly object _logLock = new();
 
@@ -198,6 +199,9 @@ namespace FNSyncPlus.Core.Services
                 existing.RealtimeWatchEnabled = task.RealtimeWatchEnabled;
                 existing.IntervalMinutes = task.IntervalMinutes;
                 existing.Mode = task.Mode;
+                existing.ScheduleMode = task.ScheduleMode;
+                existing.Strategy = task.Strategy;
+                existing.SettlingDelaySeconds = task.SettlingDelaySeconds;
                 _settings.Save();
 
                 ApplyTaskAutomation(existing);
@@ -389,9 +393,19 @@ namespace FNSyncPlus.Core.Services
             {
                 task.State = TaskSyncState.Syncing;
                 task.LastError = null;
+                task.QueuedChangesCount = 0;
+                task.LastDetectedChange = null;
                 TaskStateChanged?.Invoke(task);
 
-                var report = await syncEngine.RunSyncAsync(task.SourceFolder, task.DestinationFolder, provider, taskCts.Token).ConfigureAwait(false);
+                _pendingRenames.TryRemove(task.TaskId, out var renames);
+
+                var report = await syncEngine.RunSyncAsync(
+                    task.SourceFolder, 
+                    task.DestinationFolder, 
+                    provider, 
+                    task.Strategy, 
+                    renames, 
+                    taskCts.Token).ConfigureAwait(false);
 
                 task.LastSyncTime = DateTime.Now;
                 task.LastScannedFiles = report.TotalFiles;
@@ -406,6 +420,7 @@ namespace FNSyncPlus.Core.Services
                 if (report.FailedFiles > 0)
                 {
                     task.State = TaskSyncState.Error;
+                    task.LastFailureTime = DateTime.Now;
                     if (report.UploadedFiles == 0)
                     {
                         task.CurrentFile = $"备份失败 (共 {report.FailedFiles} 个文件同步失败)";
@@ -437,6 +452,11 @@ namespace FNSyncPlus.Core.Services
                 else
                 {
                     task.State = TaskSyncState.Completed;
+                    task.LastSuccessTime = DateTime.Now;
+                    if (task.ScheduleMode == TaskSyncScheduleMode.SmartAuto || task.ScheduleMode == TaskSyncScheduleMode.PeriodicOnly)
+                    {
+                        task.NextScheduledTime = DateTime.Now.AddMinutes(task.IntervalMinutes);
+                    }
                     task.CurrentProgress = 100.0;
                     task.CurrentFile = "所有文件均已同步更新至最新状态";
                     task.LastSyncStatus = "同步成功完成 (已最新)";
@@ -503,6 +523,19 @@ namespace FNSyncPlus.Core.Services
                 if (task.Enabled && task.State != TaskSyncState.Paused)
                 {
                     ApplyTaskAutomation(task);
+
+                    // 启动补偿检查：如果是智能自动备份模式，延迟 5 秒触发一次查漏补缺
+                    if (task.ScheduleMode == TaskSyncScheduleMode.SmartAuto)
+                    {
+                        _ = Task.Delay(5000).ContinueWith(_ =>
+                        {
+                            if (task.Enabled && !task.IsRunning && task.State != TaskSyncState.Paused)
+                            {
+                                AppendTaskLog(task, "INFO", "软件启动，执行智能自动备份初始补偿检查...");
+                                TriggerSync(task.TaskId);
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -514,7 +547,33 @@ namespace FNSyncPlus.Core.Services
             // 暂停状态或禁用状态绝对不启动变动监听与定时轮询
             if (!task.Enabled || task.State == TaskSyncState.Paused) return;
 
-            // 1. 本地目录变动实时监听
+            // 根据 ScheduleMode 统一配置调度标记
+            switch (task.ScheduleMode)
+            {
+                case TaskSyncScheduleMode.SmartAuto:
+                    task.RealtimeWatchEnabled = true;
+                    task.AutoSyncEnabled = true;
+                    break;
+                case TaskSyncScheduleMode.RealtimeOnly:
+                    task.RealtimeWatchEnabled = true;
+                    task.AutoSyncEnabled = false;
+                    break;
+                case TaskSyncScheduleMode.PeriodicOnly:
+                    task.RealtimeWatchEnabled = false;
+                    task.AutoSyncEnabled = true;
+                    break;
+                case TaskSyncScheduleMode.ManualOnly:
+                    task.RealtimeWatchEnabled = false;
+                    task.AutoSyncEnabled = false;
+                    task.IsWatching = false;
+                    task.NextScheduledTime = null;
+                    TaskStateChanged?.Invoke(task);
+                    return;
+            }
+
+            int settlingMs = Math.Max(1, task.SettlingDelaySeconds > 0 ? task.SettlingDelaySeconds : 3) * 1000;
+
+            // 1. 本地目录变动实时监听 (具备防写抖动 Settling Delay 与重命名追踪)
             if (task.RealtimeWatchEnabled && Directory.Exists(task.SourceFolder))
             {
                 try
@@ -529,16 +588,43 @@ namespace FNSyncPlus.Core.Services
                     {
                         if (task.Enabled && !task.IsRunning)
                         {
-                            AppendTaskLog(task, "INFO", "检测到本地文件变动，正在触发自动增量同步...");
+                            AppendTaskLog(task, "INFO", "检测到本地文件变动且写入已平稳，正在触发自动增量同步...");
                             TriggerSync(task.TaskId);
                         }
                     }, null, Timeout.Infinite, Timeout.Infinite);
 
-                    Action queueEvent = () => debounceTimer.Change(2000, Timeout.Infinite);
+                    Action queueEvent = () => debounceTimer.Change(settlingMs, Timeout.Infinite);
 
-                    watcher.Changed += (s, e) => queueEvent();
-                    watcher.Created += (s, e) => queueEvent();
-                    watcher.Renamed += (s, e) => queueEvent();
+                    watcher.Changed += (s, e) =>
+                    {
+                        task.LastDetectedChange = $"修改: {e.Name}";
+                        task.QueuedChangesCount++;
+                        TaskStateChanged?.Invoke(task);
+                        queueEvent();
+                    };
+                    watcher.Created += (s, e) =>
+                    {
+                        task.LastDetectedChange = $"新增: {e.Name}";
+                        task.QueuedChangesCount++;
+                        TaskStateChanged?.Invoke(task);
+                        queueEvent();
+                    };
+                    watcher.Renamed += (s, e) =>
+                    {
+                        try
+                        {
+                            string oldRel = PathHelper.NormalizeRelPath(Path.GetRelativePath(task.SourceFolder, e.OldFullPath));
+                            string newRel = PathHelper.NormalizeRelPath(Path.GetRelativePath(task.SourceFolder, e.FullPath));
+                            var map = _pendingRenames.GetOrAdd(task.TaskId, _ => new ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+                            map[oldRel] = newRel;
+                        }
+                        catch { }
+
+                        task.LastDetectedChange = $"重命名: {e.OldName} -> {e.Name}";
+                        task.QueuedChangesCount++;
+                        TaskStateChanged?.Invoke(task);
+                        queueEvent();
+                    };
                     watcher.Error += (s, e) =>
                     {
                         AppendTaskLog(task, "WARN", "本地变动监视器缓冲区溢出，正在排队全量重新扫描。");
@@ -546,33 +632,59 @@ namespace FNSyncPlus.Core.Services
                     };
 
                     watcher.EnableRaisingEvents = true;
+                    task.IsWatching = true;
                     _watchers[task.TaskId] = watcher;
                     _watcherDebounceTimers[task.TaskId] = debounceTimer;
                 }
                 catch (Exception ex)
                 {
+                    task.IsWatching = false;
                     AppendTaskLog(task, "WARN", $"无法启动文件变动监视: {ex.Message}");
                 }
             }
+            else
+            {
+                task.IsWatching = false;
+            }
 
-            // 2. 定时轮询增量同步
+            // 2. 定时轮询增量同步与补偿检查
             if (task.AutoSyncEnabled && task.IntervalMinutes > 0)
             {
+                task.NextScheduledTime = DateTime.Now.AddMinutes(task.IntervalMinutes);
                 var timer = new Timer(_ =>
                 {
+                    task.NextScheduledTime = DateTime.Now.AddMinutes(task.IntervalMinutes);
+                    TaskStateChanged?.Invoke(task);
+
                     if (task.Enabled && !task.IsRunning)
                     {
-                        AppendTaskLog(task, "INFO", "例行定时增量备份检查...");
+                        string msg = task.ScheduleMode == TaskSyncScheduleMode.SmartAuto
+                            ? "执行智能自动备份例行补偿检查..."
+                            : "执行例行定时增量备份检查...";
+                        AppendTaskLog(task, "INFO", msg);
                         TriggerSync(task.TaskId);
                     }
                 }, null, TimeSpan.FromMinutes(task.IntervalMinutes), TimeSpan.FromMinutes(task.IntervalMinutes));
 
                 _intervalTimers[task.TaskId] = timer;
             }
+            else
+            {
+                task.NextScheduledTime = null;
+            }
+
+            TaskStateChanged?.Invoke(task);
         }
 
         private void StopTaskAutomation(string taskId)
         {
+            var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+            if (task != null)
+            {
+                task.IsWatching = false;
+                task.NextScheduledTime = null;
+            }
+
             if (_watchers.TryRemove(taskId, out var watcher))
             {
                 try
@@ -698,12 +810,16 @@ namespace FNSyncPlus.Core.Services
             }
             else
             {
-                // 网络恢复时唤醒
-                foreach (var task in _settings.Tasks.Where(t => t.State == TaskSyncState.OfflineWaiting))
+                // 网络恢复时唤醒并触发重连补偿检查
+                foreach (var task in _settings.Tasks.Where(t => t.Enabled && t.State != TaskSyncState.Paused))
                 {
-                    task.State = TaskSyncState.Idle;
-                    task.LastSyncStatus = "网络已恢复";
-                    TaskStateChanged?.Invoke(task);
+                    if (task.State == TaskSyncState.OfflineWaiting)
+                    {
+                        task.State = TaskSyncState.Idle;
+                        task.LastSyncStatus = "网络已恢复";
+                        TaskStateChanged?.Invoke(task);
+                    }
+                    AppendTaskLog(task, "INFO", "NAS 连接已恢复，触发重连补偿检查...");
                     TriggerSync(task.TaskId);
                 }
             }

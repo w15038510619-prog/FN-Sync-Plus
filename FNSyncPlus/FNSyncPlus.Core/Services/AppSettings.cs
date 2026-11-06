@@ -37,6 +37,15 @@ namespace FNSyncPlus.Core.Services
         public bool StartWithWindows { get; set; } = false;
         public bool MinimizeToTray { get; set; } = true;
 
+        [JsonIgnore]
+        public bool IsInMemoryOnly { get; set; } = false;
+
+        [JsonIgnore]
+        public string? CustomConfigPath { get; set; } = null;
+
+        public static AppSettings CreateInMemory() => new AppSettings { IsInMemoryOnly = true };
+        public static AppSettings CreateForTest(string testFilePath) => new AppSettings { CustomConfigPath = testFilePath };
+
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
             WriteIndented = true,
@@ -64,7 +73,10 @@ namespace FNSyncPlus.Core.Services
                 {
                     string json = File.ReadAllText(path);
                     var settings = FromJson(json);
-                    if (MigrateLegacySettings(settings))
+                    
+                    // 清理历史遗留的测试/伪造任务 (如 task_fail_, task_partial_, task_dup_, Fake 等)
+                    bool cleaned = PurgeTestArtifacts(settings);
+                    if (MigrateLegacySettings(settings) || cleaned)
                     {
                         settings.Save();
                     }
@@ -76,6 +88,28 @@ namespace FNSyncPlus.Core.Services
                 // 加载失败时使用默认配置
             }
             return new AppSettings();
+        }
+
+        /// <summary>
+        /// 严格清理真实配置中意外混入的自动化测试伪造任务
+        /// </summary>
+        public static bool PurgeTestArtifacts(AppSettings settings)
+        {
+            if (settings == null || settings.Tasks == null) return false;
+            int initialCount = settings.Tasks.Count;
+            settings.Tasks.RemoveAll(t => 
+                (t.TaskId != null && (t.TaskId.StartsWith("task_fail_") || 
+                                     t.TaskId.StartsWith("task_partial_") || 
+                                     t.TaskId.StartsWith("task_success") || 
+                                     t.TaskId.StartsWith("task_dup_") || 
+                                     t.TaskId.StartsWith("task_dummy_") ||
+                                     t.TaskId.StartsWith("task_test_"))) ||
+                (t.SourceFolder != null && (t.SourceFolder.Contains("Fake", StringComparison.OrdinalIgnoreCase) ||
+                                           t.SourceFolder.Contains(@"C:\App1", StringComparison.OrdinalIgnoreCase) ||
+                                           t.SourceFolder.Contains(@"D:\WorkSpace\Projects\App1", StringComparison.OrdinalIgnoreCase))) ||
+                (t.TaskName != null && (t.TaskName.Contains("失败测试") || t.TaskName.Contains("成功测试"))));
+
+            return settings.Tasks.Count != initialCount;
         }
 
         public static AppSettings FromJson(string json)
@@ -120,12 +154,18 @@ namespace FNSyncPlus.Core.Services
 
         public void Save()
         {
+            if (IsInMemoryOnly) return; // 单元测试或沙盒模式绝不写入磁盘配置文件
+
             try
             {
-                string path = GetConfigFilePath();
+                string path = !string.IsNullOrEmpty(CustomConfigPath) ? CustomConfigPath : GetConfigFilePath();
                 string json = JsonSerializer.Serialize(this, JsonOptions);
                 File.WriteAllText(path, json);
-                ApplyStartupRegistry(StartWithWindows);
+                
+                if (string.IsNullOrEmpty(CustomConfigPath))
+                {
+                    ApplyStartupRegistry(StartWithWindows);
+                }
             }
             catch
             {

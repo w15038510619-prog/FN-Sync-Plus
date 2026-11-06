@@ -12,6 +12,7 @@ namespace FNSyncPlus.WinUI.Pages
         public TasksViewModel ViewModel { get; }
         private bool _isDeleting = false;
         private bool _isShowingDetails = false;
+        private bool _isEditingSettings = false;
 
         public TasksPage()
         {
@@ -30,6 +31,9 @@ namespace FNSyncPlus.WinUI.Pages
             ViewModel.RequestTaskDetails -= OpenTaskDetailsDialog;
             ViewModel.RequestTaskDetails += OpenTaskDetailsDialog;
 
+            ViewModel.RequestEditSettings -= OpenTaskSettingsDialog;
+            ViewModel.RequestEditSettings += OpenTaskSettingsDialog;
+
             ViewModel.RequestConfirmDelete -= ConfirmDeleteTask;
             ViewModel.RequestConfirmDelete += ConfirmDeleteTask;
         }
@@ -38,6 +42,7 @@ namespace FNSyncPlus.WinUI.Pages
         {
             ViewModel.RequestAddFolderWizard -= OpenAddFolderWizardDialog;
             ViewModel.RequestTaskDetails -= OpenTaskDetailsDialog;
+            ViewModel.RequestEditSettings -= OpenTaskSettingsDialog;
             ViewModel.RequestConfirmDelete -= ConfirmDeleteTask;
         }
 
@@ -126,6 +131,34 @@ namespace FNSyncPlus.WinUI.Pages
             }
         }
 
+        private async void OpenTaskSettingsDialog(SyncTaskItemViewModel taskItem)
+        {
+            if (_isEditingSettings || taskItem == null) return;
+            _isEditingSettings = true;
+
+            try
+            {
+                if (this.XamlRoot == null) return;
+
+                var tm = AppServices.GetService<FNSyncPlus.Core.Services.TaskManager>();
+                var dialog = new TaskSettingsDialog(taskItem.Model, tm)
+                {
+                    XamlRoot = this.XamlRoot
+                };
+
+                await dialog.ShowAsync();
+                taskItem.UpdateVisualState();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[TasksPage] 打开任务设置弹窗异常: {ex.Message}");
+            }
+            finally
+            {
+                _isEditingSettings = false;
+            }
+        }
+
         private async void ConfirmDeleteTask(SyncTaskItemViewModel taskItem)
         {
             if (_isDeleting || taskItem == null) return;
@@ -137,9 +170,9 @@ namespace FNSyncPlus.WinUI.Pages
 
                 var confirmDialog = new ContentDialog
                 {
-                    Title = "确认删除任务配置",
-                    Content = $"确定要删除任务【{taskItem.TaskName}】吗？\n\n注意：此操作仅删除任务的自动化调度配置，绝对不会删除或修改您的本地源文件或 NAS 已有的备份文件。",
-                    PrimaryButtonText = "确认删除",
+                    Title = "确认仅移除任务配置",
+                    Content = $"确定要在当前软件中移除任务【{taskItem.TaskName}】的配置吗？\n\n注意：此操作仅移除任务自动化调度与清单记录，绝对不会删除或修改您的本地源文件或 NAS 已有的任何备份文件。",
+                    PrimaryButtonText = "确认移除",
                     CloseButtonText = "取消",
                     DefaultButton = ContentDialogButton.Close,
                     XamlRoot = this.XamlRoot
@@ -154,7 +187,7 @@ namespace FNSyncPlus.WinUI.Pages
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[TasksPage] 删除任务弹窗或处理异常: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"[TasksPage] 移除任务弹窗或处理异常: {ex.Message}");
             }
             finally
             {

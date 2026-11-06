@@ -755,7 +755,7 @@ namespace FNSyncPlus.Tests
                 LastSyncStatus = "待同步"
             };
 
-            var settings = new AppSettings();
+            var settings = AppSettings.CreateInMemory();
             settings.Tasks.Add(task);
             settings.PreferredBackupRoot = @"\\192.168.8.120\home";
             settings.MaxConcurrentSyncs = 3;
@@ -868,10 +868,8 @@ namespace FNSyncPlus.Tests
             File.WriteAllText(Path.Combine(srcA, "file_a.txt"), "Content A");
             File.WriteAllText(Path.Combine(srcB, "file_b.txt"), "Content B");
 
-            var settings = new AppSettings
-            {
-                MaxConcurrentSyncs = 1 // 强制并发数为 1 验证队列调度
-            };
+            var settings = AppSettings.CreateInMemory();
+            settings.MaxConcurrentSyncs = 1; // 强制并发数为 1 验证队列调度
 
             var longEngine = new LongNameEngine(maxUtf8Bytes: 255);
             var manifestMgr = new ManifestManager();
@@ -1116,7 +1114,8 @@ namespace FNSyncPlus.Tests
                 File.WriteAllText(Path.Combine(src1, longName), "TASK1 CONTENT");
                 File.WriteAllText(Path.Combine(src2, longName), "TASK2 DIFFERENT CONTENT");
 
-                var settings = new AppSettings { MaxConcurrentSyncs = 2 };
+                var settings = AppSettings.CreateInMemory();
+                settings.MaxConcurrentSyncs = 2;
                 var smbAuth = new SmbAuthService();
                 var taskManager = new TaskManager(settings, smbAuth);
 
@@ -1169,7 +1168,8 @@ namespace FNSyncPlus.Tests
             try
             {
                 File.WriteAllText(Path.Combine(src, "file.txt"), "TEST");
-                var settings = new AppSettings { MaxConcurrentSyncs = 1 };
+                var settings = AppSettings.CreateInMemory();
+                settings.MaxConcurrentSyncs = 1;
                 var smbAuth = new SmbAuthService();
                 var taskManager = new TaskManager(settings, smbAuth);
 
@@ -1882,7 +1882,7 @@ namespace FNSyncPlus.Tests
                 Assert(!string.IsNullOrEmpty(errMsg), "失败时返回具体的错误诊断信息", errMsg);
 
                 // 2. 模拟任务创建拦截逻辑
-                var settings = new AppSettings();
+                var settings = AppSettings.CreateInMemory();
                 var taskManager = new TaskManager(settings, new LongNameEngine(), new ManifestManager(), smbService);
                 string originalPrefRoot = settings.PreferredBackupRoot;
 
@@ -1958,7 +1958,7 @@ namespace FNSyncPlus.Tests
             Assert(task.StateBadgeBgHex == "#DCFCE7", "Completed 状态背景色正常");
 
             // 2. 验证 NasConnectionService 状态广播
-            var settings = new AppSettings();
+            var settings = AppSettings.CreateInMemory();
             var smb = new SmbAuthService();
             var tm = new TaskManager(settings, new LongNameEngine(), new ManifestManager(), smb);
             var conn = new NasConnectionService(smb, settings, tm);
@@ -2084,7 +2084,7 @@ namespace FNSyncPlus.Tests
         static void TestTwoFactorTotpAuthenticationFlow()
         {
             Console.WriteLine("\n--- 42. TOTP 双重验证状态流转测试 ---");
-            var settings = new AppSettings();
+            var settings = AppSettings.CreateInMemory();
             var smb = new SmbAuthService();
             var tm = new TaskManager(settings, new LongNameEngine(), new ManifestManager(), smb);
             var conn = new NasConnectionService(smb, settings, tm);
@@ -2243,7 +2243,8 @@ namespace FNSyncPlus.Tests
                 File.WriteAllText(safeSrcFile, "User Source Document Content");
                 File.WriteAllText(safeDstFile, "NAS Backup Document Content");
 
-                var testSettings = new AppSettings { MaxConcurrentSyncs = 1 };
+                var testSettings = AppSettings.CreateInMemory();
+                testSettings.MaxConcurrentSyncs = 1;
                 var testSmb = new SmbAuthService();
                 using var mgr = new TaskManager(testSettings, testSmb);
 
@@ -2368,7 +2369,7 @@ namespace FNSyncPlus.Tests
             }
 
             // 5. 验证删除任务配置时不会误删任务日志
-            var fakeSettings = new AppSettings();
+            var fakeSettings = AppSettings.CreateInMemory();
             var taskManager = new TaskManager(fakeSettings, new SmbAuthService());
             var dummyTask = new SyncTask { TaskId = testTaskId, TaskName = "保留日志测试任务", SourceFolder = @"C:\Test", DestinationFolder = "我的文件/Test" };
             taskManager.AddTask(dummyTask);
@@ -2380,7 +2381,9 @@ namespace FNSyncPlus.Tests
         {
             Console.WriteLine("\n--- 46. [新功能测试] 添加向导路径规范化与同源防重复拦截机制 ---");
             await Task.Yield();
-            var fakeSettings = new AppSettings { NasServer = "192.168.8.120", Username = "wangxiaoliang" };
+            var fakeSettings = AppSettings.CreateInMemory();
+            fakeSettings.NasServer = "192.168.8.120";
+            fakeSettings.Username = "wangxiaoliang";
             var smbService = new SmbAuthService();
             var taskManager = new TaskManager(fakeSettings, smbService);
 
@@ -2471,7 +2474,7 @@ namespace FNSyncPlus.Tests
         {
             Console.WriteLine("\n--- 48. [P0 缺陷修复测试] 严格准确的备份状态与失败比率 (不强制100%且绝不误报成功) ---");
             await Task.Yield();
-            var fakeSettings = new AppSettings();
+            var fakeSettings = AppSettings.CreateInMemory();
             var taskManager = new TaskManager(fakeSettings, new SmbAuthService());
 
             // 场景 1: 扫描 1 个文件，上传 0 个，失败 1 个 -> 必须报告「备份失败」，进度 0%，绝不能是「同步完成」或「100%」
@@ -2579,7 +2582,7 @@ namespace FNSyncPlus.Tests
                 Console.WriteLine($"       证书主题: {probeInfo.Subject}");
                 Console.WriteLine($"       自签名标识: {probeInfo.IsSelfSigned}");
 
-                var testSettings = new AppSettings();
+                var testSettings = AppSettings.CreateInMemory();
                 testSettings.NasServer = server;
                 testSettings.Username = username ?? "wangxiaoliang";
                 testSettings.TrustedCertThumbprints.Remove(server); // 清理信任列表模拟初次连接

@@ -44,6 +44,7 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         public event Action? RequestAddFolderWizard;
         public event Action<SyncTaskItemViewModel>? RequestTaskDetails;
+        public event Action<SyncTaskItemViewModel>? RequestEditSettings;
         public event Action<SyncTaskItemViewModel>? RequestConfirmDelete;
 
         public TasksViewModel(TaskManager taskManager, AppSettings settings)
@@ -66,6 +67,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 var itemVm = new SyncTaskItemViewModel(task, _taskManager);
                 itemVm.RequestViewDetails += t => RequestTaskDetails?.Invoke(t);
+                itemVm.RequestEditSettings += t => RequestEditSettings?.Invoke(t);
                 itemVm.RequestDelete += t => RequestConfirmDelete?.Invoke(t);
                 Tasks.Add(itemVm);
             }

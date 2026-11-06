@@ -162,6 +162,189 @@ namespace FNSyncPlus.Core.Services
             return true;
         }
 
+        private static async Task<bool> WaitForFileSettlingAsync(string fullPath, int maxWaitSeconds, CancellationToken token)
+        {
+            if (!File.Exists(fullPath)) return false;
+            var sw = Stopwatch.StartNew();
+            long prevSize = -1;
+            while (sw.Elapsed.TotalSeconds < maxWaitSeconds)
+            {
+                if (token.IsCancellationRequested) return false;
+                try
+                {
+                    var fi = new FileInfo(fullPath);
+                    if (!fi.Exists) return false;
+                    long curSize = fi.Length;
+                    using (var s = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    {
+                        if (prevSize >= 0 && curSize == prevSize)
+                        {
+                            return true;
+                        }
+                        prevSize = curSize;
+                    }
+                    await Task.Delay(300, token).ConfigureAwait(false);
+                }
+                catch (IOException)
+                {
+                    await Task.Delay(500, token).ConfigureAwait(false);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    await Task.Delay(500, token).ConfigureAwait(false);
+                }
+            }
+            return File.Exists(fullPath);
+        }
+
+        private Dictionary<string, string> DetectRenamesAndProcessDeletions(
+            string longSource,
+            List<FileInfo> allLocalFiles,
+            Manifest manifest,
+            Dictionary<string, ManifestFileEntry> manifestFilesMap,
+            BackupStrategy strategy,
+            IDictionary<string, string>? pendingRenames)
+        {
+            var detectedRenames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var localRelMap = new Dictionary<string, FileInfo>(StringComparer.OrdinalIgnoreCase);
+            foreach (var fi in allLocalFiles)
+            {
+                string rel = PathHelper.NormalizeRelPath(Path.GetRelativePath(longSource, fi.FullName));
+                localRelMap[rel] = fi;
+            }
+
+            var missingManifestEntries = new List<ManifestFileEntry>();
+            foreach (var entry in manifest.Files)
+            {
+                if (!localRelMap.ContainsKey(entry.OriginalRel))
+                {
+                    missingManifestEntries.Add(entry);
+                }
+            }
+
+            var candidateNewRelList = new List<string>();
+            foreach (var kv in localRelMap)
+            {
+                if (!manifestFilesMap.ContainsKey(kv.Key))
+                {
+                    candidateNewRelList.Add(kv.Key);
+                }
+            }
+
+            var matchedNewRels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // 1. 优先比对外部传入的文件系统重命名事件提示 (pendingRenames)
+            if (pendingRenames != null && pendingRenames.Count > 0)
+            {
+                foreach (var missing in missingManifestEntries)
+                {
+                    if (pendingRenames.TryGetValue(missing.OriginalRel, out string? hintNewRel) &&
+                        !string.IsNullOrEmpty(hintNewRel) &&
+                        localRelMap.ContainsKey(hintNewRel) &&
+                        !matchedNewRels.Contains(hintNewRel))
+                    {
+                        detectedRenames[missing.OriginalRel] = hintNewRel;
+                        matchedNewRels.Add(hintNewRel);
+                    }
+                }
+            }
+
+            // 2. 基于文件大小与 SHA-256 内容哈希进行精准重命名比对
+            foreach (var missing in missingManifestEntries)
+            {
+                if (detectedRenames.ContainsKey(missing.OriginalRel)) continue;
+
+                var sameSizeCandidates = candidateNewRelList
+                    .Where(newRel => !matchedNewRels.Contains(newRel) && localRelMap[newRel].Length == missing.Size)
+                    .ToList();
+
+                if (sameSizeCandidates.Count == 1)
+                {
+                    string candidate = sameSizeCandidates[0];
+                    string candidateHash = HashHelper.ComputeFileSha256(localRelMap[candidate].FullName);
+                    if (!string.IsNullOrEmpty(missing.Sha256) && string.Equals(candidateHash, missing.Sha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        detectedRenames[missing.OriginalRel] = candidate;
+                        matchedNewRels.Add(candidate);
+                    }
+                }
+                else if (sameSizeCandidates.Count > 1)
+                {
+                    foreach (var candidate in sameSizeCandidates)
+                    {
+                        string candidateHash = HashHelper.ComputeFileSha256(localRelMap[candidate].FullName);
+                        if (!string.IsNullOrEmpty(missing.Sha256) && string.Equals(candidateHash, missing.Sha256, StringComparison.OrdinalIgnoreCase))
+                        {
+                            detectedRenames[missing.OriginalRel] = candidate;
+                            matchedNewRels.Add(candidate);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            manifest.History ??= new List<ManifestHistoryEntry>();
+
+            // 3. 处理已确认的重命名项
+            foreach (var kv in detectedRenames)
+            {
+                string oldRel = kv.Key;
+                string newRel = kv.Value;
+                var missing = missingManifestEntries.FirstOrDefault(m => m.OriginalRel.Equals(oldRel, StringComparison.OrdinalIgnoreCase));
+                if (missing != null)
+                {
+                    manifestFilesMap.Remove(oldRel);
+                    manifest.History.Add(new ManifestHistoryEntry
+                    {
+                        HistoryId = Guid.NewGuid().ToString("N")[..12],
+                        OriginalRel = missing.OriginalRel,
+                        StoredRel = missing.StoredRel,
+                        Size = missing.Size,
+                        Sha256 = missing.Sha256,
+                        ArchivedAt = DateTimeOffset.UtcNow,
+                        Reason = "renamed",
+                        RenamedTo = newRel,
+                        IsLongName = missing.IsLongName,
+                        Utf8Bytes = missing.Utf8Bytes,
+                        StoredUtf8Bytes = missing.StoredUtf8Bytes
+                    });
+                    Log("INFO", $"[重命名检测] 识别到文件重命名: 【{oldRel}】 -> 【{newRel}】，已更新活动目录树并将旧版本转入历史追溯清单。");
+                }
+            }
+
+            // 4. 处理已删除项 (未匹配重命名的缺失文件)
+            var deletedEntries = missingManifestEntries.Where(m => !detectedRenames.ContainsKey(m.OriginalRel)).ToList();
+            foreach (var deleted in deletedEntries)
+            {
+                if (strategy == BackupStrategy.Smart || strategy == BackupStrategy.Mirror)
+                {
+                    manifestFilesMap.Remove(deleted.OriginalRel);
+                    manifest.History.Add(new ManifestHistoryEntry
+                    {
+                        HistoryId = Guid.NewGuid().ToString("N")[..12],
+                        OriginalRel = deleted.OriginalRel,
+                        StoredRel = deleted.StoredRel,
+                        Size = deleted.Size,
+                        Sha256 = deleted.Sha256,
+                        ArchivedAt = DateTimeOffset.UtcNow,
+                        Reason = "deleted",
+                        RenamedTo = null,
+                        IsLongName = deleted.IsLongName,
+                        Utf8Bytes = deleted.Utf8Bytes,
+                        StoredUtf8Bytes = deleted.StoredUtf8Bytes
+                    });
+                    Log("INFO", $"[删除追溯] 本地文件已移除: 【{deleted.OriginalRel}】，已从活动清单移除并转入历史记录。");
+                }
+                else
+                {
+                    Log("INFO", $"[归档保留] 本地文件已移除: 【{deleted.OriginalRel}】，按归档策略在清单与远端保留。");
+                }
+            }
+
+            manifest.BackupPolicy = strategy.ToString();
+            return detectedRenames;
+        }
+
         /// <summary>
         /// 预先分析同步任务（统计待上传、需修改、未修改、超长文件名及体积总量）
         /// </summary>
@@ -236,7 +419,7 @@ namespace FNSyncPlus.Core.Services
         /// </summary>
         public Task<SyncProgressReport> RunSyncAsync(string sourceFolder, string targetNasFolder, CancellationToken externalToken = default)
         {
-            return RunSyncInternalAsync(sourceFolder, targetNasFolder, null, externalToken);
+            return RunSyncInternalAsync(sourceFolder, targetNasFolder, null, BackupStrategy.Smart, null, externalToken);
         }
 
         /// <summary>
@@ -248,13 +431,29 @@ namespace FNSyncPlus.Core.Services
             INasStorageProvider? storageProvider, 
             CancellationToken externalToken)
         {
-            return RunSyncInternalAsync(sourceFolder, targetNasFolder, storageProvider, externalToken);
+            return RunSyncInternalAsync(sourceFolder, targetNasFolder, storageProvider, BackupStrategy.Smart, null, externalToken);
+        }
+
+        /// <summary>
+        /// 启动或触发一次完整的增量同步（支持传入存储提供程序、备份策略与重命名提示）
+        /// </summary>
+        public Task<SyncProgressReport> RunSyncAsync(
+            string sourceFolder, 
+            string targetNasFolder, 
+            INasStorageProvider? storageProvider,
+            BackupStrategy strategy,
+            IDictionary<string, string>? pendingRenames,
+            CancellationToken externalToken)
+        {
+            return RunSyncInternalAsync(sourceFolder, targetNasFolder, storageProvider, strategy, pendingRenames, externalToken);
         }
 
         private async Task<SyncProgressReport> RunSyncInternalAsync(
             string sourceFolder,
             string targetNasFolder,
             INasStorageProvider? storageProvider,
+            BackupStrategy strategy,
+            IDictionary<string, string>? pendingRenames,
             CancellationToken externalToken)
         {
             if (string.IsNullOrWhiteSpace(sourceFolder) || !Directory.Exists(sourceFolder))
@@ -291,12 +490,12 @@ namespace FNSyncPlus.Core.Services
                 // 若指定了飞牛官方原生个人空间提供程序，执行原生流式同步通道
                 if (storageProvider != null && storageProvider.ProviderType == StorageProviderType.FnOsPersonal)
                 {
-                    return await RunSyncWithStorageProviderAsync(sourceFolder, targetNasFolder, storageProvider, token).ConfigureAwait(false);
+                    return await RunSyncWithStorageProviderAsync(sourceFolder, targetNasFolder, storageProvider, strategy, pendingRenames, token).ConfigureAwait(false);
                 }
 
                 var report = new SyncProgressReport { State = SyncState.Scanning };
                 CurrentState = SyncState.Scanning;
-                Log("INFO", $"开始增量同步: 本地【{sourceFolder}】 -> NAS【{targetNasFolder}】");
+                Log("INFO", $"开始增量同步: 本地【{sourceFolder}】 -> NAS【{targetNasFolder}】 (策略: {strategy})");
 
                 string longSource = PathHelper.EnsureLongPathPrefix(sourceFolder);
                 string longTarget = PathHelper.EnsureLongPathPrefix(targetNasFolder);
@@ -353,6 +552,9 @@ namespace FNSyncPlus.Core.Services
                     Log("ERROR", $"扫描本地目录失败: {ex.Message}");
                     throw;
                 }
+
+                // 执行重命名分析与删除追踪
+                var detectedRenames = DetectRenamesAndProcessDeletions(longSource, allLocalFiles, manifest, manifestFilesMap, strategy, pendingRenames);
 
                 report.TotalFiles = allLocalFiles.Count;
                 Log("INFO", $"本地扫描完成，共发现 {report.TotalFiles} 个有效源文件，开始增量比对...");
@@ -425,6 +627,9 @@ namespace FNSyncPlus.Core.Services
                     bool uploadSuccess = false;
                     string uploadError = "";
 
+                    // 防写抖动安全检查：确保文件未被独占锁定且内容已完整写入
+                    await WaitForFileSettlingAsync(localFull, 3, token).ConfigureAwait(false);
+
                     for (int attempt = 1; attempt <= 3; attempt++)
                     {
                         // 产生极短的随机临时名 (仅 18~20 字符)，存放于 .fnsync/staging/
@@ -484,6 +689,7 @@ namespace FNSyncPlus.Core.Services
                             File.Move(stagingFile, targetFull, overwrite: true);
 
                             // 更新清单字典中的项
+                            string? prevRel = detectedRenames.FirstOrDefault(x => x.Value.Equals(originalRel, StringComparison.OrdinalIgnoreCase)).Key;
                             var newEntry = new ManifestFileEntry
                             {
                                 OriginalRel = originalRel,
@@ -494,7 +700,9 @@ namespace FNSyncPlus.Core.Services
                                 Sha256 = computedHash,
                                 IsLongName = isLong,
                                 Utf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(originalRel)),
-                                StoredUtf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(storedRel))
+                                StoredUtf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(storedRel)),
+                                IsActive = true,
+                                PreviousRel = prevRel
                             };
                             manifestFilesMap[originalRel] = newEntry;
 
@@ -552,6 +760,7 @@ namespace FNSyncPlus.Core.Services
                     if ((uploadedCount > 0 && uploadedCount % 20 == 0) || i == allLocalFiles.Count - 1)
                     {
                         manifest.Files = manifestFilesMap.Values.ToList();
+                        manifest.BackupPolicy = strategy.ToString();
                         await _manifestManager.SaveManifestAtomicAsync(targetNasFolder, manifest, token).ConfigureAwait(false);
                     }
                 }
@@ -578,6 +787,7 @@ namespace FNSyncPlus.Core.Services
                     }
                     manifest.Directories = dirList;
                     manifest.Files = manifestFilesMap.Values.ToList();
+                    manifest.BackupPolicy = strategy.ToString();
                     await _manifestManager.SaveManifestAtomicAsync(targetNasFolder, manifest, token).ConfigureAwait(false);
                 }
                 catch (Exception ex)
@@ -604,11 +814,13 @@ namespace FNSyncPlus.Core.Services
             string sourceFolder,
             string targetNasFolder,
             INasStorageProvider storageProvider,
+            BackupStrategy strategy,
+            IDictionary<string, string>? pendingRenames,
             CancellationToken token)
         {
             var report = new SyncProgressReport { State = SyncState.Scanning };
             CurrentState = SyncState.Scanning;
-            Log("INFO", $"开始飞牛原生个人空间增量同步: 本地【{sourceFolder}】 -> 飞牛「我的文件」【{targetNasFolder}】");
+            Log("INFO", $"开始飞牛原生个人空间增量同步: 本地【{sourceFolder}】 -> 飞牛「我的文件」【{targetNasFolder}】 (策略: {strategy})");
 
             string longSource = PathHelper.EnsureLongPathPrefix(sourceFolder);
 
@@ -672,6 +884,9 @@ namespace FNSyncPlus.Core.Services
             {
                 manifestFilesMap[f.OriginalRel] = f;
             }
+
+            // 执行重命名分析与删除追踪
+            var detectedRenames = DetectRenamesAndProcessDeletions(longSource, allLocalFiles, manifest, manifestFilesMap, strategy, pendingRenames);
 
             CurrentState = SyncState.Syncing;
             report.State = SyncState.Syncing;
@@ -762,6 +977,9 @@ namespace FNSyncPlus.Core.Services
                 bool uploadSuccess = false;
                 string uploadError = "";
 
+                // 防写抖动安全检查：确保文件未被独占锁定且内容已完整写入
+                await WaitForFileSettlingAsync(localFull, 3, token).ConfigureAwait(false);
+
                 for (int attempt = 1; attempt <= 3; attempt++)
                 {
                     try
@@ -802,6 +1020,7 @@ namespace FNSyncPlus.Core.Services
 
                         // 计算 SHA-256 并更新清单字典
                         string sha256 = HashHelper.ComputeFileSha256(localFull);
+                        string? prevRel = detectedRenames.FirstOrDefault(x => x.Value.Equals(originalRel, StringComparison.OrdinalIgnoreCase)).Key;
                         var newEntry = new ManifestFileEntry
                         {
                             OriginalRel = originalRel,
@@ -812,7 +1031,9 @@ namespace FNSyncPlus.Core.Services
                             Sha256 = sha256,
                             IsLongName = isLong,
                             Utf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(originalRel)),
-                            StoredUtf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(storedRel))
+                            StoredUtf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(storedRel)),
+                            IsActive = true,
+                            PreviousRel = prevRel
                         };
                         manifestFilesMap[originalRel] = newEntry;
 
@@ -861,6 +1082,7 @@ namespace FNSyncPlus.Core.Services
                 if ((uploadedCount > 0 && uploadedCount % 20 == 0) || i == allLocalFiles.Count - 1)
                 {
                     manifest.Files = manifestFilesMap.Values.ToList();
+                    manifest.BackupPolicy = strategy.ToString();
                     await _manifestManager.SaveManifestAtomicAsync(storageProvider, targetNasFolder, manifest, token).ConfigureAwait(false);
                 }
             }
@@ -887,6 +1109,7 @@ namespace FNSyncPlus.Core.Services
                 }
                 manifest.Directories = dirList;
                 manifest.Files = manifestFilesMap.Values.ToList();
+                manifest.BackupPolicy = strategy.ToString();
                 await _manifestManager.SaveManifestAtomicAsync(storageProvider, targetNasFolder, manifest, token).ConfigureAwait(false);
             }
             catch (Exception ex)

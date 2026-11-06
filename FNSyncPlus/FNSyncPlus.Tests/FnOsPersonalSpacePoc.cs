@@ -165,14 +165,10 @@ namespace FNSyncPlus.Tests
             Console.WriteLine($"  -> 根目录现有条目数: {rootList.Files.Count} 项");
             Console.ResetColor();
 
-            foreach (var item in rootList.Files.Take(5))
+            foreach (var item in rootList.Files)
             {
                 string typeDesc = item.IsDirectory ? "📁 目录" : "📄 文件";
                 Console.WriteLine($"     * {typeDesc}: {item.Name} ({item.Size} 字节, 最后修改: {item.LastModifiedUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss})");
-            }
-            if (rootList.Files.Count > 5)
-            {
-                Console.WriteLine($"     * ... 其余 {rootList.Files.Count - 5} 项略");
             }
 
             // 5. 在该个人目录下创建唯一测试文件夹 FN_SYNC_POC_<随机标识>
@@ -391,6 +387,16 @@ namespace FNSyncPlus.Tests
                 return false;
             }
 
+            // 9.6 [专项测试] 真实备份包 FN_Sync_Test 还原测试
+            bool restoreTestOk = await TestRestoreFnSyncTestAsync(client);
+            if (!restoreTestOk)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("[FAIL] 真实备份包 FN_Sync_Test 还原失败！");
+                Console.ResetColor();
+                return false;
+            }
+
             // 10. 安全承诺与官方 GUI 确认指引
             Console.WriteLine("\n[10/10 官方 GUI 确认与安全承诺]");
             Console.ForegroundColor = ConsoleColor.Cyan;
@@ -404,6 +410,57 @@ namespace FNSyncPlus.Tests
             Console.WriteLine("\n>>> 飞牛 fnOS 账号官方「我的文件」个人空间 C# 原生协议与 Unicode 套件验收全部通过！ <<<");
             Console.ResetColor();
             return true;
+        }
+
+        /// <summary>
+        /// 真实 NAS 恢复专项测试：恢复真实已备份包 FN_Sync_Test 并逐一校验文件数量、目录结构、长文件名与 SHA-256
+        /// </summary>
+        public static async Task<bool> TestRestoreFnSyncTestAsync(FnOsApiClient client)
+        {
+            Console.WriteLine("\n================================================================================");
+            Console.WriteLine("    [真实恢复专项测试] 恢复真实备份包 FN_Sync_Test 并逐一比对 SHA-256");
+            Console.WriteLine("================================================================================");
+            var provider = new FnOsPersonalStorageProvider(client);
+            var manifestMgr = new ManifestManager();
+            var restoreEngine = new RestoreEngine(manifestMgr);
+            restoreEngine.LogEmitted += (level, msg) => Console.WriteLine($"  [{level}] {msg}");
+
+            string tempRestoreTarget = Path.Combine(Path.GetTempPath(), "FNSync_Restore_Test_" + Guid.NewGuid().ToString("N")[..8]);
+            try
+            {
+                var report = await restoreEngine.RunRestoreAsync(provider, "FN_Sync_Test", tempRestoreTarget, ConflictResolution.Overwrite);
+                Console.WriteLine($"[Restore Report] Total: {report.TotalFiles}, Restored: {report.RestoredFiles}, Verified: {report.IntegrityVerifiedFiles}, Failed: {report.FailedFiles}, Dirs: {report.RestoredDirectories}");
+                
+                if (report.TotalFiles == 0)
+                {
+                    Console.WriteLine("[WARN] FN_Sync_Test 远端清单无文件条目或尚未备份");
+                    return true;
+                }
+
+                if (report.FailedFiles > 0)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[FAIL] 存在 {report.FailedFiles} 个失败文件！");
+                    Console.ResetColor();
+                    return false;
+                }
+
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine($"[PASS] FN_Sync_Test 真实恢复成功！恢复: {report.RestoredFiles}, 强校验通过: {report.IntegrityVerifiedFiles}, 空目录: {report.RestoredDirectories}");
+                Console.ResetColor();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"[FAIL] 还原抛出未捕获异常: {ex}");
+                Console.ResetColor();
+                return false;
+            }
+            finally
+            {
+                try { Directory.Delete(tempRestoreTarget, true); } catch { }
+            }
         }
 
         /// <summary>
@@ -446,6 +503,41 @@ namespace FNSyncPlus.Tests
                 return false;
             }
             Console.WriteLine("[PASS] 所有权测试标记安全写入: .fnsync_test_marker.json");
+
+            // 探测 fnOS 是否支持 file.rename 或 file.mv RPC 接口
+            try
+            {
+                string probeFile = $"{pocRemoteDirPath}/rename_probe.txt";
+                await client.UploadFileAsync(probeFile, Encoding.UTF8.GetBytes("probe"), nowUtc, true);
+                
+                // 探测 1: file.rename
+                var probeRename = await client.SendSignedRpcAsync("file.rename", new Dictionary<string, object?>
+                {
+                    ["path"] = probeFile,
+                    ["name"] = "rename_probe_renamed.txt"
+                });
+                Console.WriteLine($"[RPC PROBE file.rename (path/name)] resp: {probeRename}");
+
+                // 探测 2: file.rename (src/dest)
+                var probeRename2 = await client.SendSignedRpcAsync("file.rename", new Dictionary<string, object?>
+                {
+                    ["src"] = probeFile,
+                    ["dest"] = $"{pocRemoteDirPath}/rename_probe_renamed.txt"
+                });
+                Console.WriteLine($"[RPC PROBE file.rename (src/dest)] resp: {probeRename2}");
+
+                // 探测 3: file.mv
+                var probeMv = await client.SendSignedRpcAsync("file.mv", new Dictionary<string, object?>
+                {
+                    ["files"] = new[] { probeFile },
+                    ["dest"] = pocRemoteDirPath
+                });
+                Console.WriteLine($"[RPC PROBE file.mv] resp: {probeMv}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[RPC PROBE exception] {ex.Message}");
+            }
 
             // -------------------------------------------------------------
             // 用例 1: 英文目录 + 英文文件

@@ -10,6 +10,27 @@ namespace FNSyncPlus.Core.Models
         MirrorBackup     // 镜像备份
     }
 
+    /// <summary>
+    /// 任务级自动化调度模式
+    /// </summary>
+    public enum TaskSyncScheduleMode
+    {
+        SmartAuto = 0,    // 模式 A: 智能自动备份 (默认：实时监听 + 稳定沉降 + 定时补偿检查 + 离线待命)
+        RealtimeOnly = 1, // 模式 B: 仅实时监听 (实时监听文件变动并自动备份，不启用周期轮询)
+        PeriodicOnly = 2, // 模式 C: 仅定时同步 (按固定周期检查同步，如 5/15/30/60 分钟)
+        ManualOnly = 3    // 模式 D: 仅手动同步 (仅在用户手动点击时执行同步)
+    }
+
+    /// <summary>
+    /// 备份策略（重命名、删除与历史版本行为）
+    /// </summary>
+    public enum BackupStrategy
+    {
+        Smart = 0,   // 智能备份（推荐）：当前有效备份树跟随重命名，旧文件名与历史版本保存于备份清单，本地删除默认软归档
+        Archive = 1, // 归档备份：本地文件重命名或删除后，NAS 旧文件保留在原位置，新旧文件名并存
+        Mirror = 2   // 镜像备份：NAS 当前有效文件树跟随本地新增、修改、重命名，删除需受控归档回收
+    }
+
     public enum TaskSyncState
     {
         Idle,               // 空闲待命
@@ -68,6 +89,33 @@ namespace FNSyncPlus.Core.Models
         [JsonPropertyName("interval_minutes")]
         public int IntervalMinutes { get; set; } = 5;
 
+        [JsonPropertyName("schedule_mode")]
+        public TaskSyncScheduleMode ScheduleMode { get; set; } = TaskSyncScheduleMode.SmartAuto;
+
+        [JsonPropertyName("backup_strategy")]
+        public BackupStrategy Strategy { get; set; } = BackupStrategy.Smart;
+
+        [JsonPropertyName("settling_delay_seconds")]
+        public int SettlingDelaySeconds { get; set; } = 3;
+
+        [JsonPropertyName("last_success_time")]
+        public DateTime? LastSuccessTime { get; set; }
+
+        [JsonPropertyName("last_failure_time")]
+        public DateTime? LastFailureTime { get; set; }
+
+        [JsonIgnore]
+        public DateTime? NextScheduledTime { get; set; }
+
+        [JsonIgnore]
+        public string? LastDetectedChange { get; set; }
+
+        [JsonIgnore]
+        public int QueuedChangesCount { get; set; }
+
+        [JsonIgnore]
+        public bool IsWatching { get; set; }
+
         [JsonPropertyName("last_sync_time")]
         public DateTime? LastSyncTime { get; set; }
 
@@ -122,6 +170,59 @@ namespace FNSyncPlus.Core.Models
 
         [JsonIgnore]
         public bool IsPaused => State == TaskSyncState.Paused;
+
+        /// <summary>
+        /// 自动化状态友好摘要（展示调度模式、监听状态、下次检查时间与排队情况）
+        /// 例如：“实时监听中 · 每 5 分钟检查 · 下次 14:00 · 待上传 1 个文件”
+        /// </summary>
+        [JsonIgnore]
+        public string ScheduleSummary
+        {
+            get
+            {
+                if (!Enabled) return "已禁用";
+                if (State == TaskSyncState.Paused) return "已暂停自动化监控";
+                if (State == TaskSyncState.OfflineWaiting) return "NAS 离线 · 等待连接恢复";
+
+                string modeDesc = ScheduleMode switch
+                {
+                    TaskSyncScheduleMode.SmartAuto => $"智能自动 (每 {IntervalMinutes} 分钟补偿)",
+                    TaskSyncScheduleMode.RealtimeOnly => "仅实时监听中",
+                    TaskSyncScheduleMode.PeriodicOnly => $"定时同步 (每 {IntervalMinutes} 分钟)",
+                    TaskSyncScheduleMode.ManualOnly => "仅手动同步",
+                    _ => "自动同步"
+                };
+
+                var parts = new System.Collections.Generic.List<string>();
+
+                if (IsWatching && (ScheduleMode == TaskSyncScheduleMode.SmartAuto || ScheduleMode == TaskSyncScheduleMode.RealtimeOnly))
+                {
+                    parts.Add("实时监听中");
+                }
+                parts.Add(modeDesc);
+
+                if (NextScheduledTime.HasValue && ScheduleMode != TaskSyncScheduleMode.ManualOnly && ScheduleMode != TaskSyncScheduleMode.RealtimeOnly)
+                {
+                    parts.Add($"下次 {NextScheduledTime.Value:HH:mm}");
+                }
+
+                if (QueuedChangesCount > 0)
+                {
+                    parts.Add($"待同步 {QueuedChangesCount} 项");
+                }
+                else if (!string.IsNullOrEmpty(LastDetectedChange))
+                {
+                    parts.Add($"变动: {LastDetectedChange}");
+                }
+
+                if (LastSuccessTime.HasValue)
+                {
+                    parts.Add($"上次成功 {LastSuccessTime.Value:HH:mm}");
+                }
+
+                return string.Join(" · ", parts);
+            }
+        }
 
         /// <summary>
         /// 状态描述友好文字

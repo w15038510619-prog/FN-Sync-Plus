@@ -129,6 +129,7 @@
                                                 </Border>
                                             </StackPanel>
                                             <TextBlock Text="{x:Bind FormattedLastSync, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="0,2,0,0" />
+                                            <TextBlock Text="{x:Bind ScheduleSummaryText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" Margin="0,2,0,0" />
                                         </StackPanel>
                                     </StackPanel>
 
@@ -180,7 +181,13 @@
                                             <FontIcon Glyph="&#xE712;" FontSize="12" />
                                             <Button.Flyout>
                                                 <MenuFlyout>
-                                                    <MenuFlyoutItem Text="删除任务配置" Command="{x:Bind DeleteTaskCommand}">
+                                                    <MenuFlyoutItem Text="编辑备份设置" Command="{x:Bind EditSettingsCommand}">
+                                                        <MenuFlyoutItem.Icon>
+                                                            <FontIcon Glyph="&#xE713;" />
+                                                        </MenuFlyoutItem.Icon>
+                                                    </MenuFlyoutItem>
+                                                    <MenuFlyoutSeparator />
+                                                    <MenuFlyoutItem Text="仅移除任务配置" Command="{x:Bind DeleteTaskCommand}">
                                                         <MenuFlyoutItem.Icon>
                                                             <FontIcon Glyph="&#xE74D;" Foreground="Red" />
                                                         </MenuFlyoutItem.Icon>
