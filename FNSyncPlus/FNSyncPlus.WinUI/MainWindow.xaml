@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="FNSyncPlus.WinUI.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:FNSyncPlus.WinUI.ViewModels"
+    Title="飞牛同步增强版 v0.4.0-beta"
+    mc:Ignorable="d">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="44" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- 1. CUSTOM TITLE BAR -->
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Background="Transparent" Padding="16,0,140,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Brand Icon & Title (Drag Area) -->
+            <StackPanel x:Name="AppTitleBarDragArea" Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
+                <Border Width="24" Height="24" Background="{ThemeResource AccentFillColorDefaultBrush}" CornerRadius="6">
+                    <FontIcon Glyph="&#xE895;" FontSize="12" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <TextBlock Text="飞牛同步增强版 v0.4.0-beta" FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+            </StackPanel>
+
+            <!-- Center: Connected NAS Status Pill Button -->
+            <StackPanel Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center">
+                <Button x:Name="BtnNasStatusPill" Click="BtnNasStatusPill_Click"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1" CornerRadius="14" Padding="12,4"
+                        ToolTipService.ToolTip="点击配置 NAS 设备连接">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Ellipse x:Name="DotNasStatus" Width="8" Height="8" Fill="#94A3B8" VerticalAlignment="Center" />
+                        <TextBlock Text="{x:Bind ViewModel.NasStatusText, Mode=OneWay}" FontSize="11" FontWeight="Medium" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+
+            <!-- Right: Theme Toggle -->
+            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
+                <Button Click="BtnThemeToggle_Click" ToolTipService.ToolTip="切换深色/浅色主题" Padding="6" Background="Transparent" BorderThickness="0">
+                    <FontIcon x:Name="IconThemeToggle" Glyph="&#xE706;" FontSize="14" />
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <!-- 2. NAVIGATION VIEW SHELL -->
+        <NavigationView
+            x:Name="NavView"
+            Grid.Row="1"
+            PaneDisplayMode="Left"
+            OpenPaneLength="210"
+            IsBackButtonVisible="Collapsed"
+            IsSettingsVisible="False"
+            SelectionChanged="NavView_SelectionChanged">
+
+            <NavigationView.MenuItems>
+                <NavigationViewItem Content="同步任务" Tag="Tasks">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8B7;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="恢复文件" Tag="Restore">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE81C;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="NAS 设备" Tag="Device">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE774;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="测试实验室" Tag="TestLab">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE756;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+
+            <NavigationView.FooterMenuItems>
+                <NavigationViewItem Content="全局设置" Tag="Settings">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE713;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.FooterMenuItems>
+
+            <!-- Content Area inside NavigationView -->
+            <Grid Padding="0,4,0,0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <InfoBar
+                    x:Name="GlobalInfoBar"
+                    Grid.Row="0"
+                    IsOpen="{x:Bind ViewModel.IsInfoBarOpen, Mode=TwoWay}"
+                    Title="{x:Bind ViewModel.InfoBarTitle, Mode=OneWay}"
+                    Message="{x:Bind ViewModel.InfoBarMessage, Mode=OneWay}"
+                    Severity="{x:Bind ViewModel.InfoBarSeverity, Mode=OneWay}"
+                    Margin="16,0,16,8" />
+
+                <Frame x:Name="ContentFrame" Grid.Row="1" />
+            </Grid>
+        </NavigationView>
+    </Grid>
+</Window>

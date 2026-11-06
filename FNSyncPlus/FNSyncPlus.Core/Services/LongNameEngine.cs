@@ -16,17 +16,61 @@ namespace FNSyncPlus.Core.Services
     public class LongNameEngine
     {
         public const int DefaultMaxUtf8Bytes = 255;
+        /// <summary>
+        /// 飞牛 fnOS 个人空间 HTTP 上传接口实测安全阈值。
+        /// Linux 内核单层文件名上限为 255 字节，服务端在处理直传时会附加约 4-5 字节的临时暂存后缀（如 .~#0 或 .part），
+        /// 导致原始文件名 >= 252 字节时服务端中间临时文件名溢出 255 字节上限 (errno: 4104, Path Is Too Long)。
+        /// 因此将原生上传 Provider 的安全直传阈值设为 251 字节，>= 252 字节自动安全映射物理短别名。
+        /// </summary>
+        public const int FnOsUploadMaxUtf8Bytes = 251;
         public const string LongNamePrefix = "_FN_LONG_";
 
-        private readonly int _maxUtf8Bytes;
+        private readonly int _maxFileUtf8Bytes;
+        private readonly int _maxDirUtf8Bytes;
+
+        public int MaxFileUtf8Bytes => _maxFileUtf8Bytes;
+        public int MaxDirUtf8Bytes => _maxDirUtf8Bytes;
+
         // Key: 小写 stored_rel, Value: original_rel (防止在同一目录下出现短名碰撞)
         private readonly ConcurrentDictionary<string, string> _occupiedStoredToOriginal = new(StringComparer.OrdinalIgnoreCase);
         // Key: original_rel, Value: stored_rel (已确定的映射项，确保增量同步稳定性)
         private readonly ConcurrentDictionary<string, string> _originalToStored = new(StringComparer.OrdinalIgnoreCase);
 
         public LongNameEngine(int maxUtf8Bytes = DefaultMaxUtf8Bytes)
+            : this(maxFileUtf8Bytes: maxUtf8Bytes, maxDirUtf8Bytes: maxUtf8Bytes)
         {
-            _maxUtf8Bytes = maxUtf8Bytes > 0 ? maxUtf8Bytes : DefaultMaxUtf8Bytes;
+        }
+
+        public LongNameEngine(int maxFileUtf8Bytes, int maxDirUtf8Bytes)
+        {
+            _maxFileUtf8Bytes = maxFileUtf8Bytes > 0 ? maxFileUtf8Bytes : DefaultMaxUtf8Bytes;
+            _maxDirUtf8Bytes = maxDirUtf8Bytes > 0 ? maxDirUtf8Bytes : DefaultMaxUtf8Bytes;
+        }
+
+        /// <summary>
+        /// 根据 NAS 存储提供程序动态创建匹配的长文件名引擎
+        /// </summary>
+        public static LongNameEngine CreateForProvider(FNSyncPlus.Core.Storage.INasStorageProvider? provider)
+        {
+            if (provider is FNSyncPlus.Core.Storage.FnOsPersonalStorageProvider)
+            {
+                // fnOS 个人空间：文件直传上限 251 字节，目录保持 Linux 255 字节
+                return new LongNameEngine(maxFileUtf8Bytes: FnOsUploadMaxUtf8Bytes, maxDirUtf8Bytes: DefaultMaxUtf8Bytes);
+            }
+            // SMB 共享或本地沙盒：文件与目录均保持 255 字节
+            return new LongNameEngine(maxFileUtf8Bytes: DefaultMaxUtf8Bytes, maxDirUtf8Bytes: DefaultMaxUtf8Bytes);
+        }
+
+        /// <summary>
+        /// 根据任务同步提供程序类型创建匹配的长文件名引擎
+        /// </summary>
+        public static LongNameEngine CreateForProviderType(FNSyncPlus.Core.Storage.StorageProviderType providerType)
+        {
+            if (providerType == FNSyncPlus.Core.Storage.StorageProviderType.FnOsPersonal)
+            {
+                return new LongNameEngine(maxFileUtf8Bytes: FnOsUploadMaxUtf8Bytes, maxDirUtf8Bytes: DefaultMaxUtf8Bytes);
+            }
+            return new LongNameEngine(maxFileUtf8Bytes: DefaultMaxUtf8Bytes, maxDirUtf8Bytes: DefaultMaxUtf8Bytes);
         }
 
         /// <summary>
@@ -58,10 +102,11 @@ namespace FNSyncPlus.Core.Services
         /// <summary>
         /// 判断单个文件名或目录名（单层）是否超长
         /// </summary>
-        public bool IsComponentTooLong(string componentName)
+        public bool IsComponentTooLong(string componentName, bool isDirectory = false)
         {
             if (string.IsNullOrEmpty(componentName)) return false;
-            return PathHelper.GetUtf8ByteCount(componentName) > _maxUtf8Bytes;
+            int maxLimit = isDirectory ? _maxDirUtf8Bytes : _maxFileUtf8Bytes;
+            return PathHelper.GetUtf8ByteCount(componentName) > maxLimit;
         }
 
         /// <summary>
@@ -157,9 +202,11 @@ namespace FNSyncPlus.Core.Services
         private (string StoredName, bool IsLong) TranslateSingleComponent(string componentName, string currentOriginalFullPath, string parentStoredDir, bool isDirectory)
         {
             int byteCount = PathHelper.GetUtf8ByteCount(componentName);
+            int maxLimit = isDirectory ? _maxDirUtf8Bytes : _maxFileUtf8Bytes;
 
-            // 如果不超长，且不是清单保留名称，优先尝试使用原始名称
-            if (byteCount <= _maxUtf8Bytes &&
+            // 如果不超长，且不是内部元数据与清单保留名称，优先尝试使用原始名称
+            if (byteCount <= maxLimit &&
+                !string.Equals(componentName, Manifest.MetadataDirName, StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(componentName, Manifest.CurrentManifestFileName, StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(componentName, Manifest.LegacyManifestFileName, StringComparison.OrdinalIgnoreCase))
             {

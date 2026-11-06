@@ -5,14 +5,22 @@ using System.Text.Json.Serialization;
 namespace FNSyncPlus.Core.Models
 {
     /// <summary>
-    /// 备份清单元数据，保存在 NAS 目标备份根目录下
+    /// 备份清单元数据，隔离保存在 NAS 目标备份根目录下的 .fnsync/ 专用目录中
     /// 包含所有长文件名与常规文件映射、目录映射、时间戳与 SHA-256 校验和
     /// </summary>
     public class Manifest
     {
-        public const string CurrentManifestFileName = "__FN_SYNC_MANIFEST__.json";
-        public const string LegacyManifestFileName = "__FN_ORIGINAL_NAMES__.json";
-        public const int CurrentVersion = 2;
+        public const string MetadataDirName = ".fnsync";
+        public const string IsolatedManifestFileName = "manifest.json";
+        public const string CurrentManifestFileName = "manifest.json";
+        public const string StagingDirName = "staging";
+        public const string LockFileName = "sync.lock";
+
+        // 旧版本兼容文件名
+        public const string LegacyManifestFileName = "__FN_SYNC_MANIFEST__.json";
+        public const string LegacyGoManifestFileName = "__FN_ORIGINAL_NAMES__.json";
+
+        public const int CurrentVersion = 4;
 
         [JsonPropertyName("version")]
         public int Version { get; set; } = CurrentVersion;
@@ -24,7 +32,7 @@ namespace FNSyncPlus.Core.Models
         public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 
         [JsonPropertyName("note")]
-        public string Note { get; set; } = "飞牛同步元数据清单文件，请随备份保留，切勿删除，用于异机一键恢复原始文件名与目录结构。";
+        public string Note { get; set; } = "飞牛同步元数据清单文件，保存在 .fnsync 专用命名空间，切勿删除，用于异机一键还原原始长文件名与目录结构。";
 
         [JsonPropertyName("source_root")]
         public string SourceRoot { get; set; } = string.Empty;
@@ -32,15 +40,27 @@ namespace FNSyncPlus.Core.Models
         [JsonPropertyName("target_root")]
         public string TargetRoot { get; set; } = string.Empty;
 
+        [JsonPropertyName("backup_policy")]
+        public string BackupPolicy { get; set; } = "Smart"; // "Smart" (智能备份), "Archive" (归档备份), "Mirror" (镜像备份)
+
         [JsonPropertyName("files")]
         public List<ManifestFileEntry> Files { get; set; } = new();
 
         [JsonPropertyName("directories")]
         public List<ManifestDirEntry> Directories { get; set; } = new();
+
+        [JsonPropertyName("history")]
+        public List<ManifestHistoryEntry> History { get; set; } = new();
+
+        [JsonIgnore]
+        public bool IsFromCache { get; set; }
+
+        [JsonIgnore]
+        public DateTimeOffset? CachedAt { get; set; }
     }
 
     /// <summary>
-    /// 文件映射项
+    /// 文件映射项 (当前活动备份树条目)
     /// </summary>
     public class ManifestFileEntry
     {
@@ -64,10 +84,67 @@ namespace FNSyncPlus.Core.Models
 
         [JsonPropertyName("is_long_name")]
         public bool IsLongName { get; set; }
+
+        [JsonPropertyName("utf8_bytes")]
+        public int? Utf8Bytes { get; set; }
+
+        [JsonPropertyName("stored_utf8_bytes")]
+        public int? StoredUtf8Bytes { get; set; }
+
+        [JsonPropertyName("is_active")]
+        public bool IsActive { get; set; } = true;
+
+        [JsonPropertyName("previous_rel")]
+        public string? PreviousRel { get; set; }
+
+        [JsonPropertyName("sync_batch_id")]
+        public string? SyncBatchId { get; set; }
     }
 
     /// <summary>
-    /// 目录映射项
+    /// 历史版本与重命名追溯条目
+    /// </summary>
+    public class ManifestHistoryEntry
+    {
+        [JsonPropertyName("history_id")]
+        public string HistoryId { get; set; } = Guid.NewGuid().ToString("N")[..12];
+
+        [JsonPropertyName("original_rel")]
+        public string OriginalRel { get; set; } = string.Empty;
+
+        [JsonPropertyName("stored_rel")]
+        public string StoredRel { get; set; } = string.Empty;
+
+        [JsonPropertyName("size")]
+        public long Size { get; set; }
+
+        [JsonPropertyName("sha256")]
+        public string Sha256 { get; set; } = string.Empty;
+
+        [JsonPropertyName("archived_at")]
+        public DateTimeOffset ArchivedAt { get; set; } = DateTimeOffset.UtcNow;
+
+        [JsonPropertyName("reason")]
+        public string Reason { get; set; } = "renamed"; // "renamed", "deleted", "superseded"
+
+        [JsonPropertyName("renamed_to")]
+        public string? RenamedTo { get; set; }
+
+        [JsonPropertyName("is_long_name")]
+        public bool IsLongName { get; set; }
+
+        [JsonPropertyName("utf8_bytes")]
+        public int? Utf8Bytes { get; set; }
+
+        [JsonPropertyName("stored_utf8_bytes")]
+        public int? StoredUtf8Bytes { get; set; }
+
+        [JsonPropertyName("sync_batch_id")]
+        public string? SyncBatchId { get; set; }
+    }
+
+    /// <summary>
+    /// 目录映射项 (支持空目录还原)
     /// </summary>
     public class ManifestDirEntry
     {
@@ -79,5 +156,11 @@ namespace FNSyncPlus.Core.Models
 
         [JsonPropertyName("is_long_name")]
         public bool IsLongName { get; set; }
+
+        [JsonPropertyName("utf8_bytes")]
+        public int? Utf8Bytes { get; set; }
+
+        [JsonPropertyName("stored_utf8_bytes")]
+        public int? StoredUtf8Bytes { get; set; }
     }
 }

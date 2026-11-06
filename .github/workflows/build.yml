@@ -1,0 +1,81 @@
+name: Build and Release FN Sync Plus
+
+on:
+  push:
+    branches: [ "main", "master", "feature/**" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET 8.0 SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+
+    - name: Restore Dependencies
+      run: dotnet restore FNSyncPlus/FNSyncPlus.sln
+
+    - name: Build Solution
+      run: dotnet build FNSyncPlus/FNSyncPlus.sln -c Release --no-restore
+
+    - name: Run Automated Tests
+      run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release
+
+    - name: Publish WinUI 3 Desktop Application (v0.4.0-beta)
+      run: >
+        dotnet publish FNSyncPlus/FNSyncPlus.WinUI/FNSyncPlus.WinUI.csproj
+        -c Release
+        -r win-x64
+        --self-contained true
+        -p:WindowsPackageType=None
+        -o publish_winui/
+
+    - name: Ensure Resources PRI in Publish Output
+      shell: pwsh
+      run: |
+        if ((Test-Path "publish_winui/FNSyncPlus.WinUI.pri") -and !(Test-Path "publish_winui/resources.pri")) {
+          Copy-Item -Path "publish_winui/FNSyncPlus.WinUI.pri" -Destination "publish_winui/resources.pri" -Force
+        }
+
+    - name: Compress WinUI 3 Release to ZIP
+      shell: pwsh
+      run: |
+        Compress-Archive -Path publish_winui/* -DestinationPath publish_winui/FN_Sync_Plus_v0.4.0-beta_WinUI3_x64.zip -Force
+
+    - name: Publish Legacy WPF Single-File Executable
+      run: >
+        dotnet publish FNSyncPlus/FNSyncPlus.App/FNSyncPlus.App.csproj
+        -c Release
+        -r win-x64
+        --self-contained true
+        -p:PublishSingleFile=true
+        -p:IncludeNativeLibrariesForSelfExtract=true
+        -p:EnableCompressionInSingleFile=true
+        -o publish/
+
+    - name: Rename Output Executable
+      shell: pwsh
+      run: |
+        if (Test-Path publish/FNSyncPlus.App.exe) {
+          Copy-Item publish/FNSyncPlus.App.exe publish/FN_Sync_Plus.exe -Force
+        }
+
+    - name: Upload WinUI 3 Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: FN_Sync_Plus_v0.4.0-beta_WinUI3_x64
+        path: publish_winui/FN_Sync_Plus_v0.4.0-beta_WinUI3_x64.zip
+
+    - name: Upload Legacy WPF Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: FN_Sync_Plus_v2.2_WPF
+        path: publish/FN_Sync_Plus.exe

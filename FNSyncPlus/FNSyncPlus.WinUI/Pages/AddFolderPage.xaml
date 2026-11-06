@@ -1,0 +1,292 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="FNSyncPlus.WinUI.Pages.AddFolderPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="using:FNSyncPlus.WinUI.ViewModels"
+    mc:Ignorable="d">
+
+    <Grid Padding="24,12,24,20" RowSpacing="14">
+        <Grid.RowDefinitions>
+            <!-- 0: TOP BAR WITH BACK BUTTON & STEP PILLS -->
+            <RowDefinition Height="Auto" />
+            <!-- 1: RESPONSIVE CONTENT AREA (SCROLLABLE IF NEEDED) -->
+            <RowDefinition Height="*" />
+            <!-- 2: PINNED BOTTOM ACTION CONTROLS (ALWAYS VISIBLE) -->
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- 0. TOP NAVIGATION & STEP PROGRESS -->
+        <Border Grid.Row="0" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Back button & Page Title -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <Button Click="BtnBackToTasks_Click" Style="{ThemeResource SubtleButtonStyle}" Padding="8,4" ToolTipService.ToolTip="返回任务列表">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE72B;" FontSize="12" />
+                            <TextBlock Text="返回任务" FontSize="12" />
+                        </StackPanel>
+                    </Button>
+                    <Border Width="1" Height="16" Background="{ThemeResource DividerStrokeColorDefaultBrush}" VerticalAlignment="Center" />
+                    <TextBlock Text="添加自动备份文件夹" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" />
+                </StackPanel>
+
+                <!-- Step Indicator Pills -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                    <Border Background="{x:Bind GetStepPillBg(ViewModel.CurrentStep, 1), Mode=OneWay}" CornerRadius="4" Padding="10,4">
+                        <TextBlock Text="1. 选择本地文件夹" FontSize="11" Foreground="{x:Bind GetStepPillFg(ViewModel.CurrentStep, 1), Mode=OneWay}" FontWeight="Medium" />
+                    </Border>
+                    <FontIcon Glyph="&#xE76C;" FontSize="9" Foreground="{ThemeResource TextFillColorTertiaryBrush}" VerticalAlignment="Center" />
+                    <Border Background="{x:Bind GetStepPillBg(ViewModel.CurrentStep, 2), Mode=OneWay}" CornerRadius="4" Padding="10,4">
+                        <TextBlock Text="2. 规划预览与确认" FontSize="11" Foreground="{x:Bind GetStepPillFg(ViewModel.CurrentStep, 2), Mode=OneWay}" FontWeight="Medium" />
+                    </Border>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- 1. MIDDLE RESPONSIVE CONTENT AREA -->
+        <Grid Grid.Row="1" RowSpacing="10">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- NAS Disconnected Warning Banner with Reconnect Action -->
+            <InfoBar Grid.Row="0"
+                     IsOpen="{x:Bind ViewModel.IsNasDisconnectedWarning, Mode=OneWay}"
+                     Severity="Error"
+                     Title="NAS 连接已中断，请重新连接"
+                     Message="当前与飞牛 NAS 的连接已断开。您的本地文件夹选择草稿已妥善保留，重连成功后可继续完成创建。"
+                     IsClosable="False">
+                <InfoBar.ActionButton>
+                    <Button Click="BtnReconnectNas_Click" Style="{ThemeResource AccentButtonStyle}">
+                        <StackPanel Orientation="Horizontal" Spacing="4">
+                            <FontIcon Glyph="&#xE72C;" FontSize="11" />
+                            <TextBlock Text="前往连接" FontSize="11" />
+                        </StackPanel>
+                    </Button>
+                </InfoBar.ActionButton>
+            </InfoBar>
+
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <Grid MinHeight="420">
+                <!-- STEP 1: LOCAL SOURCE FOLDERS -->
+                <Border Visibility="{x:Bind ViewModel.IsStep1, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="20">
+                    <Grid RowSpacing="16">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- Header & Add Button -->
+                        <Grid Grid.Row="0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Spacing="4">
+                                <TextBlock Text="选择需要自动同步备份的本地文件夹" FontSize="15" FontWeight="SemiBold" />
+                                <TextBlock Text="支持添加单个或批量添加多个不同盘符的文件夹。每个文件夹在 NAS 端将独立规划隔离目录，互不干扰。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <Button Grid.Column="1" Click="BtnAddLocalFolder_Click" Style="{ThemeResource AccentButtonStyle}" Padding="16,8">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE8F4;" FontSize="13" />
+                                    <TextBlock Text="添加本地文件夹..." FontSize="12" FontWeight="SemiBold" />
+                                </StackPanel>
+                            </Button>
+                        </Grid>
+
+                        <!-- Folders List or Empty State -->
+                        <Grid Grid.Row="1" MinHeight="220">
+                            <!-- Empty State Card -->
+                            <StackPanel Visibility="{x:Bind GetEmptyStateVisibility(ViewModel.SelectedLocalFolders.Count), Mode=OneWay}" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="10">
+                                <FontIcon Glyph="&#xE8B7;" FontSize="40" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
+                                <TextBlock Text="尚未选择任何待备份文件夹" FontSize="14" FontWeight="Medium" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
+                                <TextBlock Text="点击右上角【添加本地文件夹...】按钮选择需要保护的电脑文件夹。未添加文件夹前无法进入下一步。" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
+                            </StackPanel>
+
+                            <!-- Selected Folders List -->
+                            <ListView Visibility="{x:Bind GetListStateVisibility(ViewModel.SelectedLocalFolders.Count), Mode=OneWay}" ItemsSource="{x:Bind ViewModel.SelectedLocalFolders, Mode=OneWay}" SelectionMode="None">
+                                <ListView.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Padding="12,8" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="6" Margin="0,3">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <FontIcon Grid.Column="0" Glyph="&#xE8B7;" FontSize="16" Margin="0,0,12,0" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
+                                            <TextBlock Grid.Column="1" Text="{Binding}" FontSize="13" FontFamily="Consolas, Segoe UI" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding}" />
+                                            <Button Grid.Column="2" Click="BtnRemoveFolder_Click" Tag="{Binding}" Style="{ThemeResource SubtleButtonStyle}" Padding="8,4" ToolTipService.ToolTip="移除此文件夹">
+                                                <StackPanel Orientation="Horizontal" Spacing="4">
+                                                    <FontIcon Glyph="&#xE74D;" FontSize="12" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                                                    <TextBlock Text="移除" FontSize="11" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                                                </StackPanel>
+                                            </Button>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+                        </Grid>
+
+                        <!-- Step 1 Notices (Duplicate Conflict + Normal Step Notice) -->
+                        <StackPanel Grid.Row="2" Spacing="8">
+                            <!-- Duplicate Warning InfoBar with Navigation -->
+                            <InfoBar IsOpen="{x:Bind ViewModel.HasDuplicateConflict, Mode=OneWay}"
+                                     Severity="Warning"
+                                     Title="已存在相同备份任务"
+                                     Message="{x:Bind ViewModel.DuplicateWarningMessage, Mode=OneWay}"
+                                     IsClosable="False">
+                                <InfoBar.ActionButton>
+                                    <Button Click="BtnViewExistingTasks_Click" Style="{ThemeResource SubtleButtonStyle}">
+                                        <StackPanel Orientation="Horizontal" Spacing="4">
+                                            <FontIcon Glyph="&#xE8FD;" FontSize="12" />
+                                            <TextBlock Text="查看已有任务" FontSize="12" />
+                                        </StackPanel>
+                                    </Button>
+                                </InfoBar.ActionButton>
+                            </InfoBar>
+
+                            <InfoBar IsOpen="True" Severity="{x:Bind GetStep1NoticeSeverity(ViewModel.SelectedLocalFolders.Count), Mode=OneWay}" Title="{x:Bind ViewModel.StatusMessage, Mode=OneWay}" Message="系统将严格遵循沙箱隔离机制，对每个选中的源文件夹独立计算 UTF-8 字节并无损处理超长文件名。" IsClosable="False" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <!-- STEP 2: AUTO-PLAN PREVIEW & CONFIRMATION -->
+                <Border Visibility="{x:Bind ViewModel.IsStep2, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="20">
+                    <Grid RowSpacing="14">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- Header -->
+                        <StackPanel Grid.Row="0" Spacing="4">
+                            <TextBlock Text="自动规划备份方案预览（同名文件夹自动创建与防覆盖保护）" FontSize="15" FontWeight="SemiBold" />
+                            <TextBlock Text="系统已为选中的本地源文件夹自动规划好 NAS 端的同名备份目录。无需手动新建文件夹，点击下方【确认创建并开始备份】即可直接开始。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+
+                        <!-- Current Backup Target Parent Folder & Optional Change Button -->
+                        <Border Grid.Row="1" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="6" Padding="14,10">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Spacing="3" VerticalAlignment="Center">
+                                    <TextBlock Text="NAS 目标存储根位置" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    <TextBlock Text="{x:Bind ViewModel.NasDestinationRoot, Mode=OneWay}" FontSize="13" FontWeight="SemiBold" FontFamily="Consolas, Segoe UI" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                                </StackPanel>
+                                <Button Grid.Column="1" Click="BtnChangeParentFolder_Click" Style="{ThemeResource SubtleButtonStyle}" Padding="10,6" VerticalAlignment="Center">
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <FontIcon Glyph="&#xE8B7;" FontSize="12" />
+                                        <TextBlock Text="更改备份父目录" FontSize="12" />
+                                    </StackPanel>
+                                </Button>
+                            </Grid>
+                        </Border>
+
+                        <!-- Planned Folders Table -->
+                        <Grid Grid.Row="2" RowSpacing="6">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
+
+                            <!-- Table Header -->
+                            <Grid Grid.Row="0" Padding="12,6" Background="{ThemeResource SubtleFillColorTertiaryBrush}" CornerRadius="4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" MinWidth="220" />
+                                    <ColumnDefinition Width="*" MinWidth="240" />
+                                    <ColumnDefinition Width="140" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="本地源文件夹" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Grid.Column="1" Text="NAS 目标规划位置" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Grid.Column="2" Text="规划状态" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Right" />
+                            </Grid>
+
+                            <!-- Table Body Scrollable -->
+                            <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Auto" HorizontalScrollMode="Enabled" VerticalScrollBarVisibility="Auto" MinHeight="160">
+                                <ListView ItemsSource="{x:Bind ViewModel.PlannedTasks, Mode=OneWay}" SelectionMode="None">
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid Padding="12,8" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="6" Margin="0,3">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" MinWidth="220" />
+                                                    <ColumnDefinition Width="*" MinWidth="240" />
+                                                    <ColumnDefinition Width="140" />
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" Margin="0,0,8,0">
+                                                    <FontIcon Glyph="&#xE7F4;" FontSize="12" Foreground="{ThemeResource TextFillColorTertiaryBrush}" VerticalAlignment="Center" />
+                                                    <TextBlock Text="{Binding SourcePath}" FontSize="12" FontFamily="Consolas, Segoe UI" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding SourcePath}" VerticalAlignment="Center" />
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" Margin="0,0,8,0">
+                                                    <FontIcon Glyph="&#xE753;" FontSize="12" Foreground="{ThemeResource AccentFillColorDefaultBrush}" VerticalAlignment="Center" />
+                                                    <TextBlock Text="{Binding FullTargetUnc}" FontSize="12" FontFamily="Consolas, Segoe UI" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding FullTargetUnc}" VerticalAlignment="Center" />
+                                                </StackPanel>
+                                                <TextBlock Grid.Column="2" Text="{Binding StatusText}" FontSize="12" Foreground="{ThemeResource SystemFillColorSuccessBrush}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+                            </ScrollViewer>
+                        </Grid>
+
+                        <!-- InfoBar -->
+                        <InfoBar Grid.Row="3" IsOpen="True" Severity="{x:Bind GetSecuritySeverity(ViewModel.IsTeamShareWarning), Mode=OneWay}" Title="{x:Bind ViewModel.SecurityTitle, Mode=OneWay}" Message="{x:Bind ViewModel.SecurityDescription, Mode=OneWay}" IsClosable="False" />
+                    </Grid>
+                </Border>
+            </Grid>
+        </ScrollViewer>
+        </Grid>
+
+        <!-- 2. PINNED BOTTOM ACTION CONTROLS (ALWAYS VISIBLE) -->
+        <Border Grid.Row="2" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Left: Cancel Button (One single Cancel button) -->
+                <Button Grid.Column="0" Click="BtnBackToTasks_Click" Content="取消返回" Padding="16,8" />
+
+                <!-- Right: Wizard Navigation Controls -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="12">
+                    <Button Click="BtnPreviousStep_Click" Visibility="{x:Bind ViewModel.CanGoBack, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" Padding="16,8">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE72B;" FontSize="11" />
+                            <TextBlock Text="上一步" FontSize="12" />
+                        </StackPanel>
+                    </Button>
+
+                    <Button Click="BtnNextStep_Click" Visibility="{x:Bind ViewModel.IsStep1, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" IsEnabled="{x:Bind ViewModel.CanGoNext, Mode=OneWay}" Style="{ThemeResource AccentButtonStyle}" Padding="20,8">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <TextBlock Text="下一步：自动规划" FontSize="12" FontWeight="SemiBold" />
+                            <FontIcon Glyph="&#xE72A;" FontSize="11" />
+                        </StackPanel>
+                    </Button>
+
+                    <Button Click="BtnCreateAndStart_Click" Visibility="{x:Bind ViewModel.IsStep2, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" IsEnabled="{x:Bind ViewModel.CanCreate, Mode=OneWay}" Style="{ThemeResource AccentButtonStyle}" Padding="22,8">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE896;" FontSize="13" />
+                            <TextBlock Text="确认创建并开始备份" FontSize="12" FontWeight="SemiBold" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Page>
