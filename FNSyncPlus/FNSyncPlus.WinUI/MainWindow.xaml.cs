@@ -22,16 +22,19 @@ namespace FNSyncPlus.WinUI
 
             WindowHelper.ConfigureWindow(this, "飞牛同步增强版 v0.4.0-beta", 1200, 780);
             WindowHelper.SetMicaBackdrop(this);
-            SetTitleBar(AppTitleBar);
+            SetTitleBar(AppTitleBarDragArea);
 
             ViewModel.RequestNavigate += NavigateToTag;
             ViewModel.RequestToggleTheme += ToggleAppTheme;
             ViewModel.PropertyChanged += (s, e) =>
             {
-                if (e.PropertyName == nameof(MainViewModel.IsNasConnected))
+                Helpers.UIThreadHelper.RunOnUIThread(() =>
                 {
-                    UpdateNasDot();
-                }
+                    if (e.PropertyName == nameof(MainViewModel.IsNasConnected))
+                    {
+                        UpdateNasDot();
+                    }
+                });
             };
             UpdateNasDot();
 
@@ -123,28 +126,6 @@ namespace FNSyncPlus.WinUI
                     await deviceVm.LoginAsync();
                 };
             }
-            else if (initialView == "DashboardSynced")
-            {
-                NavigateToTag("Tasks");
-                bool ran = false;
-                this.Activated += (s, e) =>
-                {
-                    if (ran) return;
-                    ran = true;
-                    var taskVm = AppServices.GetService<TasksViewModel>();
-                    var tm = AppServices.GetService<TaskManager>();
-                    if (tm.Tasks.Count == 0)
-                    {
-                        var t1 = new SyncTask { TaskName = "Project_Alpha 同名备份", SourceFolder = @"D:\FNSync_GUI_Test_Folders\Project_Alpha", DestinationFolder = "我的文件/Project_Alpha", State = TaskSyncState.Completed, CurrentProgress = 100, LastSyncTime = DateTime.Now, LastSyncStatus = "已同步完成" };
-                        var t2 = new SyncTask { TaskName = "Docs_2026 同名备份", SourceFolder = @"D:\FNSync_GUI_Test_Folders\Docs_2026", DestinationFolder = "我的文件/Docs_2026", State = TaskSyncState.Completed, CurrentProgress = 100, LastSyncTime = DateTime.Now, LastSyncStatus = "已同步完成" };
-                        var t3 = new SyncTask { TaskName = "CAD_Drawings 同名备份", SourceFolder = @"D:\FNSync_GUI_Test_Folders\CAD_Drawings", DestinationFolder = "我的文件/CAD_Drawings", State = TaskSyncState.Completed, CurrentProgress = 100, LastSyncTime = DateTime.Now, LastSyncStatus = "已同步完成" };
-                        tm.AddTask(t1);
-                        tm.AddTask(t2);
-                        tm.AddTask(t3);
-                        taskVm.ReloadTasks();
-                    }
-                };
-            }
             else if (initialView == "RestorePreview" || initialView == "RestoreCompleted")
             {
                 NavigateToTag("Restore");
@@ -223,7 +204,7 @@ namespace FNSyncPlus.WinUI
             }
         }
 
-        private void BorderNasPill_Tapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
+        private void BtnNasStatusPill_Click(object sender, RoutedEventArgs e)
         {
             NavigateToTag("Device");
             if (NavView.MenuItems.Count >= 3)
@@ -239,9 +220,12 @@ namespace FNSyncPlus.WinUI
 
         private void UpdateNasDot()
         {
-            DotNasStatus.Fill = ViewModel.IsNasConnected
-                ? new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 16, 185, 129))
-                : new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 148, 163, 184));
+            Helpers.UIThreadHelper.RunOnUIThread(() =>
+            {
+                DotNasStatus.Fill = ViewModel.IsNasConnected
+                    ? new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 16, 185, 129))
+                    : new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 148, 163, 184));
+            });
         }
 
         private void Accelerator_Tasks_Invoked(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)

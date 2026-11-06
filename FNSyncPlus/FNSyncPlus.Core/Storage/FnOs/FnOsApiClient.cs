@@ -14,6 +14,23 @@ using System.Threading.Tasks;
 namespace FNSyncPlus.Core.Storage.FnOs
 {
     /// <summary>
+    /// NAS 设备的 TLS 证书元数据模型（用于用户核对与指纹锁定）
+    /// </summary>
+    public class NasCertificateInfo
+    {
+        public string Host { get; set; } = string.Empty;
+        public int Port { get; set; }
+        public string Thumbprint { get; set; } = string.Empty;
+        public string Subject { get; set; } = string.Empty;
+        public string Issuer { get; set; } = string.Empty;
+        public DateTime NotBefore { get; set; }
+        public DateTime NotAfter { get; set; }
+        public SslPolicyErrors SslPolicyErrors { get; set; }
+        public bool IsSystemTrusted => SslPolicyErrors == SslPolicyErrors.None;
+        public bool IsSelfSigned => string.Equals(Subject, Issuer, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
     /// 飞牛 fnOS 官方原生 API 客户端 (WebSocket RPC 控制面 + HTTP 数据面)
     /// 严禁绕过正常登录与权限隔离，严禁明文打印或记录敏感凭据，具备严格失败关闭保护
     /// </summary>
@@ -70,6 +87,52 @@ namespace FNSyncPlus.Core.Storage.FnOs
             };
         }
 
+        /// <summary>
+        /// 预检并探测 NAS 服务的真实 TLS 证书信息（在发送任何用户名、密码或 Token 之前执行）
+        /// 严格提取真实证书的 SHA-256 指纹、使用者、颁发者与信任状态，严禁盲目信任或默认放行
+        /// </summary>
+        public static async Task<NasCertificateInfo> ProbeCertificateAsync(string host, int port, CancellationToken ct = default)
+        {
+            using var tcp = new System.Net.Sockets.TcpClient();
+            using var reg = ct.Register(() => { try { tcp.Close(); } catch { } });
+            await tcp.ConnectAsync(host, port, ct).ConfigureAwait(false);
+
+            NasCertificateInfo? info = null;
+            using var sslStream = new SslStream(tcp.GetStream(), false, (sender, certificate, chain, errors) =>
+            {
+                if (certificate is X509Certificate2 cert)
+                {
+                    string thumb = cert.GetCertHashString(System.Security.Cryptography.HashAlgorithmName.SHA256).ToUpperInvariant();
+                    info = new NasCertificateInfo
+                    {
+                        Host = host,
+                        Port = port,
+                        Thumbprint = thumb,
+                        Subject = cert.Subject,
+                        Issuer = cert.Issuer,
+                        NotBefore = cert.NotBefore,
+                        NotAfter = cert.NotAfter,
+                        SslPolicyErrors = errors
+                    };
+                }
+                return true; // 仅探针探测：允许握手完成以捕获证书元数据
+            });
+
+            var sslOptions = new SslClientAuthenticationOptions
+            {
+                TargetHost = host
+            };
+
+            await sslStream.AuthenticateAsClientAsync(sslOptions, ct).ConfigureAwait(false);
+
+            if (info == null)
+            {
+                throw new InvalidOperationException($"未能从 {host}:{port} 获取到有效的 TLS 证书。");
+            }
+
+            return info;
+        }
+
         private bool ValidateServerCertificate(
             HttpRequestMessage request,
             X509Certificate2? certificate,
@@ -82,13 +145,13 @@ namespace FNSyncPlus.Core.Storage.FnOs
             if (certificate == null) return false;
 
             // 提取服务端的真实 SHA-256 证书指纹
-            string thumbprint = certificate.GetCertHashString(System.Security.Cryptography.HashAlgorithmName.SHA256).ToLowerInvariant();
+            string thumbprint = certificate.GetCertHashString(System.Security.Cryptography.HashAlgorithmName.SHA256).ToUpperInvariant();
             LastSeenCertSha256 = thumbprint;
 
             // 1. 检查自签名或设备专属证书的 SHA-256 指纹强校验 (Certificate Pinning)
             if (!string.IsNullOrEmpty(_pinnedCertSha256))
             {
-                return string.Equals(thumbprint, _pinnedCertSha256.Replace(":", "").ToLowerInvariant(), StringComparison.OrdinalIgnoreCase);
+                return string.Equals(thumbprint, _pinnedCertSha256.Replace(":", "").ToUpperInvariant(), StringComparison.OrdinalIgnoreCase);
             }
 
             // 2. 检查由用户授权并记录在安全配置中的证书指纹白名单
@@ -734,11 +797,12 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 {
                     if (_webSocket.State == WebSocketState.Open)
                     {
-                        await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", CancellationToken.None);
+                        using var closeCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+                        await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", closeCts.Token).ConfigureAwait(false);
                     }
                 }
                 catch { }
-                _webSocket.Dispose();
+                try { _webSocket.Dispose(); } catch { }
                 _webSocket = null;
             }
 

@@ -30,6 +30,12 @@ namespace FNSyncPlus.WinUI
                 LogCrashException(e.Exception, "Application.UnhandledException");
                 e.Handled = true; // 阻止静默闪退
             };
+
+            System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (s, e) =>
+            {
+                LogCrashException(e.Exception, "TaskScheduler.UnobservedTaskException");
+                e.SetObserved(); // 标记已观察，防止未捕获后台异步异常引发运行时强制终止
+            };
         }
 
         protected override void OnLaunched(LaunchActivatedEventArgs args)
@@ -61,6 +67,10 @@ namespace FNSyncPlus.WinUI
                 var win = new MainWindow(initialView, wizardStep);
                 MainWindowInstance = win;
                 _window = win;
+
+                // 绑定 UI 调度器，确保所有后台通知安全切回主线程
+                Helpers.UIThreadHelper.Initialize(win.DispatcherQueue);
+
                 win.Activate();
             }
             catch (Exception ex)
@@ -79,10 +89,27 @@ namespace FNSyncPlus.WinUI
                 Directory.CreateDirectory(logDir);
 
                 string logFile = Path.Combine(logDir, $"crash_{DateTime.Now:yyyyMMdd}.log");
-                string rawMsg = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{context}] {ex}\n";
+                string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                int pid = Environment.ProcessId;
+                int tid = Environment.CurrentManagedThreadId;
 
-                // 凭据脱敏
-                string sanitized = Regex.Replace(rawMsg, @"(?i)(password|pwd|secret)=([^\s&;]+)", "$1=******");
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine("================================================================================");
+                sb.AppendLine($"[CRASH LOG] Timestamp: {timestamp} | Version: v0.4.0-beta | PID: {pid} | Thread: {tid}");
+                sb.AppendLine($"[STAGE/CONTEXT] {context}");
+                sb.AppendLine($"[EXCEPTION TYPE] {ex.GetType().FullName}");
+                sb.AppendLine($"[MESSAGE] {ex.Message}");
+                if (ex.InnerException != null)
+                {
+                    sb.AppendLine($"[INNER EXCEPTION] {ex.InnerException.GetType().FullName}: {ex.InnerException.Message}");
+                }
+                sb.AppendLine($"[STACK TRACE]\n{ex.StackTrace}");
+                sb.AppendLine("================================================================================\n");
+
+                string rawMsg = sb.ToString();
+
+                // 敏感凭据多重安全脱敏
+                string sanitized = Regex.Replace(rawMsg, @"(?i)(password|pwd|secret|token|accesstoken|longtoken)=([^\s&;]+)", "$1=******");
                 File.AppendAllText(logFile, sanitized);
             }
             catch

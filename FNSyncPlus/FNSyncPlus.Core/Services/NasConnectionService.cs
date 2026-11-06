@@ -1,6 +1,10 @@
 using System;
 using System.ComponentModel;
+using System.IO;
+using System.Net.Security;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Storage;
 using FNSyncPlus.Core.Storage.FnOs;
@@ -17,13 +21,16 @@ namespace FNSyncPlus.Core.Services
     }
 
     /// <summary>
-    /// 统一的 NAS 连接状态管理服务（全局单例），管理飞牛原生个人空间与 SMB 登录、心跳验证、断开连接及状态广播
+    /// 统一 NAS 连接状态管理服务（全局单例），管理飞牛原生个人空间与 SMB 登录、证书核对、断开连接及状态广播
     /// </summary>
     public class NasConnectionService : INotifyPropertyChanged
     {
         private readonly SmbAuthService _smbService;
         private readonly AppSettings _settings;
         private readonly TaskManager _taskManager;
+
+        private readonly SemaphoreSlim _connectionLock = new(1, 1);
+        private CancellationTokenSource? _activeConnectionCts;
 
         private NasConnectionState _state = NasConnectionState.Disconnected;
         private string _serverAddress = string.Empty;
@@ -53,6 +60,10 @@ namespace FNSyncPlus.Core.Services
         public string PersonalRootDisplay { get; private set; } = string.Empty;
         public bool TwoFactorRequired { get; private set; }
         public string? TwoFactorAccessToken { get; private set; }
+
+        // TLS 证书待核对与信任机制（严格防护中间人攻击与自签名证书）
+        public bool CertificateConfirmationRequired { get; private set; }
+        public NasCertificateInfo? UntrustedCertificateInfo { get; private set; }
 
         public NasConnectionState State
         {
@@ -127,12 +138,14 @@ namespace FNSyncPlus.Core.Services
         public string StatusDescription => State switch
         {
             NasConnectionState.Connected => CurrentProviderType == StorageProviderType.FnOsPersonal
-                ? $"{ServerAddress} · {Username} (「我的文件」已连接 UID: {CurrentUid})"
+                ? $"{ServerAddress} · {Username} (飞牛个人空间已连接 UID: {CurrentUid})"
                 : $"{ServerAddress} · {Username} (SMB 网络共享已连接)",
-            NasConnectionState.Connecting => "正在连接 NAS...",
-            NasConnectionState.AuthenticationFailed => $"认证失败: {LastError}",
-            NasConnectionState.ConnectionLost => "NAS 连接已断开或网络不可达",
-            _ => "NAS 未连接 (点击配置)"
+            NasConnectionState.Connecting => CurrentProviderType == StorageProviderType.FnOsPersonal
+                ? "🟡 正在连接飞牛官方个人空间..."
+                : "🟡 正在连接 NAS SMB 共享...",
+            NasConnectionState.AuthenticationFailed => $"🔴 认证失败: {LastError}",
+            NasConnectionState.ConnectionLost => "🔴 NAS 网络中断 (点击配置)",
+            _ => "🔴 NAS 未连接 (点击配置)"
         };
 
         public NasConnectionService(SmbAuthService smbService, AppSettings settings, TaskManager taskManager)
@@ -159,12 +172,39 @@ namespace FNSyncPlus.Core.Services
         }
 
         /// <summary>
+        /// 用户明确核对并信任当前 NAS 证书
+        /// </summary>
+        public void TrustCurrentCertificate()
+        {
+            if (UntrustedCertificateInfo != null && !string.IsNullOrEmpty(UntrustedCertificateInfo.Host))
+            {
+                _settings.TrustedCertThumbprints[UntrustedCertificateInfo.Host] = UntrustedCertificateInfo.Thumbprint;
+                _settings.Save();
+                CertificateConfirmationRequired = false;
+                UntrustedCertificateInfo = null;
+                OnPropertyChanged(nameof(CertificateConfirmationRequired));
+                OnPropertyChanged(nameof(UntrustedCertificateInfo));
+            }
+        }
+
+        /// <summary>
+        /// 取消证书信任确认
+        /// </summary>
+        public void ClearUntrustedCertificate()
+        {
+            CertificateConfirmationRequired = false;
+            UntrustedCertificateInfo = null;
+            OnPropertyChanged(nameof(CertificateConfirmationRequired));
+            OnPropertyChanged(nameof(UntrustedCertificateInfo));
+        }
+
+        /// <summary>
         /// 执行 NAS 连接与身份认证 (默认首选飞牛原生个人空间模式)
         /// </summary>
         public async Task<(bool Success, string Message)> ConnectAsync(
-            string server, 
-            string user, 
-            string password, 
+            string server,
+            string user,
+            string password,
             bool rememberCredentials,
             StorageProviderType providerType = StorageProviderType.FnOsPersonal,
             string? twoFactorCode = null)
@@ -176,25 +216,97 @@ namespace FNSyncPlus.Core.Services
                 return (false, LastError);
             }
 
-            State = NasConnectionState.Connecting;
-            LastError = string.Empty;
-            TwoFactorRequired = false;
-            TwoFactorAccessToken = null;
-            CurrentProviderType = providerType;
+            if (!await _connectionLock.WaitAsync(0).ConfigureAwait(false))
+            {
+                return (false, "当前已有连接或断开操作正在执行，请稍候。");
+            }
+
+            _activeConnectionCts?.Cancel();
+            _activeConnectionCts = new CancellationTokenSource();
+            var ct = _activeConnectionCts.Token;
 
             try
             {
+                State = NasConnectionState.Connecting;
+                LastError = string.Empty;
+                TwoFactorRequired = false;
+                TwoFactorAccessToken = null;
+                CertificateConfirmationRequired = false;
+                UntrustedCertificateInfo = null;
+                CurrentProviderType = providerType;
+
                 if (providerType == StorageProviderType.FnOsPersonal)
                 {
-                    // 1. 首选方案：飞牛 fnOS 官方原生账号个人空间
-                    string? pinnedThumbprint = null;
-                    if (_settings.TrustedCertThumbprints.TryGetValue(server.Trim(), out var cert))
+                    ParseHostAndPort(server, out string host, out int port);
+
+                    // =========================================================================
+                    // 阶段 1：TLS 证书探针与安全核对 (在发送密码或 Token 之前完成)
+                    // =========================================================================
+                    NasCertificateInfo certInfo;
+                    try
                     {
-                        pinnedThumbprint = cert;
+                        certInfo = await FnOsApiClient.ProbeCertificateAsync(host, port, ct).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogDiagnostics("ConnectAsync.TlsProbe", ex);
+                        LastError = $"TLS 握手探测失败 ({ex.GetType().Name}): {ex.Message}";
+                        State = NasConnectionState.ConnectionLost;
+                        _taskManager.SetNasOnlineState(false);
+                        return (false, LastError);
                     }
 
-                    var fnProvider = new FnOsPersonalStorageProvider(pinnedThumbprint);
-                    var authResult = await fnProvider.ConnectAndAuthenticateAsync(server.Trim(), user.Trim(), password, twoFactorCode).ConfigureAwait(false);
+                    // 检查证书信任状态
+                    if (!certInfo.IsSystemTrusted)
+                    {
+                        if (_settings.TrustedCertThumbprints.TryGetValue(host, out var trustedThumbprint))
+                        {
+                            if (!string.Equals(trustedThumbprint, certInfo.Thumbprint, StringComparison.OrdinalIgnoreCase))
+                            {
+                                // 证书指纹变更！严防中间人攻击，必须由用户重新确认
+                                UntrustedCertificateInfo = certInfo;
+                                CertificateConfirmationRequired = true;
+                                LastError = $"检测到 NAS 证书指纹变更！原指纹: {trustedThumbprint}，新指纹: {certInfo.Thumbprint}。为防止安全风险，请重新核对并确认。";
+                                State = NasConnectionState.AuthenticationFailed;
+                                _taskManager.SetNasOnlineState(false);
+                                OnPropertyChanged(nameof(CertificateConfirmationRequired));
+                                OnPropertyChanged(nameof(UntrustedCertificateInfo));
+                                return (false, LastError);
+                            }
+                            // 指纹完全匹配，用户此前已明确信任
+                        }
+                        else
+                        {
+                            // 首次连接，未记录过信任指纹：停止连接，呈现给用户核对
+                            UntrustedCertificateInfo = certInfo;
+                            CertificateConfirmationRequired = true;
+                            LastError = $"检测到 NAS 自签名 TLS 证书。首次连接需由您核对并信任该设备证书指纹 (SHA-256: {certInfo.Thumbprint})。";
+                            State = NasConnectionState.AuthenticationFailed;
+                            _taskManager.SetNasOnlineState(false);
+                            OnPropertyChanged(nameof(CertificateConfirmationRequired));
+                            OnPropertyChanged(nameof(UntrustedCertificateInfo));
+                            return (false, LastError);
+                        }
+                    }
+
+                    // =========================================================================
+                    // 阶段 2-4：证书核对通过，发起 WebSocket 握手、账号鉴权与个人空间验证
+                    // =========================================================================
+                    var fnProvider = new FnOsPersonalStorageProvider(certInfo.Thumbprint);
+                    StorageAuthResult authResult;
+                    try
+                    {
+                        authResult = await fnProvider.ConnectAndAuthenticateAsync(server.Trim(), user.Trim(), password, twoFactorCode, ct).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        await fnProvider.DisposeAsync().ConfigureAwait(false);
+                        LogDiagnostics("ConnectAsync.Auth", ex);
+                        LastError = $"飞牛个人空间接入失败 ({ex.GetType().Name}): {ex.Message}";
+                        State = NasConnectionState.AuthenticationFailed;
+                        _taskManager.SetNasOnlineState(false);
+                        return (false, LastError);
+                    }
 
                     if (authResult.TwoFactorRequired)
                     {
@@ -217,12 +329,6 @@ namespace FNSyncPlus.Core.Services
                         _settings.NasServer = ServerAddress;
                         _settings.Username = Username;
                         _settings.RememberCredentials = rememberCredentials;
-
-                        // 若成功验证且未记录设备指纹，自动收录当前有效指纹
-                        if (!string.IsNullOrEmpty(fnProvider.CurrentUid?.ToString()) && !_settings.TrustedCertThumbprints.ContainsKey(ServerAddress))
-                        {
-                            _settings.TrustedCertThumbprints[ServerAddress] = "FF3B816D9A6F1967A37970D4F30A2A542C8B5C6A8D6D4FB4B8FFD21B3245FDEF";
-                        }
                         _settings.Save();
 
                         if (rememberCredentials)
@@ -238,12 +344,6 @@ namespace FNSyncPlus.Core.Services
                         LastConnectedTime = DateTime.Now;
                         State = NasConnectionState.Connected;
 
-                        // 后台同时维持 SMB 兼容会话（非必须）
-                        _ = Task.Run(async () =>
-                        {
-                            try { await _smbService.ConnectNasAsync(ServerAddress, Username, password).ConfigureAwait(false); } catch { }
-                        });
-
                         return (true, $"登录成功！已成功连接飞牛官方「我的文件」个人空间 (UID: {CurrentUid})。");
                     }
                     else
@@ -257,8 +357,8 @@ namespace FNSyncPlus.Core.Services
                 }
                 else
                 {
-                    // 2. 备用方案：传统 Windows SMB 共享
-                    var (success, errorMsg) = await _smbService.ConnectNasAsync(server.Trim(), user.Trim(), password);
+                    // 传统 Windows SMB 模式备用方案
+                    var (success, errorMsg) = await _smbService.ConnectNasAsync(server.Trim(), user.Trim(), password).ConfigureAwait(false);
                     if (success)
                     {
                         CurrentStorageProvider = new SmbStorageProvider(_smbService, $@"\\{server.Trim()}");
@@ -292,12 +392,23 @@ namespace FNSyncPlus.Core.Services
                     }
                 }
             }
+            catch (OperationCanceledException)
+            {
+                LastError = "连接操作已取消。";
+                State = NasConnectionState.Disconnected;
+                return (false, LastError);
+            }
             catch (Exception ex)
             {
-                LastError = ex.Message;
+                LogDiagnostics("ConnectAsync.General", ex);
+                LastError = $"连接异常 ({ex.GetType().Name}): {ex.Message}";
                 State = NasConnectionState.ConnectionLost;
                 _taskManager.SetNasOnlineState(false);
-                return (false, $"连接异常: {ex.Message}");
+                return (false, LastError);
+            }
+            finally
+            {
+                _connectionLock.Release();
             }
         }
 
@@ -336,44 +447,85 @@ namespace FNSyncPlus.Core.Services
         }
 
         /// <summary>
-        /// 主动断开当前 NAS 连接会话并释放存储提供程序
+        /// 主动断开当前 NAS 连接会话并安全释放存储提供程序
+        /// 具备完整的生命周期保护、异步互斥与容错，绝不导致进程崩溃或错误在线状态
         /// </summary>
         public async Task DisconnectAsync()
         {
-            string serverToDisconnect = ServerAddress;
-            _state = NasConnectionState.Disconnected;
-            CurrentUid = null;
-            PersonalRootDisplay = string.Empty;
-
-            if (_currentStorageProvider != null)
+            if (!await _connectionLock.WaitAsync(5000).ConfigureAwait(false))
             {
-                try
-                {
-                    await _currentStorageProvider.DisposeAsync().ConfigureAwait(false);
-                }
-                catch { }
-                _currentStorageProvider = null;
+                // 超时无法获取锁时强制重置
+                _activeConnectionCts?.Cancel();
             }
 
-            OnPropertyChanged(nameof(State));
-            OnPropertyChanged(nameof(IsConnected));
-            OnPropertyChanged(nameof(StatusDescription));
-            OnPropertyChanged(nameof(CurrentStorageProvider));
-            StateChanged?.Invoke(this, NasConnectionState.Disconnected);
-            _taskManager.SetNasOnlineState(false);
-
-            if (!string.IsNullOrEmpty(serverToDisconnect))
+            try
             {
-                try
+                _activeConnectionCts?.Cancel();
+                _activeConnectionCts = null;
+
+                // 1. 先安全通知 TaskManager 标记 NAS 离线，停止依赖当前连接的活动
+                _taskManager.SetNasOnlineState(false);
+
+                // 2. 安全释放当前存储提供程序
+                var provider = _currentStorageProvider;
+                _currentStorageProvider = null;
+                if (provider != null)
                 {
-                    await _smbService.DisconnectNasAsync(serverToDisconnect);
+                    try
+                    {
+                        await provider.DisposeAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogDiagnostics("DisconnectAsync.ProviderDispose", ex);
+                    }
                 }
-                catch { }
+
+                // 3. 仅在 SMB 共享模式下且确有必要时释放 SMB 会话，绝不影响使用 fnOS 原生模式的其他应用
+                if (CurrentProviderType == StorageProviderType.SmbShare && !string.IsNullOrEmpty(ServerAddress))
+                {
+                    try
+                    {
+                        await _smbService.DisconnectNasAsync(ServerAddress).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogDiagnostics("DisconnectAsync.SmbDisconnect", ex);
+                    }
+                }
+
+                // 4. 清理会话状态字段
+                CurrentUid = null;
+                PersonalRootDisplay = string.Empty;
+                TwoFactorRequired = false;
+                TwoFactorAccessToken = null;
+                CertificateConfirmationRequired = false;
+                UntrustedCertificateInfo = null;
+
+                _state = NasConnectionState.Disconnected;
+                OnPropertyChanged(nameof(State));
+                OnPropertyChanged(nameof(IsConnected));
+                OnPropertyChanged(nameof(StatusDescription));
+                StateChanged?.Invoke(this, NasConnectionState.Disconnected);
+            }
+            catch (Exception ex)
+            {
+                LogDiagnostics("DisconnectAsync.General", ex);
+                _state = NasConnectionState.Disconnected;
+                OnPropertyChanged(nameof(State));
+                OnPropertyChanged(nameof(IsConnected));
+                OnPropertyChanged(nameof(StatusDescription));
+                StateChanged?.Invoke(this, NasConnectionState.Disconnected);
+            }
+            finally
+            {
+                try { _connectionLock.Release(); } catch { }
             }
         }
 
         /// <summary>
         /// 验证当前 NAS 会话是否依然有效
+        /// 基于有效会话与实际授权目录检查，绝不盲目通过 SMB IPC$ 冒充
         /// </summary>
         public async Task<bool> VerifyActiveSessionAsync()
         {
@@ -390,32 +542,62 @@ namespace FNSyncPlus.Core.Services
                 return true;
             }
 
+            if (CurrentProviderType == StorageProviderType.SmbShare)
+            {
+                try
+                {
+                    string testPath = $@"\\{ServerAddress}\IPC$";
+                    bool reachable = await Task.Run(() => System.IO.Directory.Exists(testPath)).ConfigureAwait(false);
+                    if (reachable)
+                    {
+                        if (State != NasConnectionState.Connected)
+                        {
+                            State = NasConnectionState.Connected;
+                            _taskManager.SetNasOnlineState(true);
+                        }
+                        return true;
+                    }
+                }
+                catch { }
+            }
+
+            State = NasConnectionState.ConnectionLost;
+            _taskManager.SetNasOnlineState(false);
+            return false;
+        }
+
+        private static void ParseHostAndPort(string server, out string host, out int port)
+        {
+            string s = server.Trim();
+            if (s.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) s = s[8..];
+            else if (s.StartsWith("http://", StringComparison.OrdinalIgnoreCase)) s = s[7..];
+            s = s.TrimEnd('/');
+            int colon = s.IndexOf(':');
+            if (colon > 0 && int.TryParse(s[(colon + 1)..], out int p))
+            {
+                host = s[..colon];
+                port = p;
+            }
+            else
+            {
+                host = s;
+                port = 5667;
+            }
+        }
+
+        private static void LogDiagnostics(string stage, Exception ex)
+        {
             try
             {
-                string testPath = $@"\\{ServerAddress}\IPC$";
-                bool reachable = await Task.Run(() => System.IO.Directory.Exists(testPath));
-                if (reachable)
-                {
-                    if (State != NasConnectionState.Connected)
-                    {
-                        State = NasConnectionState.Connected;
-                        _taskManager.SetNasOnlineState(true);
-                    }
-                    return true;
-                }
-                else
-                {
-                    State = NasConnectionState.ConnectionLost;
-                    _taskManager.SetNasOnlineState(false);
-                    return false;
-                }
+                string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                string logDir = Path.Combine(localApp, "FNSyncPlus", "logs");
+                Directory.CreateDirectory(logDir);
+                string logFile = Path.Combine(logDir, $"connection_{DateTime.Now:yyyyMMdd}.log");
+                string logMsg = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{stage}] {ex.GetType().FullName}: {ex.Message}\n{ex.StackTrace}\n";
+                string sanitized = Regex.Replace(logMsg, @"(?i)(password|pwd|secret|token)=([^\s&;]+)", "$1=******");
+                File.AppendAllText(logFile, sanitized);
             }
-            catch
-            {
-                State = NasConnectionState.ConnectionLost;
-                _taskManager.SetNasOnlineState(false);
-                return false;
-            }
+            catch { }
         }
 
         protected void OnPropertyChanged([CallerMemberName] string? propertyName = null)

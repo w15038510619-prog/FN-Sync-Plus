@@ -128,6 +128,32 @@
                             <PasswordBox x:Name="TxtPassword" PasswordChanged="TxtPassword_PasswordChanged" Width="380" PlaceholderText="输入飞牛 NAS 登录密码" FontSize="13" />
                         </StackPanel>
 
+                        <!-- TLS Certificate Confirmation Card (Visible only when untrusted cert is detected) -->
+                        <Border Visibility="{x:Bind ViewModel.IsCertConfirmationRequired, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                                Background="#FFFBEB" BorderBrush="#FDE68A" BorderThickness="1" CornerRadius="8" Padding="14,12" Width="380" HorizontalAlignment="Left">
+                            <StackPanel Spacing="8">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <FontIcon Glyph="&#xE7BA;" FontSize="16" Foreground="#D97706" VerticalAlignment="Center" />
+                                    <TextBlock Text="核对并信任 NAS 证书" FontWeight="SemiBold" FontSize="13" Foreground="#B45309" />
+                                </StackPanel>
+                                <TextBlock Text="当前 NAS 使用自签名 TLS 证书。为防止中间人攻击，请核对设备证书指纹:" FontSize="11" Foreground="#92400E" TextWrapping="Wrap" />
+                                <Border Background="#FEF3C7" CornerRadius="4" Padding="8,6">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Text="{x:Bind ViewModel.UntrustedCertFingerprint, Mode=OneWay}" FontFamily="Consolas" FontSize="10" FontWeight="Bold" Foreground="#78350F" TextWrapping="Wrap" />
+                                        <TextBlock Text="{x:Bind ViewModel.UntrustedCertSubject, Mode=OneWay}" FontSize="10" Foreground="#92400E" TextWrapping="Wrap" />
+                                    </StackPanel>
+                                </Border>
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button Command="{x:Bind ViewModel.TrustCertificateAndConnectCommand}" Style="{ThemeResource AccentButtonStyle}">
+                                        <TextBlock Text="信任并继续连接" FontSize="12" />
+                                    </Button>
+                                    <Button Command="{x:Bind ViewModel.CancelCertificateTrustCommand}">
+                                        <TextBlock Text="取消" FontSize="12" />
+                                    </Button>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
                         <!-- Two Factor Authentication Box (Visible only when required) -->
                         <Border Visibility="{x:Bind ViewModel.TwoFactorRequired, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
                                 Background="#EFF6FF" BorderBrush="#BFDBFE" BorderThickness="1" CornerRadius="6" Padding="12,10" Width="380">

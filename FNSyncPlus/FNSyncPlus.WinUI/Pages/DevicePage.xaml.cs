@@ -37,21 +37,17 @@ namespace FNSyncPlus.WinUI.Pages
         public InfoBarSeverity GetSeverity(bool isSuccess)
         {
             if (isSuccess) return InfoBarSeverity.Success;
-            if (ViewModel.StatusMessage.Contains("失败") || ViewModel.StatusMessage.Contains("异常"))
-            {
-                return InfoBarSeverity.Error;
-            }
-            return InfoBarSeverity.Informational;
+            if (ViewModel.IsBusy) return InfoBarSeverity.Informational;
+            if (ViewModel.IsCertConfirmationRequired) return InfoBarSeverity.Warning;
+            return InfoBarSeverity.Error;
         }
 
         public string GetStatusTitle(bool isSuccess)
         {
             if (isSuccess) return "连接就绪";
-            if (ViewModel.StatusMessage.Contains("失败") || ViewModel.StatusMessage.Contains("异常"))
-            {
-                return "连接故障";
-            }
-            return "状态就绪";
+            if (ViewModel.IsBusy) return "正在处理...";
+            if (ViewModel.IsCertConfirmationRequired) return "待核对证书指纹";
+            return "连接故障";
         }
     }
 }

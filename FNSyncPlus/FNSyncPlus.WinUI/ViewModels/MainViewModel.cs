@@ -54,11 +54,15 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             _connectionService.PropertyChanged += (s, e) =>
             {
-                if (e.PropertyName == nameof(NasConnectionService.State) ||
-                    e.PropertyName == nameof(NasConnectionService.ServerAddress))
+                Helpers.UIThreadHelper.RunOnUIThread(() =>
                 {
-                    UpdateNasConnectionStatus();
-                }
+                    if (e.PropertyName == nameof(NasConnectionService.State) ||
+                        e.PropertyName == nameof(NasConnectionService.ServerAddress) ||
+                        e.PropertyName == nameof(NasConnectionService.CurrentProviderType))
+                    {
+                        UpdateNasConnectionStatus();
+                    }
+                });
             };
 
             UpdateNasConnectionStatus();
@@ -70,32 +74,36 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 case NasConnectionState.Connected:
                     IsNasConnected = true;
-                    NasStatusText = $"{_connectionService.ServerAddress} · {_connectionService.Username} (SMB 已连接)";
+                    NasStatusText = _connectionService.CurrentProviderType == FNSyncPlus.Core.Storage.StorageProviderType.FnOsPersonal
+                        ? $"{_connectionService.ServerAddress} · {_connectionService.Username} (fnOS 个人空间已连接)"
+                        : $"{_connectionService.ServerAddress} · {_connectionService.Username} (SMB 共享已连接)";
                     PillBgColorHex = "#DCFCE7";
                     PillTextColorHex = "#15803D";
                     break;
                 case NasConnectionState.Connecting:
                     IsNasConnected = false;
-                    NasStatusText = "🟡 正在连接 NAS SMB...";
+                    NasStatusText = _connectionService.CurrentProviderType == FNSyncPlus.Core.Storage.StorageProviderType.FnOsPersonal
+                        ? "🟡 fnOS 个人空间连接中..."
+                        : "🟡 正在连接 NAS SMB 共享...";
                     PillBgColorHex = "#FEF3C7";
                     PillTextColorHex = "#B45309";
                     break;
                 case NasConnectionState.AuthenticationFailed:
                     IsNasConnected = false;
-                    NasStatusText = "▲ 认证失败 (点击配置)";
+                    NasStatusText = "🔴 fnOS 认证失败 (点击配置)";
                     PillBgColorHex = "#FEE2E2";
                     PillTextColorHex = "#B91C1C";
                     break;
                 case NasConnectionState.ConnectionLost:
                     IsNasConnected = false;
-                    NasStatusText = "▲ NAS 会话断开 (点击配置)";
+                    NasStatusText = "🔴 NAS 网络中断 (点击配置)";
                     PillBgColorHex = "#FEE2E2";
                     PillTextColorHex = "#B91C1C";
                     break;
                 case NasConnectionState.Disconnected:
                 default:
                     IsNasConnected = false;
-                    NasStatusText = "🔴 NAS 未连接 (点击配置)";
+                    NasStatusText = "未连接 (点击配置)";
                     PillBgColorHex = "#F1F5F9";
                     PillTextColorHex = "#64748B";
                     break;

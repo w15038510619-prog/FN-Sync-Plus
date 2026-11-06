@@ -52,6 +52,15 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private string _twoFactorCode = string.Empty;
 
+        [ObservableProperty]
+        private bool _isCertConfirmationRequired = false;
+
+        [ObservableProperty]
+        private string _untrustedCertFingerprint = string.Empty;
+
+        [ObservableProperty]
+        private string _untrustedCertSubject = string.Empty;
+
         public bool IsConnected => _connectionService.IsConnected;
         public int? CurrentUid => _connectionService.CurrentUid;
         public string PersonalRootDisplay => _connectionService.PersonalRootDisplay;
@@ -68,16 +77,21 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             _connectionService.PropertyChanged += (s, e) =>
             {
-                if (e.PropertyName == nameof(NasConnectionService.IsConnected) ||
-                    e.PropertyName == nameof(NasConnectionService.CurrentUid) ||
-                    e.PropertyName == nameof(NasConnectionService.PersonalRootDisplay) ||
-                    e.PropertyName == nameof(NasConnectionService.TwoFactorRequired))
+                Helpers.UIThreadHelper.RunOnUIThread(() =>
                 {
-                    OnPropertyChanged(nameof(IsConnected));
-                    OnPropertyChanged(nameof(CurrentUid));
-                    OnPropertyChanged(nameof(PersonalRootDisplay));
-                    OnPropertyChanged(nameof(TwoFactorRequired));
-                }
+                    if (e.PropertyName == nameof(NasConnectionService.IsConnected) ||
+                        e.PropertyName == nameof(NasConnectionService.CurrentUid) ||
+                        e.PropertyName == nameof(NasConnectionService.PersonalRootDisplay) ||
+                        e.PropertyName == nameof(NasConnectionService.TwoFactorRequired) ||
+                        e.PropertyName == nameof(NasConnectionService.CertificateConfirmationRequired) ||
+                        e.PropertyName == nameof(NasConnectionService.State))
+                    {
+                        OnPropertyChanged(nameof(IsConnected));
+                        OnPropertyChanged(nameof(CurrentUid));
+                        OnPropertyChanged(nameof(PersonalRootDisplay));
+                        OnPropertyChanged(nameof(TwoFactorRequired));
+                    }
+                });
             };
 
             NasAddress = settings.NasServer;
@@ -133,6 +147,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
 
             IsBusy = true;
+            IsCertConfirmationRequired = false;
             StatusMessage = "正在建立飞牛官方原生个人空间安全连接并验证 TLS 证书指纹...";
             IsSuccess = false;
 
@@ -146,17 +161,45 @@ namespace FNSyncPlus.WinUI.ViewModels
 
                 IsSuccess = success;
                 StatusMessage = msg;
+
+                if (!success && _connectionService.CertificateConfirmationRequired && _connectionService.UntrustedCertificateInfo != null)
+                {
+                    IsCertConfirmationRequired = true;
+                    UntrustedCertFingerprint = _connectionService.UntrustedCertificateInfo.Thumbprint;
+                    UntrustedCertSubject = $"{_connectionService.UntrustedCertificateInfo.Subject} (颁发者: {_connectionService.UntrustedCertificateInfo.Issuer}) 有效期至: {_connectionService.UntrustedCertificateInfo.NotAfter:yyyy-MM-dd}";
+                }
+
                 RequestRefreshConnectionPill?.Invoke();
             }
             catch (Exception ex)
             {
                 IsSuccess = false;
-                StatusMessage = $"连接异常: {ex.Message}";
+                StatusMessage = $"连接异常 ({ex.GetType().Name}): {ex.Message}";
+                App.LogCrashException(ex, "DeviceViewModel.LoginAsync");
             }
             finally
             {
                 IsBusy = false;
             }
+        }
+
+        [RelayCommand]
+        public async Task TrustCertificateAndConnectAsync()
+        {
+            if (_connectionService.UntrustedCertificateInfo != null)
+            {
+                _connectionService.TrustCurrentCertificate();
+                IsCertConfirmationRequired = false;
+                await LoginAsync();
+            }
+        }
+
+        [RelayCommand]
+        public void CancelCertificateTrust()
+        {
+            _connectionService.ClearUntrustedCertificate();
+            IsCertConfirmationRequired = false;
+            StatusMessage = "已取消证书信任，连接中止。";
         }
 
         [RelayCommand]
@@ -184,6 +227,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 IsSuccess = false;
                 StatusMessage = $"两步验证异常: {ex.Message}";
+                App.LogCrashException(ex, "DeviceViewModel.SubmitTwoFactorCodeAsync");
             }
             finally
             {
@@ -194,13 +238,20 @@ namespace FNSyncPlus.WinUI.ViewModels
         [RelayCommand]
         public async Task DisconnectAsync()
         {
+            if (IsBusy) return;
             IsBusy = true;
             try
             {
                 await _connectionService.DisconnectAsync();
                 IsSuccess = false;
-                StatusMessage = "已断开当前 NAS SMB 会话。";
+                IsCertConfirmationRequired = false;
+                StatusMessage = "已断开与 NAS 的连接。";
                 RequestRefreshConnectionPill?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                StatusMessage = $"断开异常: {ex.Message}";
+                App.LogCrashException(ex, "DeviceViewModel.DisconnectAsync");
             }
             finally
             {
