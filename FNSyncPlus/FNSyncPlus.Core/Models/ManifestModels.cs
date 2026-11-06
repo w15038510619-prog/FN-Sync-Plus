@@ -45,6 +45,12 @@ namespace FNSyncPlus.Core.Models
 
         [JsonPropertyName("directories")]
         public List<ManifestDirEntry> Directories { get; set; } = new();
+
+        [JsonIgnore]
+        public bool IsFromCache { get; set; }
+
+        [JsonIgnore]
+        public DateTimeOffset? CachedAt { get; set; }
     }
 
     /// <summary>

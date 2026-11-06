@@ -80,6 +80,9 @@ namespace FNSyncPlus.Core.Services
         public FnOsOfficialClientInfo? OfficialClientInfo { get; set; }
         public bool CanDirectlyBackup { get; set; }
         public bool IsTeamShareDiverted { get; set; } = false; // 严禁自动挪用团队文件标记
+        public string BadgeBgHex => HasPersonalSpaceTarget ? "#DCFCE7" : (IsTeamShareDiverted ? "#FEF3C7" : "#FEE2E2");
+        public string BadgeColorHex => HasPersonalSpaceTarget ? "#15803D" : (IsTeamShareDiverted ? "#B45309" : "#B91C1C");
+        public bool IsTeamShare => IsTeamShareDiverted;
     }
 
     /// <summary>

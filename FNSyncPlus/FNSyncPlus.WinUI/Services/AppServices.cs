@@ -47,7 +47,7 @@ namespace FNSyncPlus.WinUI.Services
             // 2. ViewModels
             services.AddSingleton<MainViewModel>();
             services.AddSingleton<TasksViewModel>();
-            services.AddSingleton<AddFolderWizardViewModel>();
+            services.AddTransient<AddFolderWizardViewModel>();
             services.AddSingleton<NasBrowserViewModel>();
             services.AddSingleton<RestoreViewModel>();
             services.AddSingleton<DeviceViewModel>();

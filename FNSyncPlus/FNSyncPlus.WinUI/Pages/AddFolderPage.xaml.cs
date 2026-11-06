@@ -6,6 +6,7 @@ using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Navigation;
 
 namespace FNSyncPlus.WinUI.Pages
 {
@@ -19,7 +20,26 @@ namespace FNSyncPlus.WinUI.Pages
             InitializeComponent();
         }
 
+        protected override void OnNavigatedTo(NavigationEventArgs e)
+        {
+            base.OnNavigatedTo(e);
+            // 每次用户重新进入添加向导，必须创建全新的独立会话状态，清空临时选择，绝不残留上次记录
+            ViewModel.ResetSession();
+        }
+
         private void BtnBackToTasks_Click(object sender, RoutedEventArgs e)
+        {
+            if (App.MainWindowInstance != null)
+            {
+                App.MainWindowInstance.NavigateToTag("Tasks");
+            }
+            else if (Frame.CanGoBack)
+            {
+                Frame.GoBack();
+            }
+        }
+
+        private void BtnViewExistingTasks_Click(object sender, RoutedEventArgs e)
         {
             if (App.MainWindowInstance != null)
             {
@@ -36,15 +56,15 @@ namespace FNSyncPlus.WinUI.Pages
             var folder = await WindowHelper.PickFolderAsync(App.MainWindowHandle);
             if (!string.IsNullOrWhiteSpace(folder))
             {
-                ViewModel.AddLocalFolder(folder);
+                await ViewModel.AddLocalFolderAsync(folder);
             }
         }
 
-        private void BtnRemoveFolder_Click(object sender, RoutedEventArgs e)
+        private async void BtnRemoveFolder_Click(object sender, RoutedEventArgs e)
         {
             if (sender is Button btn && btn.Tag is string folder)
             {
-                ViewModel.RemoveLocalFolder(folder);
+                await ViewModel.RemoveLocalFolderAsync(folder);
             }
         }
 

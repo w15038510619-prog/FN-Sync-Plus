@@ -209,6 +209,71 @@ namespace FNSyncPlus.Core.Utils
         }
 
         /// <summary>
+        /// 安全规范化本地文件夹路径，支持 Windows 长路径、Unicode 字符与异常兜底，严防崩溃
+        /// </summary>
+        public static bool TryNormalizeFullPath(string rawPath, out string normalizedPath, out string? errorMessage)
+        {
+            normalizedPath = string.Empty;
+            errorMessage = null;
+
+            if (string.IsNullOrWhiteSpace(rawPath))
+            {
+                errorMessage = "文件夹路径不能为空";
+                return false;
+            }
+
+            try
+            {
+                string clean = RemoveLongPathPrefix(rawPath).Trim();
+                clean = clean.Replace('/', '\\').TrimEnd('\\');
+
+                // 检查是否包含非法字符
+                if (clean.IndexOfAny(Path.GetInvalidPathChars()) >= 0)
+                {
+                    errorMessage = "路径包含系统非法字符";
+                    return false;
+                }
+
+                // 尝试获取全路径
+                string full = Path.GetFullPath(clean).TrimEnd('\\');
+                normalizedPath = full;
+                return true;
+            }
+            catch (PathTooLongException)
+            {
+                try
+                {
+                    string prefixed = EnsureLongPathPrefix(rawPath).TrimEnd('\\');
+                    normalizedPath = prefixed;
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    errorMessage = $"Windows 超长路径解析异常: {ex.Message}";
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                errorMessage = $"无效路径格式: {ex.Message}";
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 标准化本地路径用于唯一性对比 (不抛异常)
+        /// </summary>
+        public static string NormalizeLocalPath(string rawPath)
+        {
+            if (string.IsNullOrWhiteSpace(rawPath)) return string.Empty;
+            if (TryNormalizeFullPath(rawPath, out string norm, out _))
+            {
+                return norm;
+            }
+            return RemoveLongPathPrefix(rawPath).Trim().Replace('/', '\\').TrimEnd('\\');
+        }
+
+        /// <summary>
         /// 组合 Windows 本地或 UNC 路径，并使用反斜杠
         /// </summary>
         public static string CombineWindowsPath(string basePath, string relativePath)

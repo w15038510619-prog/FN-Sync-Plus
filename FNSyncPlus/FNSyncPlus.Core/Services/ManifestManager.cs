@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Threading;
@@ -51,6 +52,13 @@ namespace FNSyncPlus.Core.Services
         /// <summary>
         /// 获取 NAS 目标目录下的元数据专用隔离目录路径 (.fnsync)
         /// </summary>
+        public static string GetLocalCachePath(string targetFolder)
+        {
+            string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string safeDir = PathHelper.RemoveLongPathPrefix(targetFolder).Trim().Replace('/', '_').Replace('\\', '_').Replace(':', '_');
+            return Path.Combine(localApp, "FNSyncPlus", "manifest_cache", safeDir, "manifest.json");
+        }
+
         public static string GetMetadataDirectory(string targetRootDirectory)
         {
             string longTarget = PathHelper.EnsureLongPathPrefix(targetRootDirectory);
@@ -227,6 +235,16 @@ namespace FNSyncPlus.Core.Services
                         var manifest = await JsonSerializer.DeserializeAsync<Manifest>(stream, JsonOptions, cancellationToken).ConfigureAwait(false);
                         if (manifest != null && manifest.Files != null)
                         {
+                            // 异步缓存至本地离线副本
+                            try
+                            {
+                                string cacheFile = GetLocalCachePath(targetFolder);
+                                string cacheDir = Path.GetDirectoryName(cacheFile)!;
+                                if (!Directory.Exists(cacheDir)) Directory.CreateDirectory(cacheDir);
+                                File.WriteAllText(cacheFile, JsonSerializer.Serialize(manifest, JsonOptions), Encoding.UTF8);
+                            }
+                            catch { }
+
                             return manifest;
                         }
                     }
@@ -245,6 +263,23 @@ namespace FNSyncPlus.Core.Services
                             catch { }
                         }
                     }
+                }
+
+                // 远端尚未建立或网络不可达时，优先读取最近一次本地缓存
+                string fallbackCache = GetLocalCachePath(targetFolder);
+                if (File.Exists(fallbackCache))
+                {
+                    try
+                    {
+                        var cached = JsonSerializer.Deserialize<Manifest>(File.ReadAllText(fallbackCache, Encoding.UTF8), JsonOptions);
+                        if (cached != null)
+                        {
+                            cached.IsFromCache = true;
+                            cached.CachedAt = File.GetLastWriteTime(fallbackCache);
+                            return cached;
+                        }
+                    }
+                    catch { }
                 }
 
                 // 远端尚未建立清单，初始化并返回全新清单
@@ -302,6 +337,16 @@ namespace FNSyncPlus.Core.Services
                     string bakPath = $"{metaDir}/manifest.json.bak";
                     using var bakMs = new MemoryStream(manifestBytes);
                     await storageProvider.UploadFileAsync(bakPath, bakMs, manifestBytes.Length, DateTime.UtcNow, overwrite: true, null, cancellationToken).ConfigureAwait(false);
+                }
+                catch { }
+
+                // 3. 同时更新本地离线缓存副本
+                try
+                {
+                    string cacheFile = GetLocalCachePath(targetFolder);
+                    string cacheDir = Path.GetDirectoryName(cacheFile)!;
+                    if (!Directory.Exists(cacheDir)) Directory.CreateDirectory(cacheDir);
+                    File.WriteAllBytes(cacheFile, manifestBytes);
                 }
                 catch { }
             }

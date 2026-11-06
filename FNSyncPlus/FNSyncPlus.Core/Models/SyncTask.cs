@@ -136,7 +136,9 @@ namespace FNSyncPlus.Core.Models
             TaskSyncState.Paused => "已暂停",
             TaskSyncState.OfflineWaiting => "NAS离线等待恢复",
             TaskSyncState.Completed => "已就绪 (已最新)",
-            TaskSyncState.Error => string.IsNullOrEmpty(LastError) ? "同步出错" : $"出错: {LastError}",
+            TaskSyncState.Error => !string.IsNullOrEmpty(LastSyncStatus) && LastSyncStatus.Contains("失败")
+                ? LastSyncStatus
+                : (string.IsNullOrEmpty(LastError) ? (string.IsNullOrEmpty(LastSyncStatus) ? "同步出错" : LastSyncStatus) : $"出错: {LastError}"),
             TaskSyncState.ConfigurationError => string.IsNullOrEmpty(LastError) ? "配置异常" : $"配置异常: {LastError}",
             TaskSyncState.Removing => "正在安全移除...",
             _ => State.ToString()

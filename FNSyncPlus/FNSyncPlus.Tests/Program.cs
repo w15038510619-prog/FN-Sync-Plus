@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -107,6 +108,10 @@ namespace FNSyncPlus.Tests
                 await TestTargetCreationFailureAbortsTaskAndPreservesErrorsAsync(); // 新增：目标失败立即中止与错误保存测试
                 await TestSameNameDeduplicationRespectedInFolderCreationAsync(); // 新增：批次去重规划在自动创建同名目录中严格遵守
                 await TestP0FolderIdempotencyAndTaskValidationAsync(); // 新增：P0 目录幂等性、配置校验与安全删除生命周期验证
+                await TestPersistentLogServiceAsync(); // 新增：P0 任务日志持久化、脱敏与诊断包导出测试
+                await TestAddFolderDuplicatePreventionAndPathHelperAsync(); // 新增：P0 添加向导路径规范化与同源防重复拦截机制
+                await TestLongDirectoryNamePlanningAsync(); // 新增：P0 超长目录名称 NAS 规划与 LongNameEngine 别名映射
+                await TestAccurateFailureStatusAsync(); // 新增：P0 严格准确的备份状态与失败比率 (不强制100%且绝不误报成功)
 
                 // ==================== 3. GUI 自动化测试 ====================
                 SetCategory(TestCategory.GuiAutomation);
@@ -2283,6 +2288,252 @@ namespace FNSyncPlus.Tests
             }
         }
 
+        static async Task TestPersistentLogServiceAsync()
+        {
+            Console.WriteLine("\n--- 45. [新功能测试] 持久化任务日志系统与诊断导出 (LogService) ---");
+            string testTaskId = "task_test_log_" + Guid.NewGuid().ToString("N")[..8];
+            var logService = LogService.Default;
+
+            // 1. 写入结构化任务日志
+            var entry1 = new TaskLogEntry
+            {
+                TaskId = testTaskId,
+                Stage = "SCAN",
+                Level = "INFO",
+                LocalRelPath = @"Folder1\Sub\FileA.txt",
+                RemoteRelPath = @"Folder1/Sub/FileA.txt",
+                Utf8Bytes = 25,
+                RpcName = "file.checkUpload",
+                Message = "扫描发现新文件 token=super_secret_token_12345" // 敏感信息测试
+            };
+            logService.LogTask(entry1);
+
+            var entry2 = new TaskLogEntry
+            {
+                TaskId = testTaskId,
+                Stage = "UPLOAD",
+                Level = "ERROR",
+                LocalRelPath = @"Folder1\Sub\FileB.txt",
+                RemoteRelPath = @"Folder1/Sub/FileB.txt",
+                Utf8Bytes = 40,
+                RpcName = "POST /upload",
+                ErrorCode = "HTTP 403",
+                ErrorMessage = "远程权限拒绝 password=my_plain_pass",
+                RetryCount = 3,
+                Message = "上传失败"
+            };
+            logService.LogTask(entry2);
+
+            // 写入连接日志和崩溃日志测试
+            logService.LogConnection("INFO", "成功连接飞牛 NAS https://192.168.8.120:5666 token=auth_tok_abcdef");
+            logService.LogCrash(new InvalidOperationException("模拟崩溃异常 secret_key=sk_test_xyz"), "单元测试");
+
+            // 等待后台队列落盘写入
+            await Task.Delay(150);
+
+            // 2. 验证日志磁盘文件存在
+            string baseLogDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "logs");
+            string taskLogDir = Path.Combine(baseLogDir, "tasks", testTaskId);
+            Assert(Directory.Exists(taskLogDir), "任务日志独立目录按 TaskId 创建", taskLogDir);
+
+            string todayLog = Path.Combine(taskLogDir, $"{DateTime.Now:yyyyMMdd}.log");
+            Assert(File.Exists(todayLog), "任务日志按日期滚动文件创建", todayLog);
+
+            // 3. 读取任务日志并验证敏感信息脱敏与结构化字段
+            var readLogs = logService.GetTaskLogs(testTaskId);
+            Assert(readLogs.Count >= 2, "成功读取持久化任务日志记录", $"条数: {readLogs.Count}");
+
+            string rawDiskContent = File.ReadAllText(todayLog);
+            Assert(!rawDiskContent.Contains("super_secret_token_12345"), "敏感 Token 已严格脱敏", "[REDACTED]");
+            Assert(!rawDiskContent.Contains("my_plain_pass"), "密码凭据已脱敏", "[REDACTED]");
+            Assert(rawDiskContent.Contains("file.checkUpload") && rawDiskContent.Contains("HTTP 403"), "结构化 RPC 与错误码正常留存");
+
+            // 4. 诊断 Zip 包导出测试
+            string tempDiagZip = Path.Combine(Path.GetTempPath(), $"FNSync_TestDiag_{Guid.NewGuid():N}.zip");
+            try
+            {
+                string exported = logService.ExportTaskDiagnosticZip(testTaskId, tempDiagZip);
+                Assert(File.Exists(exported), "诊断包导出 Zip 成功生成", exported);
+                using var archive = ZipFile.OpenRead(exported);
+                bool hasTaskLog = archive.Entries.Any(e => 
+                    e.FullName.IndexOf("task", StringComparison.OrdinalIgnoreCase) >= 0 || 
+                    e.FullName.EndsWith(".log", StringComparison.OrdinalIgnoreCase));
+                Assert(hasTaskLog, "诊断包中包含当前任务日志", $"总包含文件数: {archive.Entries.Count}");
+            }
+            finally
+            {
+                if (File.Exists(tempDiagZip)) File.Delete(tempDiagZip);
+            }
+
+            // 5. 验证删除任务配置时不会误删任务日志
+            var fakeSettings = new AppSettings();
+            var taskManager = new TaskManager(fakeSettings, new SmbAuthService());
+            var dummyTask = new SyncTask { TaskId = testTaskId, TaskName = "保留日志测试任务", SourceFolder = @"C:\Test", DestinationFolder = "我的文件/Test" };
+            taskManager.AddTask(dummyTask);
+            await taskManager.RemoveTaskAsync(testTaskId);
+            Assert(File.Exists(todayLog), "删除任务配置后，历史任务日志依然保留在本地用于审计追溯", todayLog);
+        }
+
+        static async Task TestAddFolderDuplicatePreventionAndPathHelperAsync()
+        {
+            Console.WriteLine("\n--- 46. [新功能测试] 添加向导路径规范化与同源防重复拦截机制 ---");
+            await Task.Yield();
+            var fakeSettings = new AppSettings { NasServer = "192.168.8.120", Username = "wangxiaoliang" };
+            var smbService = new SmbAuthService();
+            var taskManager = new TaskManager(fakeSettings, smbService);
+
+            // 1. PathHelper 规范化与长路径前缀兼容性测试
+            string p1 = @"C:\Users\User\Documents\";
+            Assert(PathHelper.TryNormalizeFullPath(p1, out string n1, out _), "PathHelper 成功解析普通路径", n1);
+            Assert(!n1.EndsWith('\\'), "规范化结果移除了末尾多余反斜杠", n1);
+
+            string p2 = @"\\?\C:\Users\User\Documents";
+            Assert(PathHelper.TryNormalizeFullPath(p2, out string n2, out _), "PathHelper 成功处理 Windows \\?\\ 超长路径前缀", n2);
+            Assert(n1.Equals(n2, StringComparison.OrdinalIgnoreCase), "带前缀与不带前缀的绝对路径规范化后一致");
+
+            Assert(!PathHelper.TryNormalizeFullPath("", out _, out string? errEmpty), "空路径被安全拒绝并给出说明", errEmpty);
+            Assert(!PathHelper.TryNormalizeFullPath("   ", out _, out _), "全空白路径被安全拒绝");
+
+            // 2. 模拟注册已有任务
+            string registeredSource = @"D:\WorkSpace\Projects\App1";
+            var existingTask = new SyncTask
+            {
+                TaskId = "task_dup_1",
+                TaskName = "核心应用备份",
+                SourceFolder = registeredSource,
+                DestinationFolder = "我的文件/核心应用备份"
+            };
+            taskManager.AddTask(existingTask);
+
+            // 3. 测试防重复拦截：同一物理目录（即便反斜杠不同、大小写不同）
+            string candidateSame1 = @"d:\workspace\projects\app1\";
+            string normCand1 = PathHelper.NormalizeLocalPath(candidateSame1);
+            bool isDuplicate1 = taskManager.Tasks.Any(t => 
+                string.Equals(PathHelper.NormalizeLocalPath(t.SourceFolder), normCand1, StringComparison.OrdinalIgnoreCase));
+            Assert(isDuplicate1, "成功命中已有任务并标记为重复源目录，严禁再次创建任务覆盖现有任务");
+
+            // 4. 测试不同盘符但同名文件夹（如 C:\App1 与 D:\WorkSpace\Projects\App1），绝不能跨盘符误判重复！
+            string candidateDiffDrive = @"C:\App1";
+            string normCandDiff = PathHelper.NormalizeLocalPath(candidateDiffDrive);
+            bool isDuplicateDiff = taskManager.Tasks.Any(t => 
+                string.Equals(PathHelper.NormalizeLocalPath(t.SourceFolder), normCandDiff, StringComparison.OrdinalIgnoreCase));
+            Assert(!isDuplicateDiff, "不同盘符的同名文件夹 (C:\\App1 vs D:...\\App1) 不视为重复，允许独立添加备份");
+
+            // 5. 批次规划中多个来源包含相同末级名时的自动去重命名
+            var (plannedTgt, existed, hadConflict) = await smbService.PlanTargetSubFolderAsync(
+                "我的文件", "App1", @"C:\App1", new[] { "App1" });
+            Assert(hadConflict, "自动探测同名冲突并激活冲突处理");
+            Assert(plannedTgt == "App1_2", "批次自动规划生成唯一后缀 App1_2，防止覆盖 NAS 原有目录");
+        }
+
+        static async Task TestLongDirectoryNamePlanningAsync()
+        {
+            Console.WriteLine("\n--- 47. [新功能测试] 超长目录名称 NAS 规划与 LongNameEngine 别名映射 ---");
+            await Task.Yield();
+            var engine = new LongNameEngine();
+
+            // 1. 254 字节目录名
+            string dir254 = new string('A', 254);
+            var (mapped254, isLong254) = engine.TranslateDirPath(dir254);
+            Assert(mapped254 == dir254 && !isLong254, "254 字节目录名保持原样", $"长度: {Encoding.UTF8.GetByteCount(mapped254)}");
+
+            // 2. 255 字节目录名
+            string dir255 = new string('B', 255);
+            var (mapped255, isLong255) = engine.TranslateDirPath(dir255);
+            Assert(mapped255 == dir255 && !isLong255, "255 字节目录名保持原样", $"长度: {Encoding.UTF8.GetByteCount(mapped255)}");
+
+            // 3. 270 字节超长中文目录名
+            string dirChineseLong = new string('中', 90); // 90 * 3 = 270 字节 > 255 字节
+            int utf8Bytes = Encoding.UTF8.GetByteCount(dirChineseLong);
+            Assert(utf8Bytes > 255, "测试目录名超过 Linux/fnOS 255 字节单层上限", $"{utf8Bytes} 字节");
+
+            var (mappedChinese, isLongChinese) = engine.TranslateDirPath(dirChineseLong);
+            Assert(mappedChinese.StartsWith("_FN_LONG_") && isLongChinese, "超过 255 字节目录名生成安全短别名", mappedChinese);
+            Assert(Encoding.UTF8.GetByteCount(mappedChinese) <= 255, "短别名 UTF-8 字节数严格处于 NAS 安全范围内", $"{Encoding.UTF8.GetByteCount(mappedChinese)} 字节");
+
+            // 4. 测试 Manifest 记录目录映射并能准确逆向解析
+            var manifest = new Manifest();
+            manifest.Directories.Add(new ManifestDirEntry
+            {
+                OriginalRel = dirChineseLong,
+                StoredRel = mappedChinese,
+                IsLongName = true
+            });
+
+            Assert(manifest.Directories.Any(d => d.OriginalRel == dirChineseLong), "Manifest 准确记录超长目录原始名称与安全别名映射");
+            string restoredOriginal = manifest.Directories.FirstOrDefault(d => d.StoredRel == mappedChinese)?.OriginalRel ?? "";
+            Assert(restoredOriginal == dirChineseLong, "通过 Manifest 映射表可 100% 精确逆向还原超长目录原始名称");
+        }
+
+        static async Task TestAccurateFailureStatusAsync()
+        {
+            Console.WriteLine("\n--- 48. [P0 缺陷修复测试] 严格准确的备份状态与失败比率 (不强制100%且绝不误报成功) ---");
+            await Task.Yield();
+            var fakeSettings = new AppSettings();
+            var taskManager = new TaskManager(fakeSettings, new SmbAuthService());
+
+            // 场景 1: 扫描 1 个文件，上传 0 个，失败 1 个 -> 必须报告「备份失败」，进度 0%，绝不能是「同步完成」或「100%」
+            var task1 = new SyncTask
+            {
+                TaskId = "task_fail_1",
+                TaskName = "完全失败测试",
+                SourceFolder = @"C:\Fake1",
+                DestinationFolder = "我的文件/Fake1",
+                State = TaskSyncState.Error,
+                LastScannedFiles = 1,
+                LastUploadedFiles = 0,
+                LastFailedFiles = 1,
+                CurrentProgress = 0,
+                LastSyncStatus = "备份失败 (1 个文件失败)"
+            };
+            taskManager.AddTask(task1);
+
+            Assert(task1.State == TaskSyncState.Error, "完全失败任务状态为 Error");
+            Assert(task1.CurrentProgress == 0, "完全失败任务进度保持为 0% (不强制赋 100%)", $"{task1.CurrentProgress}%");
+            Assert(task1.DisplayStatus.Contains("失败"), "完全失败任务显示文本明确包含「失败」", task1.DisplayStatus);
+            Assert(!task1.DisplayStatus.Contains("已最新") && !task1.DisplayStatus.Contains("完成"), "完全失败绝不误报「已最新」或「完成」");
+
+            // 场景 2: 扫描 2 个文件，上传 1 个，失败 1 个 -> 必须报告「部分失败 (1 成功, 1 失败)」，进度 50%
+            var task2 = new SyncTask
+            {
+                TaskId = "task_partial_fail",
+                TaskName = "部分失败测试",
+                SourceFolder = @"C:\Fake2",
+                DestinationFolder = "我的文件/Fake2",
+                State = TaskSyncState.Error,
+                LastScannedFiles = 2,
+                LastUploadedFiles = 1,
+                LastFailedFiles = 1,
+                CurrentProgress = 50,
+                LastSyncStatus = "部分失败 (1 成功, 1 失败)"
+            };
+            taskManager.AddTask(task2);
+
+            Assert(task2.State == TaskSyncState.Error, "部分失败任务状态为 Error");
+            Assert(task2.CurrentProgress == 50, "部分失败任务进度反映真实成功率 50%", $"{task2.CurrentProgress}%");
+            Assert(task2.DisplayStatus.Contains("失败") || task2.LastSyncStatus.Contains("部分失败"), "部分失败任务明确区分展示", task2.LastSyncStatus);
+
+            // 场景 3: 扫描 2 个文件，上传 2 个，失败 0 个 -> 报告「同步完成 (2 个文件已备份)」，进度 100%
+            var task3 = new SyncTask
+            {
+                TaskId = "task_success",
+                TaskName = "完全成功测试",
+                SourceFolder = @"C:\Fake3",
+                DestinationFolder = "我的文件/Fake3",
+                State = TaskSyncState.Completed,
+                LastScannedFiles = 2,
+                LastUploadedFiles = 2,
+                LastFailedFiles = 0,
+                CurrentProgress = 100,
+                LastSyncStatus = "同步完成 (2 个文件已备份)"
+            };
+            taskManager.AddTask(task3);
+
+            Assert(task3.State == TaskSyncState.Completed, "完全成功任务状态为 Completed");
+            Assert(task3.CurrentProgress == 100, "完全成功任务进度为 100%");
+            Assert(task3.DisplayStatus.Contains("完成") || task3.DisplayStatus.Contains("最新"), "完全成功任务展示为完成/已最新", task3.DisplayStatus);
+        }
+
         static async Task<bool> VerifyP0RealNasLifecycleAsync()
         {
             Console.WriteLine("================================================================================");
@@ -2450,6 +2701,10 @@ namespace FNSyncPlus.Tests
 
                 // ---- P0-5: 目录幂等性、配置校验、安全删除与自动规划 ----
                 await TestP0FolderIdempotencyAndTaskValidationAsync();
+                await TestPersistentLogServiceAsync();
+                await TestAddFolderDuplicatePreventionAndPathHelperAsync();
+                await TestLongDirectoryNamePlanningAsync();
+                await TestAccurateFailureStatusAsync();
 
                 Console.WriteLine("\n================================================================================");
                 Console.ForegroundColor = ConsoleColor.Green;

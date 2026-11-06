@@ -399,19 +399,43 @@ namespace FNSyncPlus.Core.Services
                 task.LastFailedFiles = report.FailedFiles;
                 task.LastTransferredBytes = report.BytesTransferred;
 
-                task.CurrentProgress = 100.0;
                 task.CurrentSpeedBytesPerSec = 0;
 
                 if (report.FailedFiles > 0)
                 {
                     task.State = TaskSyncState.Error;
-                    task.CurrentFile = $"完成 (有 {report.FailedFiles} 个文件失败)";
-                    task.LastSyncStatus = $"完成 (有 {report.FailedFiles} 个文件失败)";
-                    task.LastError = $"有 {report.FailedFiles} 个文件同步失败，可在任务日志中查看详情";
+                    if (report.UploadedFiles == 0)
+                    {
+                        task.CurrentFile = $"备份失败 (共 {report.FailedFiles} 个文件同步失败)";
+                        task.LastSyncStatus = $"备份失败 ({report.FailedFiles} 个文件失败)";
+                    }
+                    else
+                    {
+                        task.CurrentFile = $"部分失败 ({report.UploadedFiles} 个成功, {report.FailedFiles} 个失败)";
+                        task.LastSyncStatus = $"部分失败 ({report.UploadedFiles} 成功, {report.FailedFiles} 失败)";
+                    }
+                    task.LastError = $"有 {report.FailedFiles} 个文件同步失败，可在任务详情查看完整诊断日志";
+
+                    task.CurrentProgress = report.TotalFiles > 0
+                        ? (double)(report.UploadedFiles + report.UnchangedFiles) / report.TotalFiles * 100.0
+                        : 0.0;
+
+                    foreach (var item in syncEngine.FailedItems)
+                    {
+                        LogService.Default.LogTask(
+                            taskId: task.TaskId,
+                            level: "ERROR",
+                            stage: "UPLOAD",
+                            message: $"文件同步失败: {item.ErrorMessage}",
+                            localRel: item.RelativePath,
+                            errorMsg: item.ErrorMessage,
+                            retryCount: item.RetryCount);
+                    }
                 }
                 else
                 {
                     task.State = TaskSyncState.Completed;
+                    task.CurrentProgress = 100.0;
                     task.CurrentFile = "所有文件均已同步更新至最新状态";
                     task.LastSyncStatus = "同步成功完成 (已最新)";
                 }
@@ -561,6 +585,21 @@ namespace FNSyncPlus.Core.Services
         {
             string formatted = $"[{DateTime.Now:HH:mm:ss}] [{level}] {message}";
 
+            // 1. 存入持久化日志服务 (磁盘文件 + 内存)
+            try
+            {
+                LogService.Default.LogTask(new TaskLogEntry
+                {
+                    TaskId = task.TaskId,
+                    Level = level,
+                    Stage = "SYNC",
+                    Message = message,
+                    Timestamp = DateTimeOffset.Now
+                });
+            }
+            catch { }
+
+            // 2. 存入即时环形缓冲
             lock (_logLock)
             {
                 if (!_taskLogBuffers.TryGetValue(task.TaskId, out var list))
@@ -581,6 +620,17 @@ namespace FNSyncPlus.Core.Services
 
         public IReadOnlyList<string> GetTaskLogs(string taskId)
         {
+            // 优先从磁盘持久化日志系统读取历史日志，确保重启后日志不丢失
+            try
+            {
+                var persistentLogs = LogService.Default.GetTaskLogs(taskId);
+                if (persistentLogs != null && persistentLogs.Count > 0)
+                {
+                    return persistentLogs.Select(p => p.FormattedDisplay).ToList();
+                }
+            }
+            catch { }
+
             lock (_logLock)
             {
                 if (_taskLogBuffers.TryGetValue(taskId, out var list))

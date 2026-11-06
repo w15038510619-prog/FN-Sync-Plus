@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -9,6 +11,7 @@ using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
 using FNSyncPlus.Core.Storage;
 using FNSyncPlus.Core.Utils;
+using FNSyncPlus.WinUI.Helpers;
 
 namespace FNSyncPlus.WinUI.ViewModels
 {
@@ -40,6 +43,12 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         [ObservableProperty]
         private string _errorMessage = string.Empty;
+
+        [ObservableProperty]
+        private bool _isLongDirectory;
+
+        [ObservableProperty]
+        private int _utf8Bytes;
     }
 
     public partial class AddFolderWizardViewModel : ObservableObject
@@ -49,6 +58,8 @@ namespace FNSyncPlus.WinUI.ViewModels
         private readonly AppSettings _settings;
         private readonly FnOsIntegrationService _fnOsService;
         private readonly NasConnectionService _connectionService;
+        private readonly LongNameEngine _longNameEngine;
+        private readonly SemaphoreSlim _recomputeLock = new(1, 1);
 
         public NasBrowserViewModel NasBrowser { get; }
 
@@ -100,13 +111,26 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private string _statusMessage = string.Empty;
 
+        [ObservableProperty]
+        private string? _duplicateWarningMessage;
+
+        [ObservableProperty]
+        private bool _hasDuplicateConflict;
+
+        [ObservableProperty]
+        private SyncTask? _existingConflictTask;
+
+        [ObservableProperty]
+        private bool _isRecomputing;
+
         public AddFolderWizardViewModel(
             TaskManager taskManager, 
             SmbAuthService smbService, 
             AppSettings settings, 
             NasBrowserViewModel nasBrowser, 
             FnOsIntegrationService fnOsService,
-            NasConnectionService connectionService)
+            NasConnectionService connectionService,
+            LongNameEngine? longNameEngine = null)
         {
             _taskManager = taskManager;
             _smbService = smbService;
@@ -114,6 +138,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             NasBrowser = nasBrowser;
             _fnOsService = fnOsService;
             _connectionService = connectionService;
+            _longNameEngine = longNameEngine ?? new LongNameEngine();
 
             NasBrowser.PropertyChanged += (s, e) =>
             {
@@ -125,8 +150,28 @@ namespace FNSyncPlus.WinUI.ViewModels
                 }
             };
 
-            InitializeDefaultNasRoot();
-            UpdateStepState();
+            ResetSession();
+        }
+
+        /// <summary>
+        /// 重置向导会话状态为全新会话，清空临时选择与规划结果，步骤回到第 1 步
+        /// </summary>
+        public void ResetSession()
+        {
+            UIThreadHelper.RunOnUIThread(() =>
+            {
+                SelectedLocalFolders.Clear();
+                PlannedTasks.Clear();
+                CurrentStep = 1;
+                StepIndicatorText = "步骤 1 / 2：选择本地待备份文件夹";
+                DuplicateWarningMessage = null;
+                ExistingConflictTask = null;
+                HasDuplicateConflict = false;
+                StatusMessage = "请添加需要自动备份至飞牛 NAS 的本地文件夹。";
+
+                InitializeDefaultNasRoot();
+                UpdateStepState();
+            });
         }
 
         private async void InitializeDefaultNasRoot()
@@ -140,7 +185,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 SecurityBadgeBg = "#DCFCE7";
                 SecurityBadgeColor = "#15803D";
                 IsTeamShareWarning = false;
-                CanCreate = true;
+                CanCreate = SelectedLocalFolders.Count > 0;
                 await RecomputePlannedTasksAsync();
                 UpdateStepState();
                 return;
@@ -168,7 +213,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 SecurityBadgeBg = "#DCFCE7";
                 SecurityBadgeColor = "#15803D";
                 IsTeamShareWarning = false;
-                CanCreate = true;
+                CanCreate = SelectedLocalFolders.Count > 0;
                 if (!string.IsNullOrWhiteSpace(NasDestinationRoot))
                 {
                     await RecomputePlannedTasksAsync();
@@ -179,9 +224,9 @@ namespace FNSyncPlus.WinUI.ViewModels
                 NasDestinationRoot = string.Empty;
                 SecurityTitle = status.DisplayTitle;
                 SecurityDescription = status.Explanation;
-                SecurityBadgeBg = "#FEF3C7";
-                SecurityBadgeColor = "#D97706";
-                IsTeamShareWarning = false;
+                SecurityBadgeBg = status.BadgeBgHex;
+                SecurityBadgeColor = status.BadgeColorHex;
+                IsTeamShareWarning = status.IsTeamShare;
                 CanCreate = false;
             }
 
@@ -192,11 +237,8 @@ namespace FNSyncPlus.WinUI.ViewModels
         {
             if (string.IsNullOrWhiteSpace(NasDestinationRoot))
             {
-                SecurityTitle = "尚未指定 NAS 备份根目录";
-                SecurityDescription = "请选择要保存备份的 NAS 文件夹。";
-                SecurityBadgeBg = "#F1F5F9";
-                SecurityBadgeColor = "#64748B";
-                IsTeamShareWarning = false;
+                SecurityTitle = "未选定 NAS 目录";
+                SecurityDescription = "请先选择 NAS 备份目标位置。";
                 CanCreate = false;
                 UpdateStepState();
                 return;
@@ -210,7 +252,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 SecurityBadgeBg = "#DCFCE7";
                 SecurityBadgeColor = "#15803D";
                 IsTeamShareWarning = false;
-                CanCreate = true;
+                CanCreate = SelectedLocalFolders.Count > 0;
                 await RecomputePlannedTasksAsync();
                 UpdateStepState();
                 return;
@@ -229,24 +271,94 @@ namespace FNSyncPlus.WinUI.ViewModels
             UpdateStepState();
         }
 
-        public void AddLocalFolder(string folderPath)
+        /// <summary>
+        /// 异步安全添加本地文件夹，严格执行路径有效性检验、Windows 长路径解析与已有任务防重复拦截
+        /// </summary>
+        public async Task<bool> AddLocalFolderAsync(string folderPath)
         {
-            if (string.IsNullOrWhiteSpace(folderPath) || !Directory.Exists(folderPath)) return;
+            DuplicateWarningMessage = null;
+            HasDuplicateConflict = false;
+            ExistingConflictTask = null;
 
-            string normalized = Path.GetFullPath(folderPath).TrimEnd('\\');
-            if (!SelectedLocalFolders.Contains(normalized, StringComparer.OrdinalIgnoreCase))
+            if (string.IsNullOrWhiteSpace(folderPath)) return false;
+
+            // 1. 安全规范化路径，防崩溃解析
+            if (!PathHelper.TryNormalizeFullPath(folderPath, out string normalized, out string? normErr))
+            {
+                StatusMessage = $"无法添加此文件夹：{normErr}";
+                return false;
+            }
+
+            if (!Directory.Exists(normalized))
+            {
+                StatusMessage = $"本地文件夹不存在或无法访问: {normalized}";
+                return false;
+            }
+
+            // 2. 检查是否与已有任务冲突（严禁根据单纯末级名称判断，必须按完整规范路径）
+            var existingTask = _taskManager.Tasks.FirstOrDefault(t => 
+                string.Equals(PathHelper.NormalizeLocalPath(t.SourceFolder), normalized, StringComparison.OrdinalIgnoreCase));
+            
+            if (existingTask != null)
+            {
+                DuplicateWarningMessage = $"该文件夹已添加至备份任务「{existingTask.TaskName}」，目标为 {existingTask.DestinationFolder}，无需重复添加！";
+                ExistingConflictTask = existingTask;
+                HasDuplicateConflict = true;
+                StatusMessage = DuplicateWarningMessage;
+                return false;
+            }
+
+            // 3. 检查当前会话内重复
+            if (SelectedLocalFolders.Any(f => string.Equals(PathHelper.NormalizeLocalPath(f), normalized, StringComparison.OrdinalIgnoreCase)))
+            {
+                StatusMessage = $"该文件夹已在待添加列表中。";
+                return false;
+            }
+
+            // 4. UI 线程安全添加到会话
+            UIThreadHelper.RunOnUIThread(() =>
             {
                 SelectedLocalFolders.Add(normalized);
-                _ = RecomputePlannedTasksAsync();
+            });
+
+            await RecomputePlannedTasksAsync();
+            UpdateStepState();
+            return true;
+        }
+
+        public void AddLocalFolder(string folderPath)
+        {
+            _ = AddLocalFolderAsync(folderPath);
+        }
+
+        /// <summary>
+        /// 移除已选本地文件夹
+        /// </summary>
+        public async Task RemoveLocalFolderAsync(string folderPath)
+        {
+            DuplicateWarningMessage = null;
+            HasDuplicateConflict = false;
+            ExistingConflictTask = null;
+
+            string normalized = PathHelper.NormalizeLocalPath(folderPath);
+            var item = SelectedLocalFolders.FirstOrDefault(f => 
+                string.Equals(PathHelper.NormalizeLocalPath(f), normalized, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(f, folderPath, StringComparison.OrdinalIgnoreCase));
+
+            if (item != null)
+            {
+                UIThreadHelper.RunOnUIThread(() =>
+                {
+                    SelectedLocalFolders.Remove(item);
+                });
+                await RecomputePlannedTasksAsync();
                 UpdateStepState();
             }
         }
 
         public void RemoveLocalFolder(string folderPath)
         {
-            SelectedLocalFolders.Remove(folderPath);
-            _ = RecomputePlannedTasksAsync();
-            UpdateStepState();
+            _ = RemoveLocalFolderAsync(folderPath);
         }
 
         public async Task NextStepAsync()
@@ -293,9 +405,12 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             if (CurrentStep == 1)
             {
-                StatusMessage = SelectedLocalFolders.Count == 0 
-                    ? "请先添加至少一个本地待备份文件夹以继续下一步。" 
-                    : $"已选择 {SelectedLocalFolders.Count} 个待备份文件夹。点击【下一步】将自动为您规划 NAS 备份目录。";
+                if (!HasDuplicateConflict)
+                {
+                    StatusMessage = SelectedLocalFolders.Count == 0 
+                        ? "请先添加至少一个本地待备份文件夹以继续下一步。" 
+                        : $"已选择 {SelectedLocalFolders.Count} 个待备份文件夹。点击【下一步】将自动为您规划 NAS 备份目录。";
+                }
             }
             else if (CurrentStep == 2)
             {
@@ -303,107 +418,169 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
         }
 
+        /// <summary>
+        /// 重新计算规划任务，受信号量锁保护，严防并发调用相互覆盖或破坏 ObservableCollection
+        /// 全面支持超长中文目录名转换（使用统一 LongNameEngine，防止 NAS 255 字节报错）
+        /// </summary>
         public async Task RecomputePlannedTasksAsync()
         {
-            PlannedTasks.Clear();
+            await _recomputeLock.WaitAsync();
+            IsRecomputing = true;
 
-            if (SelectedLocalFolders.Count == 0 || string.IsNullOrWhiteSpace(NasDestinationRoot))
+            try
             {
-                CanCreate = false;
-                UpdateStepState();
-                return;
-            }
+                var newPlannedList = new List<PlannedTaskItem>();
 
-            // 1. 飞牛原生「我的文件」同名规划通道
-            if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
-            {
-                var allocatedFn = new System.Collections.Generic.List<string>();
-                foreach (var localPath in SelectedLocalFolders)
+                if (SelectedLocalFolders.Count == 0 || string.IsNullOrWhiteSpace(NasDestinationRoot))
                 {
-                    string desiredName = Path.GetFileName(localPath.TrimEnd('/', '\\'));
-                    if (string.IsNullOrEmpty(desiredName)) desiredName = "备份数据";
-
-                    string uniqueName = desiredName;
-                    int counter = 2;
-
-                    // 批次内同名去重
-                    while (allocatedFn.Contains(uniqueName, StringComparer.OrdinalIgnoreCase))
+                    UIThreadHelper.RunOnUIThread(() =>
                     {
-                        uniqueName = $"{desiredName} ({counter++})";
-                    }
-
-                    // 检查已有任务冲突去重（如果已有不同源文件夹的任务占用了同名目标，自动加序号避免冲突）
-                    var existingWithSameDest = _taskManager.Tasks.FirstOrDefault(t => 
-                        string.Equals(Path.GetFileName(t.DestinationFolder.TrimEnd('/', '\\')), uniqueName, StringComparison.OrdinalIgnoreCase) &&
-                        !string.Equals(t.SourceFolder.TrimEnd('\\'), localPath.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));
-                    
-                    while (existingWithSameDest != null)
-                    {
-                        uniqueName = $"{desiredName} ({counter++})";
-                        existingWithSameDest = _taskManager.Tasks.FirstOrDefault(t => 
-                            string.Equals(Path.GetFileName(t.DestinationFolder.TrimEnd('/', '\\')), uniqueName, StringComparison.OrdinalIgnoreCase) &&
-                            !string.Equals(t.SourceFolder.TrimEnd('\\'), localPath.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));
-                    }
-
-                    allocatedFn.Add(uniqueName);
-
-                    string rootPrefix = string.IsNullOrEmpty(NasDestinationRoot) || NasDestinationRoot == "我的文件"
-                        ? "我的文件"
-                        : NasDestinationRoot.TrimEnd('/', '\\');
-
-                    string fullTarget = $"{rootPrefix}/{uniqueName}";
-
-                    // 检查是否已有完全匹配的配置
-                    bool isExistingConfig = _taskManager.Tasks.Any(t =>
-                        string.Equals(t.SourceFolder.TrimEnd('\\'), localPath.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(t.DestinationFolder.TrimEnd('/', '\\'), fullTarget.TrimEnd('/', '\\'), StringComparison.OrdinalIgnoreCase));
-
-                    PlannedTasks.Add(new PlannedTaskItem
-                    {
-                        SourcePath = localPath,
-                        SourceFolderName = desiredName,
-                        TargetSubFolder = uniqueName,
-                        FullTargetUnc = fullTarget,
-                        FinalTargetUnc = fullTarget,
-                        StatusText = isExistingConfig ? "✔ 复用已有备份配置" : (uniqueName != desiredName ? "▲ 批次同名去重规划" : "✔ 自动规划同名备份"),
-                        IsConflict = uniqueName != desiredName
+                        PlannedTasks.Clear();
+                        CanCreate = false;
+                        UpdateStepState();
                     });
+                    return;
                 }
 
-                CanCreate = PlannedTasks.Count > 0;
-                UpdateStepState();
-                return;
-            }
-
-            // 2. 传统 SMB 共享规划通道
-            var allocated = new System.Collections.Generic.List<string>();
-
-            foreach (var localPath in SelectedLocalFolders)
-            {
-                string desiredName = Path.GetFileName(localPath.TrimEnd('\\'));
-                if (string.IsNullOrEmpty(desiredName)) desiredName = "备份数据";
-
-                var plan = await _smbService.PlanTargetSubFolderAsync(NasDestinationRoot, desiredName, localPath, allocated);
-                allocated.Add(plan.FinalSubFolder);
-
-                string fullTarget = Path.Combine(NasDestinationRoot, plan.FinalSubFolder);
-
-                PlannedTasks.Add(new PlannedTaskItem
+                // 1. 飞牛官方「我的文件」同名规划通道
+                if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
                 {
-                    SourcePath = localPath,
-                    SourceFolderName = desiredName,
-                    TargetSubFolder = plan.FinalSubFolder,
-                    FullTargetUnc = fullTarget,
-                    FinalTargetUnc = fullTarget,
-                    StatusText = plan.HasForeignConflict ? "▲ 批次同名去重规划" : (plan.IsExisting ? "✔ 复用现有目录" : "✔ 自动规划新建"),
-                    IsConflict = plan.HasForeignConflict
+                    var allocatedFn = new List<string>();
+
+                    foreach (var localPath in SelectedLocalFolders)
+                    {
+                        string desiredName = Path.GetFileName(localPath.TrimEnd('/', '\\'));
+                        if (string.IsNullOrEmpty(desiredName)) desiredName = "备份数据";
+
+                        int utf8Bytes = PathHelper.GetUtf8ByteCount(desiredName);
+                        bool isLongDirectory = utf8Bytes > 255;
+                        string safeTargetSubFolder = desiredName;
+
+                        // 超长目录名由长文件名引擎自动转换为合规短别名 (如 _FN_LONG_...)
+                        if (isLongDirectory)
+                        {
+                            var (storedAlias, _) = _longNameEngine.TranslateDirPath(desiredName);
+                            safeTargetSubFolder = storedAlias;
+                        }
+
+                        string uniqueName = safeTargetSubFolder;
+                        int counter = 2;
+
+                        // 批次内同名去重
+                        while (allocatedFn.Contains(uniqueName, StringComparer.OrdinalIgnoreCase))
+                        {
+                            uniqueName = $"{safeTargetSubFolder} ({counter++})";
+                        }
+
+                        // 检查已有任务冲突去重（如果已有不同源文件夹的任务占用了同名目标，自动加序号避免冲突）
+                        var existingWithSameDest = _taskManager.Tasks.FirstOrDefault(t => 
+                            string.Equals(Path.GetFileName(t.DestinationFolder.TrimEnd('/', '\\')), uniqueName, StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(PathHelper.NormalizeLocalPath(t.SourceFolder), PathHelper.NormalizeLocalPath(localPath), StringComparison.OrdinalIgnoreCase));
+                        
+                        while (existingWithSameDest != null)
+                        {
+                            uniqueName = $"{safeTargetSubFolder} ({counter++})";
+                            existingWithSameDest = _taskManager.Tasks.FirstOrDefault(t => 
+                                string.Equals(Path.GetFileName(t.DestinationFolder.TrimEnd('/', '\\')), uniqueName, StringComparison.OrdinalIgnoreCase) &&
+                                !string.Equals(PathHelper.NormalizeLocalPath(t.SourceFolder), PathHelper.NormalizeLocalPath(localPath), StringComparison.OrdinalIgnoreCase));
+                        }
+
+                        allocatedFn.Add(uniqueName);
+
+                        string rootPrefix = string.IsNullOrEmpty(NasDestinationRoot) || NasDestinationRoot == "我的文件"
+                            ? "我的文件"
+                            : NasDestinationRoot.TrimEnd('/', '\\');
+
+                        string fullTarget = $"{rootPrefix}/{uniqueName}";
+
+                        bool isExistingConfig = _taskManager.Tasks.Any(t =>
+                            string.Equals(PathHelper.NormalizeLocalPath(t.SourceFolder), PathHelper.NormalizeLocalPath(localPath), StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(t.DestinationFolder.TrimEnd('/', '\\'), fullTarget.TrimEnd('/', '\\'), StringComparison.OrdinalIgnoreCase));
+
+                        string statusText = isLongDirectory 
+                            ? $"✔ 超长目录映射别名 ({utf8Bytes} B -> {uniqueName})"
+                            : (isExistingConfig ? "✔ 复用已有备份配置" : (uniqueName != safeTargetSubFolder ? "▲ 批次同名去重规划" : "✔ 自动规划同名备份"));
+
+                        newPlannedList.Add(new PlannedTaskItem
+                        {
+                            SourcePath = localPath,
+                            SourceFolderName = desiredName, // 保持用户真实的完整文件夹名 (即使 300 字节)
+                            TargetSubFolder = uniqueName,   // 存储端合规子目录名 (<= 255 字节)
+                            FullTargetUnc = fullTarget,
+                            FinalTargetUnc = fullTarget,
+                            StatusText = statusText,
+                            IsConflict = uniqueName != safeTargetSubFolder,
+                            IsLongDirectory = isLongDirectory,
+                            Utf8Bytes = utf8Bytes
+                        });
+                    }
+                }
+                // 2. 传统 SMB 共享规划通道
+                else
+                {
+                    var allocated = new List<string>();
+
+                    foreach (var localPath in SelectedLocalFolders)
+                    {
+                        string desiredName = Path.GetFileName(localPath.TrimEnd('\\'));
+                        if (string.IsNullOrEmpty(desiredName)) desiredName = "备份数据";
+
+                        int utf8Bytes = PathHelper.GetUtf8ByteCount(desiredName);
+                        bool isLongDirectory = utf8Bytes > 255;
+                        string safeDesiredName = desiredName;
+
+                        if (isLongDirectory)
+                        {
+                            var (storedAlias, _) = _longNameEngine.TranslateDirPath(desiredName);
+                            safeDesiredName = storedAlias;
+                        }
+
+                        var plan = await _smbService.PlanTargetSubFolderAsync(NasDestinationRoot, safeDesiredName, localPath, allocated);
+                        allocated.Add(plan.FinalSubFolder);
+
+                        string fullTarget = Path.Combine(NasDestinationRoot, plan.FinalSubFolder);
+
+                        string statusText = isLongDirectory
+                            ? $"✔ 超长目录映射别名 ({utf8Bytes} B -> {plan.FinalSubFolder})"
+                            : (plan.HasForeignConflict ? "▲ 批次同名去重规划" : (plan.IsExisting ? "✔ 复用现有目录" : "✔ 自动规划新建"));
+
+                        newPlannedList.Add(new PlannedTaskItem
+                        {
+                            SourcePath = localPath,
+                            SourceFolderName = desiredName,
+                            TargetSubFolder = plan.FinalSubFolder,
+                            FullTargetUnc = fullTarget,
+                            FinalTargetUnc = fullTarget,
+                            StatusText = statusText,
+                            IsConflict = plan.HasForeignConflict,
+                            IsLongDirectory = isLongDirectory,
+                            Utf8Bytes = utf8Bytes
+                        });
+                    }
+                }
+
+                // UI 线程批量刷新
+                UIThreadHelper.RunOnUIThread(() =>
+                {
+                    PlannedTasks.Clear();
+                    foreach (var item in newPlannedList)
+                    {
+                        PlannedTasks.Add(item);
+                    }
+                    CanCreate = PlannedTasks.Count > 0 && !string.IsNullOrWhiteSpace(NasDestinationRoot);
+                    UpdateStepState();
                 });
             }
-
-            CanCreate = PlannedTasks.Count > 0;
-            UpdateStepState();
+            finally
+            {
+                IsRecomputing = false;
+                _recomputeLock.Release();
+            }
         }
 
+        /// <summary>
+        /// 创建并启动全部已规划的同步任务
+        /// </summary>
         public async Task<int> CreateAllTasksAsync()
         {
             await Task.Yield();
@@ -468,6 +645,12 @@ namespace FNSyncPlus.WinUI.ViewModels
                 }
 
                 StatusMessage = $"全部 {createdCount} 个个人空间同步任务已成功建立并启动！";
+                
+                // 全部创建成功后，重置会话，杜绝残留旧文件夹记录
+                if (createdCount == PlannedTasks.Count)
+                {
+                    ResetSession();
+                }
                 return createdCount;
             }
 
@@ -489,7 +672,6 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             foreach (var item in PlannedTasks)
             {
-                // 确保在 NAS 目标空间根目录下自动建立目标备份子目录（传入 item.TargetSubFolder 尊重批次同名去重规划）
                 var (ensureOk, ensuredPath, ensureMsg) = await _fnOsService.EnsureSameNameBackupFolderAsync(
                     NasDestinationRoot, 
                     item.SourcePath, 
@@ -498,7 +680,6 @@ namespace FNSyncPlus.WinUI.ViewModels
 
                 if (!ensureOk)
                 {
-                    // 创建失败立即停止该任务，严禁使用失败目录作为同步目标启动同步！
                     item.IsFailed = true;
                     item.StatusText = $"❌ 创建目标失败: {ensureMsg}";
                     item.ErrorMessage = ensureMsg;
@@ -506,7 +687,6 @@ namespace FNSyncPlus.WinUI.ViewModels
                     continue;
                 }
 
-                // 创建成功，写入实际验证路径并更新状态
                 item.FinalTargetUnc = ensuredPath;
                 item.StatusText = "✔ 目标就绪，任务已建立";
                 item.IsFailed = false;
@@ -514,13 +694,14 @@ namespace FNSyncPlus.WinUI.ViewModels
                 var task = new SyncTask
                 {
                     TaskId = Guid.NewGuid().ToString("N"),
-                    TaskName = item.SourceFolderName,
+                    TaskName = $"{item.SourceFolderName} 备份",
                     SourceFolder = item.SourcePath,
                     DestinationRoot = NasDestinationRoot,
                     DestinationFolder = ensuredPath,
                     ProviderType = StorageProviderType.SmbShare,
                     NasUsername = _settings.Username,
                     NasDeviceId = _settings.NasServer,
+                    Mode = SyncMode.OneWayBackup,
                     Enabled = true,
                     AutoSyncEnabled = true,
                     RealtimeWatchEnabled = true,
@@ -532,20 +713,19 @@ namespace FNSyncPlus.WinUI.ViewModels
                 createdCount++;
             }
 
-            // 只有在至少成功创建了任务时，才保存 PreferredBackupRoot，严禁提前保存无效根目录
             if (createdCount > 0)
             {
                 _settings.PreferredBackupRoot = NasDestinationRoot;
                 _settings.Save();
             }
 
-            if (failedCount > 0)
+            StatusMessage = failedCount > 0 
+                ? $"已成功创建 {createdCount} 个任务，{failedCount} 个任务失败。" 
+                : $"全部 {createdCount} 个同步任务已成功建立并启动！";
+
+            if (createdCount > 0 && failedCount == 0)
             {
-                StatusMessage = $"任务创建完毕：{createdCount} 个成功，{failedCount} 个失败。失败任务已中止未启动同步。";
-            }
-            else
-            {
-                StatusMessage = $"全部 {createdCount} 个同步任务已成功建立并启动！";
+                ResetSession();
             }
 
             return createdCount;
