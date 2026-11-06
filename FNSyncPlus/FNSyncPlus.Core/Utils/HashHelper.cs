@@ -24,6 +24,19 @@ namespace FNSyncPlus.Core.Utils
         public static string ComputeStringSha256(string input) => ComputeSha256String(input);
 
         /// <summary>
+        /// 计算字节数组的 SHA-256 并返回十六进制小写字符串
+        /// </summary>
+        public static string ComputeSha256(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length == 0) return string.Empty;
+            using var sha = SHA256.Create();
+            byte[] hash = sha.ComputeHash(bytes);
+            return Convert.ToHexString(hash).ToLowerInvariant();
+        }
+
+        public static string ComputeBytesSha256(byte[] bytes) => ComputeSha256(bytes);
+
+        /// <summary>
         /// 计算文件的完整 SHA-256 哈希值
         /// </summary>
         public static async Task<string> ComputeFileSha256Async(string filePath, CancellationToken cancellationToken = default)

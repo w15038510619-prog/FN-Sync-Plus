@@ -165,10 +165,19 @@ namespace FNSyncPlus.Core.Storage.FnOs
         [JsonPropertyName("reqid")]
         public string? ReqId { get; set; }
 
+        [JsonPropertyName("taskId")]
+        public string? TaskId { get; set; }
+
+        [JsonPropertyName("sysNotify")]
+        public string? SysNotify { get; set; }
+
         [JsonPropertyName("errno")]
         public int? ErrNo { get; set; }
 
         [JsonPropertyName("errmsg")]
         public string? ErrMsg { get; set; }
+
+        [JsonIgnore]
+        public bool IsSuccess => Result == "succ" || !string.IsNullOrEmpty(TaskId) || (ErrNo.HasValue && ErrNo.Value == 0);
     }
 }

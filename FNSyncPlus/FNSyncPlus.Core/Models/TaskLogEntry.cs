@@ -58,7 +58,7 @@ namespace FNSyncPlus.Core.Models
         public string? VerificationResult { get; set; }
 
         [JsonIgnore]
-        public string FormattedTimestamp => Timestamp.ToString("yyyy-MM-dd HH:mm:ss.fff");
+        public string FormattedTimestamp => Timestamp.ToString("yyyy-MM-dd HH:mm:ss");
 
         [JsonIgnore]
         public string FormattedDisplay
@@ -66,17 +66,17 @@ namespace FNSyncPlus.Core.Models
             get
             {
                 var sb = new System.Text.StringBuilder();
-                sb.Append($"[{FormattedTimestamp}] [{Level,-5}] [{Stage}] {Message}");
-                if (!string.IsNullOrEmpty(LocalRelPath)) sb.Append($" | 源文件: {LocalRelPath}");
-                if (!string.IsNullOrEmpty(NasMappedName)) sb.Append($" | NAS映射: {NasMappedName}");
+                string filePart = !string.IsNullOrEmpty(LocalRelPath) ? LocalRelPath : "-";
+                sb.Append($"{FormattedTimestamp} | {Level,-5} | {Stage,-8} | {filePart} | {Message}");
+                if (!string.IsNullOrEmpty(NasMappedName)) sb.Append($" (映射: {NasMappedName})");
                 if (Utf8Bytes.HasValue) sb.Append($" ({Utf8Bytes} B)");
-                if (!string.IsNullOrEmpty(RpcName)) sb.Append($" | 接口: {RpcName}");
+                if (!string.IsNullOrEmpty(RpcName)) sb.Append($" [接口: {RpcName}]");
                 if (!string.IsNullOrEmpty(ErrorCode) || !string.IsNullOrEmpty(ErrorMessage))
                 {
-                    sb.Append($" | 异常: [code: {ErrorCode}] {ErrorMessage}");
+                    sb.Append($" [异常: {ErrorCode} {ErrorMessage}]");
                 }
-                if (RetryCount > 0) sb.Append($" | 重试: {RetryCount}次");
-                if (!string.IsNullOrEmpty(VerificationResult)) sb.Append($" | 校验: {VerificationResult}");
+                if (RetryCount > 0) sb.Append($" [重试: {RetryCount}次]");
+                if (!string.IsNullOrEmpty(VerificationResult)) sb.Append($" [校验: {VerificationResult}]");
                 return sb.ToString();
             }
         }

@@ -65,6 +65,16 @@ namespace FNSyncPlus.Core.Services
         public bool CertificateConfirmationRequired { get; private set; }
         public NasCertificateInfo? UntrustedCertificateInfo { get; private set; }
 
+        /// <summary>
+        /// 当用户在未连接 NAS 时点击添加文件夹，跳转连接后自动重新打开添加向导的标记
+        /// </summary>
+        public bool PendingWizardOnConnected { get; set; }
+
+        /// <summary>
+        /// 向导中途 NAS 断开后前往重连时，保留当前已选择的本地文件夹草稿
+        /// </summary>
+        public bool IsPreservingWizardDraft { get; set; }
+
         public NasConnectionState State
         {
             get => _state;

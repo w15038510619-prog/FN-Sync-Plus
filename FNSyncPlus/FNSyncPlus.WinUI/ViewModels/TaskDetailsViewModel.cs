@@ -187,9 +187,9 @@ namespace FNSyncPlus.WinUI.ViewModels
             foreach (var logStr in logs)
             {
                 string level = "INFO";
-                if (logStr.Contains("[ERROR]")) level = "ERROR";
-                else if (logStr.Contains("[WARN]")) level = "WARN";
-                else if (logStr.Contains("[DEBUG]")) level = "DEBUG";
+                if (logStr.Contains("[ERROR]") || logStr.Contains(" | ERROR")) level = "ERROR";
+                else if (logStr.Contains("[WARN]") || logStr.Contains(" | WARN ")) level = "WARN";
+                else if (logStr.Contains("[DEBUG]") || logStr.Contains(" | DEBUG")) level = "DEBUG";
 
                 _allLoadedLogs.Add(new TaskLogDisplayItem
                 {
@@ -198,6 +198,9 @@ namespace FNSyncPlus.WinUI.ViewModels
                     Message = logStr
                 });
             }
+
+            bool hasErrors = _allLoadedLogs.Any(l => l.Level == "ERROR");
+            SelectedLogLevelIndex = hasErrors ? 1 : 0; // 默认视图显示最新错误（若有错误）
 
             ApplyLogFilter();
             HasLogs = _allLoadedLogs.Count > 0;

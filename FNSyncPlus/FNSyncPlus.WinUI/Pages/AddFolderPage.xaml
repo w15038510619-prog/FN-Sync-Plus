@@ -53,8 +53,31 @@
         </Border>
 
         <!-- 1. MIDDLE RESPONSIVE CONTENT AREA -->
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-            <Grid MinHeight="420">
+        <Grid Grid.Row="1" RowSpacing="10">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- NAS Disconnected Warning Banner with Reconnect Action -->
+            <InfoBar Grid.Row="0"
+                     IsOpen="{x:Bind ViewModel.IsNasDisconnectedWarning, Mode=OneWay}"
+                     Severity="Error"
+                     Title="NAS 连接已中断，请重新连接"
+                     Message="当前与飞牛 NAS 的连接已断开。您的本地文件夹选择草稿已妥善保留，重连成功后可继续完成创建。"
+                     IsClosable="False">
+                <InfoBar.ActionButton>
+                    <Button Click="BtnReconnectNas_Click" Style="{ThemeResource AccentButtonStyle}">
+                        <StackPanel Orientation="Horizontal" Spacing="4">
+                            <FontIcon Glyph="&#xE72C;" FontSize="11" />
+                            <TextBlock Text="前往连接" FontSize="11" />
+                        </StackPanel>
+                    </Button>
+                </InfoBar.ActionButton>
+            </InfoBar>
+
+            <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <Grid MinHeight="420">
                 <!-- STEP 1: LOCAL SOURCE FOLDERS -->
                 <Border Visibility="{x:Bind ViewModel.IsStep1, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="20">
                     <Grid RowSpacing="16">
@@ -226,6 +249,7 @@
                 </Border>
             </Grid>
         </ScrollViewer>
+        </Grid>
 
         <!-- 2. PINNED BOTTOM ACTION CONTROLS (ALWAYS VISIBLE) -->
         <Border Grid.Row="2" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16,12">

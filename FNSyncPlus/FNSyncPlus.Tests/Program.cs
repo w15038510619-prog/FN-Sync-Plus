@@ -43,7 +43,9 @@ namespace FNSyncPlus.Tests
         {
             Console.OutputEncoding = Encoding.UTF8;
 
-            if (args.Any(a => a.Equals("--poc", StringComparison.OrdinalIgnoreCase) || a.Equals("poc", StringComparison.OrdinalIgnoreCase)))
+            if (args.Any(a => a.Equals("--poc", StringComparison.OrdinalIgnoreCase) || 
+                              a.Equals("poc", StringComparison.OrdinalIgnoreCase) ||
+                              a.Equals("--unicode-suite", StringComparison.OrdinalIgnoreCase)))
             {
                 bool pocSuccess = await FnOsPersonalSpacePoc.RunAsync(args);
                 return pocSuccess ? 0 : 1;

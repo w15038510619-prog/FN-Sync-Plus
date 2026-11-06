@@ -67,6 +67,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         public bool TwoFactorRequired => _connectionService.TwoFactorRequired;
 
         public event Action? RequestRefreshConnectionPill;
+        public event Action? RequestNavigateToAddFolder;
 
         public DeviceViewModel(SmbAuthService smbService, AppSettings settings, TaskManager taskManager, NasConnectionService connectionService)
         {
@@ -170,6 +171,11 @@ namespace FNSyncPlus.WinUI.ViewModels
                 }
 
                 RequestRefreshConnectionPill?.Invoke();
+
+                if (success && _connectionService.PendingWizardOnConnected)
+                {
+                    RequestNavigateToAddFolder?.Invoke();
+                }
             }
             catch (Exception ex)
             {
@@ -222,6 +228,11 @@ namespace FNSyncPlus.WinUI.ViewModels
                     TwoFactorCode = string.Empty;
                 }
                 RequestRefreshConnectionPill?.Invoke();
+
+                if (success && _connectionService.PendingWizardOnConnected)
+                {
+                    RequestNavigateToAddFolder?.Invoke();
+                }
             }
             catch (Exception ex)
             {

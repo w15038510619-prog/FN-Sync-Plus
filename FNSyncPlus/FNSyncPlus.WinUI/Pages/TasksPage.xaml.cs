@@ -41,15 +41,51 @@ namespace FNSyncPlus.WinUI.Pages
             ViewModel.RequestConfirmDelete -= ConfirmDeleteTask;
         }
 
-        private void OpenAddFolderWizardDialog()
+        private async void OpenAddFolderWizardDialog()
         {
-            if (App.MainWindowInstance != null)
+            var connectionService = AppServices.GetService<FNSyncPlus.Core.Services.NasConnectionService>();
+            bool isConnected = connectionService.IsConnected &&
+                               connectionService.CurrentStorageProvider is FNSyncPlus.Core.Storage.FnOsPersonalStorageProvider fnProvider &&
+                               fnProvider.IsAuthenticated;
+
+            if (isConnected)
             {
-                App.MainWindowInstance.NavigateToTag("AddFolder");
+                if (App.MainWindowInstance != null)
+                {
+                    App.MainWindowInstance.NavigateToTag("AddFolder");
+                }
+                else
+                {
+                    Frame.Navigate(typeof(AddFolderPage));
+                }
             }
             else
             {
-                Frame.Navigate(typeof(AddFolderPage));
+                // 尚未连接飞牛官方个人空间，弹出对话框引导用户
+                var dialog = new ContentDialog
+                {
+                    Title = "请先连接飞牛 NAS",
+                    Content = "当前尚未连接飞牛官方个人空间。请先登录你的 fnOS 账号，连接成功后即可自动备份到「我的文件」。",
+                    PrimaryButtonText = "前往连接",
+                    CloseButtonText = "取消",
+                    DefaultButton = ContentDialogButton.Primary,
+                    XamlRoot = this.XamlRoot ?? App.MainWindowInstance?.Content?.XamlRoot
+                };
+
+                var result = await dialog.ShowAsync();
+                if (result == ContentDialogResult.Primary)
+                {
+                    connectionService.PendingWizardOnConnected = true;
+                    connectionService.IsPreservingWizardDraft = false;
+                    if (App.MainWindowInstance != null)
+                    {
+                        App.MainWindowInstance.NavigateToTag("Device");
+                    }
+                    else
+                    {
+                        Frame.Navigate(typeof(DevicePage));
+                    }
+                }
             }
         }
 

@@ -123,6 +123,12 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private bool _isRecomputing;
 
+        [ObservableProperty]
+        private bool _isNasDisconnectedWarning = false;
+
+        private string _lastConnectedUsername = string.Empty;
+        private string _lastConnectedServer = string.Empty;
+
         public AddFolderWizardViewModel(
             TaskManager taskManager, 
             SmbAuthService smbService, 
@@ -150,6 +156,22 @@ namespace FNSyncPlus.WinUI.ViewModels
                 }
             };
 
+            _connectionService.PropertyChanged += (s, e) =>
+            {
+                if (e.PropertyName == nameof(NasConnectionService.IsConnected) ||
+                    e.PropertyName == nameof(NasConnectionService.State))
+                {
+                    UIThreadHelper.RunOnUIThread(() =>
+                    {
+                        bool isConn = _connectionService.IsConnected &&
+                                      _connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnP &&
+                                      fnP.IsAuthenticated;
+                        IsNasDisconnectedWarning = !isConn;
+                        UpdateStepState();
+                    });
+                }
+            };
+
             ResetSession();
         }
 
@@ -169,7 +191,46 @@ namespace FNSyncPlus.WinUI.ViewModels
                 HasDuplicateConflict = false;
                 StatusMessage = "请添加需要自动备份至飞牛 NAS 的本地文件夹。";
 
+                bool isConn = _connectionService.IsConnected &&
+                              _connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnP &&
+                              fnP.IsAuthenticated;
+                IsNasDisconnectedWarning = !isConn;
+                _lastConnectedUsername = _connectionService.Username;
+                _lastConnectedServer = _connectionService.ServerAddress;
+
                 InitializeDefaultNasRoot();
+                UpdateStepState();
+            });
+        }
+
+        /// <summary>
+        /// 当中途 NAS 断开并重新连接成功后恢复向导会话（保留用户已选本地文件夹草稿）
+        /// </summary>
+        public void RestoreSessionOnReconnect()
+        {
+            UIThreadHelper.RunOnUIThread(async () =>
+            {
+                IsNasDisconnectedWarning = false;
+                string currentUser = _connectionService.Username;
+                string currentServer = _connectionService.ServerAddress;
+
+                if (!string.IsNullOrEmpty(_lastConnectedUsername) &&
+                    (!string.Equals(_lastConnectedUsername, currentUser, StringComparison.OrdinalIgnoreCase) ||
+                     !string.Equals(_lastConnectedServer, currentServer, StringComparison.OrdinalIgnoreCase)))
+                {
+                    InitializeDefaultNasRoot();
+                }
+                else
+                {
+                    InitializeDefaultNasRoot();
+                    if (SelectedLocalFolders.Count > 0)
+                    {
+                        await RecomputePlannedTasksAsync();
+                    }
+                }
+
+                _lastConnectedUsername = currentUser;
+                _lastConnectedServer = currentServer;
                 UpdateStepState();
             });
         }
@@ -403,6 +464,12 @@ namespace FNSyncPlus.WinUI.ViewModels
             CanGoNext = CurrentStep == 1 && SelectedLocalFolders.Count > 0;
             CanCreate = CurrentStep == 2 && PlannedTasks.Count > 0 && !string.IsNullOrWhiteSpace(NasDestinationRoot);
 
+            if (IsNasDisconnectedWarning)
+            {
+                CanGoNext = false;
+                CanCreate = false;
+            }
+
             if (CurrentStep == 1)
             {
                 if (!HasDuplicateConflict)
@@ -586,11 +653,40 @@ namespace FNSyncPlus.WinUI.ViewModels
             await Task.Yield();
             if (!CanCreate || PlannedTasks.Count == 0) return 0;
 
+            // 运行时连接底线守卫校验：必须处于 Connected 且存储提供程序为已鉴权的 FnOsPersonalStorageProvider
+            if (_connectionService.State != NasConnectionState.Connected)
+            {
+                StatusMessage = "NAS 尚未连接，无法创建任务。请先连接飞牛官方个人空间。";
+                foreach (var item in PlannedTasks)
+                {
+                    item.IsFailed = true;
+                    item.StatusText = "❌ NAS 未连接";
+                    item.ErrorMessage = StatusMessage;
+                }
+                IsNasDisconnectedWarning = true;
+                UpdateStepState();
+                return 0;
+            }
+
             int createdCount = 0;
 
             // 1. 飞牛官方「我的文件」原生任务创建
             if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
             {
+                if (!fnProvider.IsAuthenticated)
+                {
+                    StatusMessage = "飞牛个人空间鉴权已失效，请重新连接。";
+                    return 0;
+                }
+
+                // 检查授权用户名与配置是否匹配
+                if (!string.IsNullOrEmpty(fnProvider.CurrentUsername) &&
+                    !string.IsNullOrEmpty(_settings.Username) &&
+                    !string.Equals(fnProvider.CurrentUsername, _settings.Username, StringComparison.OrdinalIgnoreCase))
+                {
+                    StatusMessage = $"当前登录账号 ({fnProvider.CurrentUsername}) 与配置账号 ({_settings.Username}) 不一致，请重新连接。";
+                    return 0;
+                }
                 foreach (var item in PlannedTasks)
                 {
                     string destSub = item.FullTargetUnc;

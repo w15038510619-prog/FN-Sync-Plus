@@ -37,7 +37,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
     public class FnOsApiClient : IAsyncDisposable
     {
         private readonly HttpClient _httpClient;
-        private readonly HttpClientHandler _httpHandler;
+        private readonly SocketsHttpHandler _httpHandler;
         private ClientWebSocket? _webSocket;
         private readonly SemaphoreSlim _wsLock = new(1, 1);
         private readonly Dictionary<string, TaskCompletionSource<string>> _pendingRequests = new();
@@ -77,9 +77,24 @@ namespace FNSyncPlus.Core.Storage.FnOs
         public FnOsApiClient(string? pinnedCertSha256 = null)
         {
             _pinnedCertSha256 = pinnedCertSha256;
-            _httpHandler = new HttpClientHandler
+            _httpHandler = new SocketsHttpHandler
             {
-                ServerCertificateCustomValidationCallback = ValidateServerCertificate
+                SslOptions = new System.Net.Security.SslClientAuthenticationOptions
+                {
+                    RemoteCertificateValidationCallback = (sender, cert, chain, errors) =>
+                    {
+                        var x509 = cert as X509Certificate2 ?? (cert != null ? new X509Certificate2(cert) : null);
+                        return ValidateServerCertificate(new HttpRequestMessage(), x509, chain, errors);
+                    }
+                },
+                RequestHeaderEncodingSelector = (headerName, requestMessage) =>
+                {
+                    if (headerName.Equals("Trim-Path", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Encoding.UTF8;
+                    }
+                    return null;
+                }
             };
             _httpClient = new HttpClient(_httpHandler)
             {
@@ -566,6 +581,10 @@ namespace FNSyncPlus.Core.Storage.FnOs
             };
 
             string responseJson = await SendSignedRpcAsync("file.checkUpload", payload, ct).ConfigureAwait(false);
+            if (responseJson.Contains("fail") || responseJson.Contains("err") || remotePath.Contains("25"))
+            {
+                Console.WriteLine($"[DEBUG checkUpload] path: {canonicalPath}, resp: {responseJson}");
+            }
 
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             using var doc = JsonDocument.Parse(responseJson);
@@ -672,7 +691,13 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 Content = content
             };
 
-            request.Headers.Add("Trim-Path", uploadPath);
+            // 严格拒绝 CR、LF、NULL 等控制字符，防止 HTTP 请求头注入
+            if (uploadPath.IndexOfAny(new[] { '\r', '\n', '\0' }) >= 0)
+            {
+                throw new ArgumentException("Trim-Path 包含非法控制字符，已被安全拒绝。", nameof(remotePath));
+            }
+
+            request.Headers.TryAddWithoutValidation("Trim-Path", uploadPath);
             request.Headers.Add("Trim-From", fromOffset.ToString());
             request.Headers.Add("Trim-Overwrite", overwrite ? "true" : "false");
             request.Headers.Add("Trim-Mtim", mtim.ToString());
@@ -682,6 +707,8 @@ namespace FNSyncPlus.Core.Storage.FnOs
             using var resp = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
             {
+                string errContent = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                Console.WriteLine($"[DEBUG Upload Failed] HTTP {(int)resp.StatusCode} {resp.ReasonPhrase}: {errContent}, uploadPath: {uploadPath}");
                 return false;
             }
 
@@ -694,10 +721,12 @@ namespace FNSyncPlus.Core.Storage.FnOs
                     using var doc = JsonDocument.Parse(respBody);
                     if (doc.RootElement.TryGetProperty("result", out var resProp) && resProp.GetString() == "fail")
                     {
+                        Console.WriteLine($"[DEBUG Upload Body Failed] {respBody}, uploadPath: {uploadPath}");
                         return false;
                     }
                     if (doc.RootElement.TryGetProperty("errno", out var errNoProp) && errNoProp.GetInt32() != 0)
                     {
+                        Console.WriteLine($"[DEBUG Upload ErrNo Failed] {respBody}, uploadPath: {uploadPath}");
                         return false;
                     }
                 }
@@ -775,10 +804,11 @@ namespace FNSyncPlus.Core.Storage.FnOs
             string canonicalPath = remotePath.StartsWith("/") ? remotePath : "/" + remotePath;
             var payload = new Dictionary<string, object?>
             {
-                ["path"] = canonicalPath,
-                ["trash"] = moveToTrash
+                ["files"] = new[] { canonicalPath },
+                ["moveToTrashbin"] = moveToTrash
             };
             string responseJson = await SendSignedRpcAsync("file.rm", payload, ct).ConfigureAwait(false);
+            Console.WriteLine($"[DEBUG file.rm] payload: {canonicalPath}, resp: {responseJson}");
             return JsonSerializer.Deserialize<FnOsGenericRpcResponse>(responseJson)
                    ?? new FnOsGenericRpcResponse { Result = "failed" };
         }

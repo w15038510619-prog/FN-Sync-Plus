@@ -30,6 +30,7 @@ namespace FNSyncPlus.Core.Storage
 
         public int? CurrentUid => _apiClient.CurrentUid;
         public int? CurrentVolumeId => _apiClient.CurrentVolumeId;
+        public string? CurrentUsername => _apiClient.AuthenticatedUser;
 
         public FnOsPersonalStorageProvider(string? pinnedCertSha256 = null)
         {
@@ -507,7 +508,7 @@ namespace FNSyncPlus.Core.Storage
             return Task.Run(async () =>
             {
                 var resp = await _apiClient.DeleteFileOrDirAsync(fullPath, moveToTrash, ct).ConfigureAwait(false);
-                if (resp.Result == "succ")
+                if (resp.IsSuccess)
                 {
                     return StorageOperationResult.Ok(fullPath);
                 }

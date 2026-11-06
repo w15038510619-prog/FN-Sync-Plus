@@ -22,6 +22,27 @@ namespace FNSyncPlus.WinUI.Pages
                     TxtPassword.Password = ViewModel.Password;
                 }
             };
+
+            ViewModel.RequestNavigateToAddFolder += OnRequestNavigateToAddFolder;
+            this.Unloaded += (s, e) =>
+            {
+                ViewModel.RequestNavigateToAddFolder -= OnRequestNavigateToAddFolder;
+            };
+        }
+
+        private void OnRequestNavigateToAddFolder()
+        {
+            Helpers.UIThreadHelper.RunOnUIThread(() =>
+            {
+                if (App.MainWindowInstance != null)
+                {
+                    App.MainWindowInstance.NavigateToTag("AddFolder");
+                }
+                else if (Frame != null)
+                {
+                    Frame.Navigate(typeof(AddFolderPage));
+                }
+            });
         }
 
         private void TxtPassword_PasswordChanged(object sender, RoutedEventArgs e)

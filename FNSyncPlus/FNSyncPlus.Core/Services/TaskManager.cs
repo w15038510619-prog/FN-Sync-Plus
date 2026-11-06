@@ -453,8 +453,23 @@ namespace FNSyncPlus.Core.Services
             {
                 task.State = TaskSyncState.Error;
                 task.LastError = ex.Message;
-                task.LastSyncStatus = "执行异常";
+                if (task.LastScannedFiles == 0 && syncEngine.LastScannedCount > 0)
+                {
+                    task.LastScannedFiles = syncEngine.LastScannedCount;
+                }
+                if (task.LastFailedFiles == 0)
+                {
+                    task.LastFailedFiles = Math.Max(1, task.LastScannedFiles);
+                }
+                bool isInit = ex.Message.Contains("初始化") ||
+                              ex.Message.Contains("清单") ||
+                              ex.Message.Contains("创建") ||
+                              ex.Message.Contains("目标目录") ||
+                              ex.Message.Contains("扫描");
+                task.LastSyncStatus = isInit ? "备份初始化失败" : "备份失败";
+                task.CurrentFile = $"{task.LastSyncStatus}: {ex.Message}";
                 AppendTaskLog(task, "ERROR", $"任务异常中断: {ex.Message}");
+                _settings.Save();
                 TaskStateChanged?.Invoke(task);
             }
             finally
@@ -581,9 +596,20 @@ namespace FNSyncPlus.Core.Services
 
         #region 日志记录
 
+        private static readonly System.Text.RegularExpressions.Regex PrefixRegex = new(
+            @"^(?:\[\d{4}-\d{2}-\d{2}[^\]]*\]\s*|\[\d{2}:\d{2}:\d{2}(?:\.\d+)?\]\s*|\[(?:INFO|WARN|ERROR|DEBUG)\]\s*|\[SYNC\]\s*)+",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        private static string CleanLogMessage(string msg)
+        {
+            if (string.IsNullOrWhiteSpace(msg)) return string.Empty;
+            return PrefixRegex.Replace(msg, "").TrimStart();
+        }
+
         private void AppendTaskLog(SyncTask task, string level, string message)
         {
-            string formatted = $"[{DateTime.Now:HH:mm:ss}] [{level}] {message}";
+            string cleanMsg = CleanLogMessage(message);
+            string formatted = $"[{DateTime.Now:HH:mm:ss}] [{level,-5}] [SYNC] {cleanMsg}";
 
             // 1. 存入持久化日志服务 (磁盘文件 + 内存)
             try
@@ -593,7 +619,7 @@ namespace FNSyncPlus.Core.Services
                     TaskId = task.TaskId,
                     Level = level,
                     Stage = "SYNC",
-                    Message = message,
+                    Message = cleanMsg,
                     Timestamp = DateTimeOffset.Now
                 });
             }

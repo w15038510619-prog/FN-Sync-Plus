@@ -23,8 +23,32 @@ namespace FNSyncPlus.WinUI.Pages
         protected override void OnNavigatedTo(NavigationEventArgs e)
         {
             base.OnNavigatedTo(e);
-            // 每次用户重新进入添加向导，必须创建全新的独立会话状态，清空临时选择，绝不残留上次记录
-            ViewModel.ResetSession();
+            var connectionService = AppServices.GetService<FNSyncPlus.Core.Services.NasConnectionService>();
+            if (connectionService.IsPreservingWizardDraft)
+            {
+                connectionService.IsPreservingWizardDraft = false;
+                ViewModel.RestoreSessionOnReconnect();
+            }
+            else
+            {
+                // 每次用户重新进入添加向导，必须创建全新的独立会话状态，清空临时选择，绝不残留上次记录
+                ViewModel.ResetSession();
+            }
+        }
+
+        private void BtnReconnectNas_Click(object sender, RoutedEventArgs e)
+        {
+            var connectionService = AppServices.GetService<FNSyncPlus.Core.Services.NasConnectionService>();
+            connectionService.PendingWizardOnConnected = true;
+            connectionService.IsPreservingWizardDraft = true;
+            if (App.MainWindowInstance != null)
+            {
+                App.MainWindowInstance.NavigateToTag("Device");
+            }
+            else if (Frame != null)
+            {
+                Frame.Navigate(typeof(DevicePage));
+            }
         }
 
         private void BtnBackToTasks_Click(object sender, RoutedEventArgs e)

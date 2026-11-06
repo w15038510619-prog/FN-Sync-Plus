@@ -118,9 +118,45 @@ namespace FNSyncPlus.Core.Services
             _ => state.ToString()
         };
 
+        private int _lastScannedCount = 0;
+        /// <summary>
+        /// 最近一次扫描到的源文件总数（用于在任务初始化或早期故障时准确统计已扫描文件数）
+        /// </summary>
+        public int LastScannedCount => _lastScannedCount;
+
         private void Log(string level, string message)
         {
-            LogEmitted?.Invoke(level, $"[{DateTime.Now:HH:mm:ss}] [{level}] {message}");
+            LogEmitted?.Invoke(level, message);
+        }
+
+        private static bool IsTransientException(Exception ex)
+        {
+            if (ex is OperationCanceledException) return false;
+            if (ex is ArgumentException) return false;
+            if (ex is PathTooLongException) return false;
+            if (ex is NotSupportedException) return false;
+            if (ex is UnauthorizedAccessException) return false;
+
+            if (ex is InvalidOperationException invEx)
+            {
+                if (invEx.Message.Contains("ASCII", StringComparison.OrdinalIgnoreCase) ||
+                    invEx.Message.Contains("未登录", StringComparison.OrdinalIgnoreCase) ||
+                    invEx.Message.Contains("越界", StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+
+            if (ex.Message.Contains("401") ||
+                ex.Message.Contains("403") ||
+                ex.Message.Contains("未授权") ||
+                ex.Message.Contains("禁止访问") ||
+                ex.Message.Contains("Trim-Path 包含非法控制字符"))
+            {
+                return false;
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -472,6 +508,12 @@ namespace FNSyncPlus.Core.Services
                             uploadError = ex.Message;
                             try { if (File.Exists(stagingFile)) File.Delete(stagingFile); } catch { }
 
+                            if (!IsTransientException(ex))
+                            {
+                                Log("ERROR", $"[不可重试异常] 同步 {originalRel} 遇到致命错误，立即终止重试: {ex.Message}");
+                                break;
+                            }
+
                             Log("WARN", $"[重试 {attempt}/3] 同步 {originalRel} 异常: {ex.Message}");
                             if (attempt < 3)
                             {
@@ -563,18 +605,53 @@ namespace FNSyncPlus.Core.Services
 
             string longSource = PathHelper.EnsureLongPathPrefix(sourceFolder);
 
-            // 1. 确保远端目标根目录存在
-            var mkdirRes = await storageProvider.CreateDirectoryAsync(targetNasFolder, token).ConfigureAwait(false);
-            if (!mkdirRes.Success)
+            // 1. 先扫描本地源文件并确定总数与扫描指标
+            var dirInfo = new DirectoryInfo(longSource);
+            List<FileInfo> allLocalFiles;
+            try
+            {
+                allLocalFiles = ScanLocalSourceFiles(dirInfo, longSource);
+                report.TotalFiles = allLocalFiles.Count;
+                _lastScannedCount = allLocalFiles.Count;
+                Log("INFO", $"本地扫描完成，共发现 {report.TotalFiles} 个有效源文件，准备校验个人空间目标...");
+            }
+            catch (Exception ex)
             {
                 CurrentState = SyncState.Failed;
-                Log("ERROR", $"无法在飞牛个人空间创建目标目录: {mkdirRes.ErrorMessage}");
-                throw new IOException($"创建个人空间目标目录失败: {mkdirRes.ErrorMessage}");
+                report.State = SyncState.Failed;
+                report.StatusMessage = $"扫描本地源文件失败: {ex.Message}";
+                Log("ERROR", report.StatusMessage);
+                throw new IOException(report.StatusMessage, ex);
             }
 
-            // 2. 加载 NAS 隔离元数据清单 (.fnsync/manifest.json)
+            // 2. 确保远端目标根目录存在 (幂等检查与创建)
+            var mkdirRes = await storageProvider.CreateDirectoryAsync(targetNasFolder, token).ConfigureAwait(false);
+            if (!mkdirRes.Success && mkdirRes.ErrorCode != 17)
+            {
+                CurrentState = SyncState.Failed;
+                report.State = SyncState.Failed;
+                report.FailedFiles = Math.Max(1, report.TotalFiles);
+                report.StatusMessage = $"无法在飞牛个人空间创建目标目录: {mkdirRes.ErrorMessage}";
+                Log("ERROR", report.StatusMessage);
+                throw new IOException(report.StatusMessage);
+            }
+
+            // 3. 加载 NAS 隔离元数据清单 (.fnsync/manifest.json)
             Log("INFO", "正在加载飞牛 NAS 备份元数据清单 (.fnsync/manifest.json)...");
-            Manifest manifest = await _manifestManager.LoadManifestAsync(storageProvider, targetNasFolder, token).ConfigureAwait(false);
+            Manifest manifest;
+            try
+            {
+                manifest = await _manifestManager.LoadManifestAsync(storageProvider, targetNasFolder, token).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                CurrentState = SyncState.Failed;
+                report.State = SyncState.Failed;
+                report.FailedFiles = Math.Max(1, report.TotalFiles);
+                report.StatusMessage = $"加载远端元数据清单失败: {ex.Message}";
+                Log("ERROR", report.StatusMessage);
+                throw new IOException(report.StatusMessage, ex);
+            }
             manifest.SourceRoot = PathHelper.RemoveLongPathPrefix(sourceFolder);
             manifest.TargetRoot = targetNasFolder;
             _longNameEngine.LoadExistingManifest(manifest);
@@ -584,12 +661,6 @@ namespace FNSyncPlus.Core.Services
             {
                 manifestFilesMap[f.OriginalRel] = f;
             }
-
-            // 3. 扫描本地源文件
-            var dirInfo = new DirectoryInfo(longSource);
-            var allLocalFiles = ScanLocalSourceFiles(dirInfo, longSource);
-            report.TotalFiles = allLocalFiles.Count;
-            Log("INFO", $"本地扫描完成，共发现 {report.TotalFiles} 个有效源文件，开始增量比对与流式上传...");
 
             CurrentState = SyncState.Syncing;
             report.State = SyncState.Syncing;
@@ -652,7 +723,29 @@ namespace FNSyncPlus.Core.Services
                 string remoteDir = Path.GetDirectoryName(remoteRel.Replace('\\', '/'))?.Replace('\\', '/') ?? "";
                 if (!string.IsNullOrEmpty(remoteDir))
                 {
-                    await storageProvider.CreateDirectoryAsync(remoteDir, token).ConfigureAwait(false);
+                    try
+                    {
+                        var dirRes = await storageProvider.CreateDirectoryAsync(remoteDir, token).ConfigureAwait(false);
+                        if (!dirRes.Success && dirRes.ErrorCode != 17)
+                        {
+                            throw new IOException($"创建远端子目录失败: {dirRes.ErrorMessage}");
+                        }
+                    }
+                    catch (Exception dirEx)
+                    {
+                        failedCount++;
+                        report.FailedFiles = failedCount;
+                        FailedItems.Add(new FailedSyncItem
+                        {
+                            RelativePath = originalRel,
+                            ErrorMessage = dirEx.Message
+                        });
+                        Log("ERROR", $"[同步失败] 创建父目录异常 {remoteDir} : {dirEx.Message}");
+                        report.UnchangedFiles = unchangedCount;
+                        report.LongNameFiles = longNameCount;
+                        ProgressChanged?.Invoke(report);
+                        continue;
+                    }
                 }
 
                 bool uploadSuccess = false;
@@ -721,6 +814,12 @@ namespace FNSyncPlus.Core.Services
                     catch (Exception ex)
                     {
                         uploadError = ex.Message;
+                        if (!IsTransientException(ex))
+                        {
+                            Log("ERROR", $"[不可重试异常] 同步 {originalRel} 遇到致命错误，立即终止重试: {ex.Message}");
+                            break;
+                        }
+
                         Log("WARN", $"[重试 {attempt}/3] 个人空间上传 {originalRel} 异常: {ex.Message}");
                         if (attempt < 3)
                         {

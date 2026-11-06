@@ -266,10 +266,38 @@ namespace FNSyncPlus.WinUI
             args.Handled = true;
         }
 
-        private void Accelerator_AddWizard_Invoked(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
+        private async void Accelerator_AddWizard_Invoked(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
         {
-            NavigateToTag("AddFolder");
             args.Handled = true;
+            var connectionService = Services.AppServices.GetService<FNSyncPlus.Core.Services.NasConnectionService>();
+            bool isConnected = connectionService.IsConnected &&
+                               connectionService.CurrentStorageProvider is FNSyncPlus.Core.Storage.FnOsPersonalStorageProvider fnProvider &&
+                               fnProvider.IsAuthenticated;
+
+            if (isConnected)
+            {
+                NavigateToTag("AddFolder");
+            }
+            else
+            {
+                var dialog = new ContentDialog
+                {
+                    Title = "请先连接飞牛 NAS",
+                    Content = "当前尚未连接飞牛官方个人空间。请先登录你的 fnOS 账号，连接成功后即可自动备份到「我的文件」。",
+                    PrimaryButtonText = "前往连接",
+                    CloseButtonText = "取消",
+                    DefaultButton = ContentDialogButton.Primary,
+                    XamlRoot = this.Content.XamlRoot
+                };
+
+                var result = await dialog.ShowAsync();
+                if (result == ContentDialogResult.Primary)
+                {
+                    connectionService.PendingWizardOnConnected = true;
+                    connectionService.IsPreservingWizardDraft = false;
+                    NavigateToTag("Device");
+                }
+            }
         }
     }
 }
