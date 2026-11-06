@@ -99,11 +99,16 @@ namespace FNSyncPlus.WinUI.ViewModels
             Username = settings.Username;
             RememberPassword = settings.RememberCredentials;
 
-            if (settings.RememberCredentials && !string.IsNullOrEmpty(settings.NasServer))
+            if (settings.RememberCredentials && (!string.IsNullOrEmpty(settings.NasServer) || !string.IsNullOrEmpty(settings.IsolatedCredentialPath)))
             {
-                var creds = SmbAuthService.LoadCredentials();
+                var creds = SmbAuthService.LoadCredentials(settings.IsolatedCredentialPath);
                 if (creds.HasValue && !string.IsNullOrEmpty(creds.Value.Password))
                 {
+                    if (!string.IsNullOrEmpty(settings.IsolatedCredentialPath))
+                    {
+                        NasAddress = creds.Value.Server;
+                        Username = creds.Value.Username;
+                    }
                     Password = creds.Value.Password;
                 }
             }

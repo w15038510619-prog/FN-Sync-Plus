@@ -1040,23 +1040,34 @@ namespace FNSyncPlus.Core.Services
             return Path.Combine(folder, "credentials.dat");
         }
 
-        public static void SaveCredentials(string server, string username, string password)
+        public static void SaveCredentials(string server, string username, string password, string? isolatedPath = null)
         {
+            string? tempPath = null;
             try
             {
                 string payload = $"{server}\n{username}\n{password}";
                 byte[] raw = Encoding.UTF8.GetBytes(payload);
                 byte[] encrypted = ProtectedData.Protect(raw, Entropy, DataProtectionScope.CurrentUser);
-                File.WriteAllBytes(GetCredentialStoragePath(), encrypted);
+                string path = isolatedPath ?? GetCredentialStoragePath();
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+                tempPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                File.WriteAllBytes(tempPath, encrypted);
+                if (File.Exists(path)) File.Replace(tempPath, path, null);
+                else File.Move(tempPath, path);
             }
-            catch { }
+            catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"保存凭据失败: {ex.Message}"); }
+            finally
+            {
+                try { if (tempPath != null && File.Exists(tempPath)) File.Delete(tempPath); }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"清理凭据临时文件失败: {ex.Message}"); }
+            }
         }
 
-        public static (string Server, string Username, string Password)? LoadCredentials()
+        public static (string Server, string Username, string Password)? LoadCredentials(string? isolatedPath = null)
         {
             try
             {
-                string path = GetCredentialStoragePath();
+                string path = isolatedPath ?? GetCredentialStoragePath();
                 if (!File.Exists(path)) return null;
 
                 byte[] encrypted = File.ReadAllBytes(path);

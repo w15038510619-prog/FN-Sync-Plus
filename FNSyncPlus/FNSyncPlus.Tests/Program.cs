@@ -196,6 +196,11 @@ namespace FNSyncPlus.Tests
                 var migrated = AppSettings.LoadFromPath(legacyConfig);
                 var migrationBackup = Directory.GetFiles(root, "legacy.json.pre-migration-*.bak");
                 Assert(migrated.Tasks.Count == 1 && migrationBackup.Length == 1 && File.ReadAllText(migrationBackup[0]) == legacyJson, "迁移配置前保留原始备份");
+                string isolatedCredentials = Path.Combine(root, "credentials", "credentials.dat");
+                SmbAuthService.SaveCredentials("test.invalid", "test-user", "test-secret", isolatedCredentials);
+                var isolatedSaved = SmbAuthService.LoadCredentials(isolatedCredentials);
+                Assert(isolatedSaved.HasValue && isolatedSaved.Value.Server == "test.invalid" && isolatedSaved.Value.Password == "test-secret" &&
+                    !Encoding.UTF8.GetString(File.ReadAllBytes(isolatedCredentials)).Contains("test-secret"), "独立测试凭据可由当前 Windows 用户加密保存并读取");
 
                 string backup = Path.Combine(root, "backup");
                 string target = Path.Combine(root, "restore");
@@ -232,6 +237,8 @@ namespace FNSyncPlus.Tests
                 try { await manifestManager.LoadManifestAsync(faultProvider, "backup"); }
                 catch (InvalidDataException) { refused = true; }
                 Assert(refused, "主备清单均损坏时拒绝返回空清单");
+                Assert(new FnOsFileListResponse { Files = new() }.IsSuccess, "fnOS 文件列表允许省略 result 的有效响应");
+                Assert(!new FnOsFileListResponse().IsSuccess && !new FnOsFileListResponse { Result = "fail", Files = new() }.IsSuccess, "fnOS 文件列表拒绝空响应或明确失败");
             }
             finally
             {

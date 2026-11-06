@@ -93,6 +93,11 @@ namespace FNSyncPlus.Core.Storage.FnOs
 
     public class FnOsFileListResponse
     {
+        [JsonIgnore]
+        public bool IsSuccess => (ErrNo == null || ErrNo == 0) &&
+            (string.Equals(Result, "succ", StringComparison.OrdinalIgnoreCase) ||
+             (string.IsNullOrEmpty(Result) && Files != null));
+
         [JsonPropertyName("result")]
         public string? Result { get; set; }
 

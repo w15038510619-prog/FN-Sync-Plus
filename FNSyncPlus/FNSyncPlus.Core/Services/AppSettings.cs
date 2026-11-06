@@ -43,6 +43,9 @@ namespace FNSyncPlus.Core.Services
         [JsonIgnore]
         public string? CustomConfigPath { get; set; } = null;
 
+        [JsonIgnore]
+        public string? IsolatedCredentialPath { get; set; }
+
         public static AppSettings CreateInMemory() => new AppSettings { IsInMemoryOnly = true };
         public static AppSettings CreateForTest(string testFilePath) => new AppSettings { CustomConfigPath = testFilePath };
 

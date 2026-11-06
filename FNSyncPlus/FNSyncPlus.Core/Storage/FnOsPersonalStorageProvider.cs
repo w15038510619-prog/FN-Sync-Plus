@@ -186,7 +186,7 @@ namespace FNSyncPlus.Core.Storage
             }
 
             var resp = await _apiClient.ListFilesAsync(queryPath, ct).ConfigureAwait(false);
-            if (!string.Equals(resp.Result, "succ", StringComparison.OrdinalIgnoreCase))
+            if (!resp.IsSuccess)
                 throw new IOException($"读取远端目录失败: {resp.ErrMsg ?? resp.Result ?? "无响应"} (errno: {resp.ErrNo})");
             var results = new List<NasStorageItem>();
 

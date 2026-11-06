@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using FNSyncPlus.Core.Services;
 using FNSyncPlus.WinUI.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
@@ -23,7 +24,12 @@ namespace FNSyncPlus.WinUI.Services
             var settings = IsIsolatedTestSession
                 ? AppSettings.CreateInMemory()
                 : AppSettings.Load();
-            if (IsIsolatedTestSession) settings.RememberCredentials = false;
+            if (IsIsolatedTestSession)
+            {
+                settings.IsolatedCredentialPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "FNSyncPlus", "test-session", "credentials.dat");
+                settings.RememberCredentials = File.Exists(settings.IsolatedCredentialPath);
+            }
             services.AddSingleton(settings);
 
             var smbService = new SmbAuthService();
