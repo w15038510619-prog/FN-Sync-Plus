@@ -8,22 +8,33 @@ using FNSyncPlus.WinUI.Services;
 using FNSyncPlus.WinUI.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Windowing;
+using FNSyncPlus.Tray;
 
 namespace FNSyncPlus.WinUI
 {
     public sealed partial class MainWindow : Window
     {
         public MainViewModel ViewModel { get; }
+        private readonly AppSettings _settings;
+        private readonly AppWindow _appWindow;
+        private TrayIcon? _trayIcon;
+        private bool _explicitExit;
 
         public MainWindow(string initialView = "Tasks", int wizardStep = 0)
         {
             ViewModel = AppServices.GetService<MainViewModel>();
+            _settings = AppServices.GetService<AppSettings>();
             InitializeComponent();
 
             WindowHelper.ConfigureWindow(this, AppServices.IsIsolatedTestSession
                 ? "飞牛同步增强版 v0.4.0-beta [隔离测试会话]"
                 : "飞牛同步增强版 v0.4.0-beta", 1200, 780);
             if (AppServices.IsIsolatedTestSession) AppTitleText.Text = "飞牛同步增强版 v0.4.0-beta [隔离测试会话]";
+            _appWindow = AppWindow.GetFromWindowId(Microsoft.UI.Win32Interop.GetWindowIdFromWindow(WindowHelper.GetHandle(this)));
+            InitializeTrayIcon();
+            _appWindow.Closing += OnAppWindowClosing;
+            Closed += OnWindowClosed;
             WindowHelper.SetMicaBackdrop(this);
             SetTitleBar(AppTitleBarDragArea);
 
@@ -168,6 +179,59 @@ namespace FNSyncPlus.WinUI
             {
                 NavigateToTag(initialView);
             }
+        }
+
+        private void InitializeTrayIcon()
+        {
+            try
+            {
+                _trayIcon = new TrayIcon(
+                    () => DispatcherQueue.TryEnqueue(ShowFromTray),
+                    () => DispatcherQueue.TryEnqueue(() =>
+                {
+                    _explicitExit = true;
+                    Close();
+                }));
+            }
+            catch (Exception ex)
+            {
+                App.LogCrashException(ex, "MainWindow.InitializeTrayIcon");
+                _trayIcon?.Dispose();
+                _trayIcon = null;
+            }
+        }
+
+        private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+        {
+            if (_explicitExit || !_settings.MinimizeToTray || _trayIcon == null) return;
+            try
+            {
+                sender.Hide();
+                args.Cancel = true;
+            }
+            catch (Exception ex)
+            {
+                App.LogCrashException(ex, "MainWindow.HideToTray");
+            }
+        }
+
+        public void ShowFromTray()
+        {
+            _appWindow.Show();
+            if (_appWindow.Presenter is OverlappedPresenter presenter && presenter.State == OverlappedPresenterState.Minimized)
+                presenter.Restore();
+            Activate();
+        }
+
+        public void HideToTray()
+        {
+            if (_trayIcon != null) _appWindow.Hide();
+        }
+
+        private void OnWindowClosed(object sender, WindowEventArgs args)
+        {
+            _trayIcon?.Dispose();
+            AppServices.GetService<TaskManager>().Dispose();
         }
 
         private void NavView_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)

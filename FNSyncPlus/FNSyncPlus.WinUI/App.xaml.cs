@@ -72,6 +72,8 @@ namespace FNSyncPlus.WinUI
                 Helpers.UIThreadHelper.Initialize(win.DispatcherQueue);
 
                 win.Activate();
+                if (Array.Exists(cmdArgs, arg => arg.Equals("--minimize", StringComparison.OrdinalIgnoreCase)))
+                    win.HideToTray();
             }
             catch (Exception ex)
             {
