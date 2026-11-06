@@ -279,13 +279,10 @@ namespace FNSyncPlus.Tests
                 bool busyBlocked = false;
                 using (var heldSource = new FileStream(Path.Combine(renameSource, "new.txt"), FileMode.Open, FileAccess.ReadWrite, FileShare.None))
                 {
-                    try
-                    {
-                        var busySync = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
-                        await busySync.RunSyncAsync(renameSource, "rename-target", renameProvider, BackupStrategy.Smart,
-                            new Dictionary<string, string> { ["old.txt"] = "new.txt" }, CancellationToken.None);
-                    }
-                    catch (IOException ex) { busyBlocked = ex.Message.Contains("未稳定", StringComparison.Ordinal); }
+                    var busySync = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
+                    var busyReport = await busySync.RunSyncAsync(renameSource, "rename-target", renameProvider, BackupStrategy.Smart,
+                        new Dictionary<string, string> { ["old.txt"] = "new.txt" }, CancellationToken.None);
+                    busyBlocked = busyReport.State == SyncState.Failed && busySync.FailedItems.Any(x => x.ErrorMessage.Contains("未稳定", StringComparison.Ordinal));
                 }
                 retainedManifest = await manifestManager.LoadManifestAsync(renameProvider, "rename-target");
                 Assert(busyBlocked && retainedManifest.Files.Count == 1 && retainedManifest.Files[0].OriginalRel == "old.txt" &&

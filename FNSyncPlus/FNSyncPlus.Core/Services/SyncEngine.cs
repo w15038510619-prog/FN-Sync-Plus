@@ -635,7 +635,15 @@ namespace FNSyncPlus.Core.Services
 
                     // 防写抖动安全检查：确保文件未被独占锁定且内容已完整写入
                     if (!await WaitForFileSettlingAsync(localFull, 3, token).ConfigureAwait(false))
-                        throw new IOException($"文件仍被占用或未稳定，已停止备份: {originalRel}");
+                    {
+                        const string settlingError = "文件仍被占用或未稳定";
+                        failedCount++;
+                        report.FailedFiles = failedCount;
+                        FailedItems.Add(new FailedSyncItem { RelativePath = originalRel, ErrorMessage = settlingError });
+                        Log("ERROR", $"[同步失败] {originalRel}: {settlingError}");
+                        ProgressChanged?.Invoke(report);
+                        continue;
+                    }
 
                     for (int attempt = 1; attempt <= 3; attempt++)
                     {
@@ -991,7 +999,15 @@ namespace FNSyncPlus.Core.Services
 
                 // 防写抖动安全检查：确保文件未被独占锁定且内容已完整写入
                 if (!await WaitForFileSettlingAsync(localFull, 3, token).ConfigureAwait(false))
-                    throw new IOException($"文件仍被占用或未稳定，已停止备份: {originalRel}");
+                {
+                    const string settlingError = "文件仍被占用或未稳定";
+                    failedCount++;
+                    report.FailedFiles = failedCount;
+                    FailedItems.Add(new FailedSyncItem { RelativePath = originalRel, ErrorMessage = settlingError });
+                    Log("ERROR", $"[同步失败] {originalRel}: {settlingError}");
+                    ProgressChanged?.Invoke(report);
+                    continue;
+                }
 
                 for (int attempt = 1; attempt <= 3; attempt++)
                 {
