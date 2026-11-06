@@ -256,7 +256,7 @@ namespace FNSyncPlus.Tests
             {
                 if (InterruptMainUpload && path.EndsWith("/manifest.json", StringComparison.Ordinal))
                 {
-                    using var partial = new MemoryStream(Encoding.UTF8.GetBytes("{"));
+                    using var partial = new MemoryStream(Encoding.UTF8.GetBytes("{}"));
                     await inner.UploadFileAsync(path, partial, partial.Length, modified, overwrite, progress, ct);
                     return StorageOperationResult.Fail("模拟上传中断");
                 }

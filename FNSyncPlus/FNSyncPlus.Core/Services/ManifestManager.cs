@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Encodings.Web;
@@ -125,8 +126,7 @@ namespace FNSyncPlus.Core.Services
                         try
                         {
                             string json = await File.ReadAllTextAsync(candidate, cancellationToken).ConfigureAwait(false);
-                            var manifest = JsonSerializer.Deserialize<Manifest>(json, JsonOptions);
-                            if (manifest?.Files == null) throw new InvalidDataException("清单文件列表无效");
+                            var manifest = ParseManifest(Encoding.UTF8.GetBytes(json));
                             return manifest;
                         }
                         catch (OperationCanceledException) { throw; }
@@ -142,7 +142,7 @@ namespace FNSyncPlus.Core.Services
                     try
                     {
                         string legacyJson = await File.ReadAllTextAsync(legacyRootPath, cancellationToken).ConfigureAwait(false);
-                        var manifest = JsonSerializer.Deserialize<Manifest>(legacyJson, JsonOptions);
+                        var manifest = ParseManifest(Encoding.UTF8.GetBytes(legacyJson));
                         if (manifest != null)
                         {
                             manifest.Note = "已读取旧版本根目录清单";
@@ -235,8 +235,9 @@ namespace FNSyncPlus.Core.Services
                         try
                         {
                             using var stream = await storageProvider.OpenReadAsync(candidate, cancellationToken).ConfigureAwait(false);
-                            var manifest = await JsonSerializer.DeserializeAsync<Manifest>(stream, JsonOptions, cancellationToken).ConfigureAwait(false);
-                            if (manifest?.Files == null) throw new InvalidDataException("清单文件列表无效");
+                            using var buffer = new MemoryStream();
+                            await stream.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
+                            var manifest = ParseManifest(buffer.ToArray());
                             return manifest;
                         }
                         catch (OperationCanceledException) { throw; }
@@ -302,8 +303,7 @@ namespace FNSyncPlus.Core.Services
                     // 不允许以损坏的主清单覆盖可能唯一有效的备份。
                     try
                     {
-                        var oldManifest = JsonSerializer.Deserialize<Manifest>(previous, JsonOptions);
-                        if (oldManifest?.Files == null) throw new InvalidDataException("旧清单文件列表无效");
+                        _ = ParseManifest(previous);
                     }
                     catch (JsonException ex) { throw new InvalidDataException("旧主清单损坏，拒绝覆盖备份", ex); }
                     await UploadAndVerifyAsync(storageProvider, bakPath, previous, true, cancellationToken).ConfigureAwait(false);
@@ -326,6 +326,17 @@ namespace FNSyncPlus.Core.Services
             byte[] actual = await SHA256.HashDataAsync(readback, token).ConfigureAwait(false);
             if (!CryptographicOperations.FixedTimeEquals(actual, SHA256.HashData(bytes)))
                 throw new InvalidDataException($"远端清单回读校验失败: {path}");
+        }
+
+        private static Manifest ParseManifest(byte[] bytes)
+        {
+            using var document = JsonDocument.Parse(bytes);
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.EnumerateObject().Any(p =>
+                    p.Name.Equals("files", StringComparison.OrdinalIgnoreCase) && p.Value.ValueKind == JsonValueKind.Array))
+                throw new InvalidDataException("清单缺少有效的 files 数组");
+            var manifest = JsonSerializer.Deserialize<Manifest>(bytes, JsonOptions);
+            return manifest?.Files != null ? manifest : throw new InvalidDataException("清单文件列表无效");
         }
 
         private async Task SaveManifestAtomicInternalAsync(string targetRootDirectory, Manifest manifest, CancellationToken cancellationToken)
@@ -353,8 +364,7 @@ namespace FNSyncPlus.Core.Services
             // 2. 备份原清单
             if (File.Exists(currentPath))
             {
-                var previous = JsonSerializer.Deserialize<Manifest>(await File.ReadAllTextAsync(currentPath, cancellationToken).ConfigureAwait(false), JsonOptions);
-                if (previous?.Files == null) throw new InvalidDataException("旧主清单无效，拒绝覆盖备份");
+                _ = ParseManifest(await File.ReadAllBytesAsync(currentPath, cancellationToken).ConfigureAwait(false));
                 File.Copy(currentPath, bakPath, overwrite: true);
             }
 
