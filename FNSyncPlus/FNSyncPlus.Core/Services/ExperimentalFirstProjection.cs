@@ -49,16 +49,7 @@ public sealed class ExperimentalFirstProjection
             var versions = new VersionedManifestStore();
             var latest = await versions.LoadForWritingAsync(provider, root, token).ConfigureAwait(false)
                 ?? throw new InvalidDataException("备份没有已提交版本");
-            if (latest.Id != stable.VersionId) throw new InvalidDataException("候选目录对应的备份版本已过期");
-            var names = LongNameEngine.CreateForProviderType(provider.ProviderType);
-            var expectedDirectories = latest.Manifest.Directories.Select(d => PathHelper.NormalizeRelPath(d.OriginalRel))
-                .OrderBy(x => x.Count(c => c == '/')).ThenBy(x => x, StringComparer.Ordinal)
-                .Select(x => new ExperimentalPhysicalSnapshot.DirectoryMapping(x, names.TranslateDirPath(x).StoredRel)).ToArray();
-            var expectedFiles = latest.Manifest.Files.OrderBy(f => f.OriginalRel, StringComparer.Ordinal)
-                .Select(f => new ExperimentalPhysicalSnapshot.FileMapping(PathHelper.NormalizeRelPath(f.OriginalRel),
-                    names.TranslateFilePath(f.OriginalRel).StoredRel, PathHelper.NormalizeRelPath(f.StoredRel), f.Size, f.Sha256.ToLowerInvariant())).ToArray();
-            if (!expectedDirectories.SequenceEqual(stable.Directories) || !expectedFiles.SequenceEqual(stable.Files))
-                throw new InvalidDataException("候选映射与已提交版本不一致");
+            ValidatePlan(stable, latest, provider.ProviderType);
             string receiptPath = $"{candidate}/receipt.json";
             string receiptHash = Convert.ToHexString(SHA256.HashData(receipt)).ToLowerInvariant();
             if (!await provider.VerifyFileIntegrityAsync(receiptPath, receiptHash, receipt.Length, token).ConfigureAwait(false))
@@ -99,7 +90,22 @@ public sealed class ExperimentalFirstProjection
         }
     }
 
-    private static async Task WriteRecordAsync(INasStorageProvider provider, string path, byte[] content, CancellationToken token)
+    internal static void ValidatePlan(ExperimentalPhysicalSnapshot.Result plan, VersionedManifestStore.Snapshot snapshot,
+        StorageProviderType providerType)
+    {
+        if (snapshot.Id != plan.VersionId) throw new InvalidDataException("候选目录对应的备份版本已过期");
+        var names = LongNameEngine.CreateForProviderType(providerType);
+        var directories = snapshot.Manifest.Directories.Select(d => PathHelper.NormalizeRelPath(d.OriginalRel))
+            .OrderBy(x => x.Count(c => c == '/')).ThenBy(x => x, StringComparer.Ordinal)
+            .Select(x => new ExperimentalPhysicalSnapshot.DirectoryMapping(x, names.TranslateDirPath(x).StoredRel)).ToArray();
+        var files = snapshot.Manifest.Files.OrderBy(f => f.OriginalRel, StringComparer.Ordinal)
+            .Select(f => new ExperimentalPhysicalSnapshot.FileMapping(PathHelper.NormalizeRelPath(f.OriginalRel),
+                names.TranslateFilePath(f.OriginalRel).StoredRel, PathHelper.NormalizeRelPath(f.StoredRel), f.Size, f.Sha256.ToLowerInvariant())).ToArray();
+        if (!directories.SequenceEqual(plan.Directories) || !files.SequenceEqual(plan.Files))
+            throw new InvalidDataException("候选映射与已提交版本不一致");
+    }
+
+    internal static async Task WriteRecordAsync(INasStorageProvider provider, string path, byte[] content, CancellationToken token)
     {
         using var input = new MemoryStream(content, writable: false);
         var uploaded = await provider.UploadFileAsync(path, input, content.Length, DateTime.UtcNow, false, null, token).ConfigureAwait(false);
@@ -109,13 +115,13 @@ public sealed class ExperimentalFirstProjection
         if (!verified) throw new IOException("发布记录未通过回读校验");
     }
 
-    private static async Task VerifyTreeAsync(INasStorageProvider provider, string tree,
+    internal static async Task VerifyTreeAsync(INasStorageProvider provider, string tree,
         ExperimentalPhysicalSnapshot.Result plan, CancellationToken token)
     {
         var root = await provider.GetItemAsync(tree, token).ConfigureAwait(false);
         if (root == null || !root.IsDirectory) throw new DirectoryNotFoundException("待验证的文件树不存在");
         var files = plan.Files.ToDictionary(f => f.PhysicalRel, StringComparer.OrdinalIgnoreCase);
-        var dirs = plan.Directories.Select(d => d.PhysicalRel).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var dirs = plan.Directories.ToDictionary(d => d.PhysicalRel, d => d.PhysicalRel, StringComparer.OrdinalIgnoreCase);
         var seenFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var seenDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var queue = new Queue<string>();
@@ -131,12 +137,14 @@ public sealed class ExperimentalFirstProjection
                 string relative = parent.Length == 0 ? item.Name : $"{parent}/{item.Name}";
                 if (item.IsDirectory)
                 {
-                    if (!dirs.Contains(relative) || !seenDirs.Add(relative)) throw new InvalidDataException("文件树含额外或重复目录");
+                    if (!dirs.TryGetValue(relative, out var expectedDirectory) || !string.Equals(relative, expectedDirectory, StringComparison.Ordinal) ||
+                        !seenDirs.Add(relative)) throw new InvalidDataException("文件树含额外、重复或名称不一致的目录");
                     queue.Enqueue(relative);
                 }
                 else
                 {
-                    if (!files.TryGetValue(relative, out var expected) || !seenFiles.Add(relative) || item.Size != expected.Size ||
+                    if (!files.TryGetValue(relative, out var expected) || !string.Equals(relative, expected.PhysicalRel, StringComparison.Ordinal) ||
+                        !seenFiles.Add(relative) || item.Size != expected.Size ||
                         !await provider.VerifyFileIntegrityAsync($"{tree}/{relative}", expected.Sha256, expected.Size, token).ConfigureAwait(false))
                         throw new InvalidDataException("文件树含额外、重复或校验失败的文件");
                     token.ThrowIfCancellationRequested();

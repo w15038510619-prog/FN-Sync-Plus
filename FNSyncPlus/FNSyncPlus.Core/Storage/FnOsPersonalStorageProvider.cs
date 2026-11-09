@@ -592,6 +592,48 @@ namespace FNSyncPlus.Core.Storage
             catch (Exception ex) { throw new RemoteMoveUncertainException("候选目录移动结果不确定，不能自动重试", ex); }
         }
 
+        /// <summary>Moves the current tree only into an existing uniquely named archive directory.</summary>
+        public async Task<VerifiedMoveOutcome> MoveCurrentToArchiveAsync(string backupRoot, string archiveDirectory,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (!PathHelper.IsSafeRelativePath(backupRoot) || !PathHelper.IsSafeRelativePath(archiveDirectory))
+                throw new ArgumentException("归档路径必须是安全的相对路径");
+            string root = NormalizeRelativePath(backupRoot);
+            string archive = NormalizeRelativePath(archiveDirectory);
+            string prefix = $"{root}/.fnsync/projections/archive-";
+            if (!PathHelper.IsSafeRelativePath(root) || !archive.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                !Guid.TryParseExact(archive[prefix.Length..], "N", out _))
+                throw new ArgumentException("归档目录必须位于备份的专用归档目录下");
+            string source = $"{root}/current", destination = $"{archive}/current";
+            var oldItem = await GetItemAsync(source, ct).ConfigureAwait(false);
+            var archiveItem = await GetItemAsync(archive, ct).ConfigureAwait(false);
+            if (oldItem?.IsDirectory != true || archiveItem?.IsDirectory != true)
+                throw new DirectoryNotFoundException("当前目录或归档目录不存在");
+            if (await GetItemAsync(destination, ct).ConfigureAwait(false) != null) return VerifiedMoveOutcome.DestinationExists;
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                string json = await _apiClient.SendSignedTaskRpcAsync("file.mv", new Dictionary<string, object?> {
+                    ["files"] = new[] { "/" + CombineWithPersonalRoot(source) },
+                    ["pathTo"] = "/" + CombineWithPersonalRoot(archive), ["overwrite"] = "skip",
+                    ["details"] = new { name = "current", count = 1 }
+                }, TimeSpan.FromMinutes(2), ct).ConfigureAwait(false);
+                using var response = JsonDocument.Parse(json);
+                bool succeeded = response.RootElement.TryGetProperty("result", out var value) &&
+                    value.ValueKind == JsonValueKind.String && value.GetString() == "succ";
+                if (response.RootElement.TryGetProperty("errno", out var error) && error.ValueKind == JsonValueKind.Number &&
+                    error.TryGetInt32(out int errorCode) && errorCode != 0) succeeded = false;
+                var sourceAfter = await GetItemAsync(source, ct).ConfigureAwait(false);
+                var destinationAfter = await GetItemAsync(destination, ct).ConfigureAwait(false);
+                if (succeeded && sourceAfter == null && destinationAfter?.IsDirectory == true) return VerifiedMoveOutcome.Moved;
+                if (sourceAfter?.IsDirectory == true && destinationAfter == null) return VerifiedMoveOutcome.NotMoved;
+                throw new RemoteMoveUncertainException("当前目录归档结果不确定，请检查后再处理");
+            }
+            catch (RemoteMoveUncertainException) { throw; }
+            catch (Exception ex) { throw new RemoteMoveUncertainException("当前目录归档结果不确定，不能自动重试", ex); }
+        }
+
         /// <summary>
         /// Experimental server-side copy into a unique candidate tree. Each copy uses its own
         /// exclusive work directory; uncertain outcomes are left in place and never retried.

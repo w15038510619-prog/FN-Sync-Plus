@@ -407,6 +407,15 @@ namespace FNSyncPlus.Tests
                         catch (ArgumentException) { publicationRejected++; }
                     }
                     Assert(publicationRejected == 4, "候选目录发布在联网前拒绝越界或错误目录");
+                    int archiveRejected = 0;
+                    foreach (var pair in new[] { ("/backup", "backup/.fnsync/projections/archive-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                        ("backup", "other/.fnsync/projections/archive-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                        ("backup", "backup/.fnsync/projections/archive-not-a-guid"), ("backup", "backup/../outside") })
+                    {
+                        try { await moveProvider.MoveCurrentToArchiveAsync(pair.Item1, pair.Item2); }
+                        catch (ArgumentException) { archiveRejected++; }
+                    }
+                    Assert(archiveRejected == 4, "当前目录归档在联网前拒绝越界或错误归档目录");
                 }
                 var versionProvider = new FaultInjectingProvider(root);
                 var versions = new VersionedManifestStore();
@@ -1511,6 +1520,7 @@ namespace FNSyncPlus.Tests
                 await TestInitialOfflineRetryAsync(root);
                 await TestTestLabIsolationAsync(root);
                 await TestFirstPhysicalProjectionAsync(root);
+                await TestNextPhysicalProjectionAsync(root);
             }
             finally
             {
@@ -1971,6 +1981,88 @@ namespace FNSyncPlus.Tests
                 "首次连接时网络不可用会安排重试，主动断开可取消");
         }
 
+        static async Task TestNextPhysicalProjectionAsync(string root)
+        {
+            string source = Path.Combine(root, "projection-next-source");
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "old.txt"), "initial content");
+            var provider = new FaultInjectingProvider(root);
+            var backup = new ExperimentalVersionedBackup();
+            var first = await backup.CreateNewAsync(provider, source, "projection-next");
+            var oldPlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, "projection-next");
+            var oldPublication = await new ExperimentalFirstProjection().PublishAsync(provider, "projection-next", oldPlan);
+            File.Move(Path.Combine(source, "old.txt"), Path.Combine(source, "new.txt"));
+            var second = await backup.RunAsync(provider, source, "projection-next");
+            var nextPlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, "projection-next");
+            string currentFile = Path.Combine(root, "projection-next", "current", "old.txt");
+            File.WriteAllText(currentFile, "outside modification");
+            bool changedRejected = false;
+            try { await new ExperimentalNextProjection().PublishAsync(provider, "projection-next", oldPlan, oldPublication, nextPlan); }
+            catch (InvalidDataException) { changedRejected = true; }
+            Assert(changedRejected && File.ReadAllText(currentFile) == "outside modification" &&
+                Directory.Exists(Path.Combine(root, nextPlan.CandidateRoot.Replace('/', Path.DirectorySeparatorChar))),
+                "旧当前目录被外部修改时拒绝归档并保留候选目录");
+            File.WriteAllText(currentFile, "initial content");
+            var published = await new ExperimentalNextProjection().PublishAsync(provider, "projection-next", oldPlan, oldPublication, nextPlan);
+            string archive = Path.Combine(root, published.ArchivedRoot.Replace('/', Path.DirectorySeparatorChar));
+            string current = Path.Combine(root, "projection-next", "current");
+            var history = second.Snapshot.Manifest.History.Single(h => h.OriginalRel == "old.txt" && h.Reason == "renamed");
+            string historyRestore = Path.Combine(root, "projection-next-history-restore");
+            bool restored = await new RestoreEngine(new ManifestManager()).RunRestoreHistoryFileAsync(provider, "projection-next", historyRestore, history);
+            Assert(first.Snapshot.Id != second.Snapshot.Id && File.ReadAllText(Path.Combine(current, "new.txt")) == "initial content" &&
+                !File.Exists(Path.Combine(current, "old.txt")) && File.ReadAllText(Path.Combine(archive, "old.txt")) == "initial content" &&
+                restored && File.ReadAllText(Path.Combine(historyRestore, "old.txt")) == "initial content",
+                "重命名后当前目录仅有新名称，旧目录归档且历史内容可恢复");
+            File.WriteAllText(Path.Combine(source, "new.txt"), "third content");
+            var third = await backup.RunAsync(provider, source, "projection-next");
+            var thirdPlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, "projection-next");
+            var next = await new ExperimentalNextProjection().PublishAsync(provider, "projection-next", nextPlan, published.Current, thirdPlan);
+            Assert(next.Current.VersionId == third.Snapshot.Id && File.ReadAllText(Path.Combine(current, "new.txt")) == "third content" &&
+                File.ReadAllText(Path.Combine(root, next.ArchivedRoot.Replace('/', Path.DirectorySeparatorChar), "new.txt")) == "initial content" &&
+                File.ReadAllText(Path.Combine(archive, "old.txt")) == "initial content",
+                "连续物理增量发布保留此前两代内容");
+
+            var failing = new FaultInjectingProvider(root) { FailAfterArchiveMove = false };
+            var uncertainFirst = await backup.CreateNewAsync(failing, source, "projection-archive-uncertain");
+            var uncertainOld = await new ExperimentalPhysicalSnapshot().PrepareAsync(failing, "projection-archive-uncertain");
+            var uncertainPublication = await new ExperimentalFirstProjection().PublishAsync(failing, "projection-archive-uncertain", uncertainOld);
+            File.WriteAllText(Path.Combine(source, "new.txt"), "later content");
+            var uncertainNext = await backup.RunAsync(failing, source, "projection-archive-uncertain");
+            var uncertainPlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(failing, "projection-archive-uncertain");
+            failing.FailAfterArchiveMove = true;
+            bool archiveUncertain = false;
+            try { await new ExperimentalNextProjection().PublishAsync(failing, "projection-archive-uncertain", uncertainOld, uncertainPublication, uncertainPlan); }
+            catch (IOException) { archiveUncertain = true; }
+            var competing = await ExperimentalRemoteLease.TryAcquireAsync(failing, "projection-archive-uncertain");
+            string archiveParent = Path.Combine(root, "projection-archive-uncertain", ".fnsync", "projections");
+            string uncertainArchive = Directory.GetDirectories(archiveParent, "archive-*").Single();
+            Assert(archiveUncertain && competing == null && !Directory.Exists(Path.Combine(root, "projection-archive-uncertain", "current")) &&
+                File.ReadAllText(Path.Combine(uncertainArchive, "current", "new.txt")) == "third content" &&
+                Directory.Exists(Path.Combine(root, uncertainPlan.CandidateRoot.Replace('/', Path.DirectorySeparatorChar))) &&
+                (await new VersionedManifestStore().LoadForWritingAsync(failing, "projection-archive-uncertain"))?.Id == uncertainNext.Snapshot.Id &&
+                uncertainFirst.Snapshot.Id != uncertainNext.Snapshot.Id,
+                "归档后响应丢失保留锁、旧目录、新候选和已提交备份");
+            var moveFailing = new FaultInjectingProvider(root);
+            await backup.CreateNewAsync(moveFailing, source, "projection-move-uncertain");
+            var moveOld = await new ExperimentalPhysicalSnapshot().PrepareAsync(moveFailing, "projection-move-uncertain");
+            var movePublication = await new ExperimentalFirstProjection().PublishAsync(moveFailing, "projection-move-uncertain", moveOld);
+            File.WriteAllText(Path.Combine(source, "new.txt"), "last content");
+            var moveVersion = await backup.RunAsync(moveFailing, source, "projection-move-uncertain");
+            var movePlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(moveFailing, "projection-move-uncertain");
+            moveFailing.FailAfterCandidateMove = true;
+            bool moveUncertain = false;
+            try { await new ExperimentalNextProjection().PublishAsync(moveFailing, "projection-move-uncertain", moveOld, movePublication, movePlan); }
+            catch (IOException) { moveUncertain = true; }
+            var otherWriter = await ExperimentalRemoteLease.TryAcquireAsync(moveFailing, "projection-move-uncertain");
+            string archiveBase = Path.Combine(root, "projection-move-uncertain", ".fnsync", "projections");
+            string movedArchive = Directory.GetDirectories(archiveBase, "archive-*").Single();
+            Assert(moveUncertain && otherWriter == null &&
+                File.ReadAllText(Path.Combine(root, "projection-move-uncertain", "current", "new.txt")) == "last content" &&
+                File.ReadAllText(Path.Combine(movedArchive, "current", "new.txt")) == "later content" &&
+                (await new VersionedManifestStore().LoadForWritingAsync(moveFailing, "projection-move-uncertain"))?.Id == moveVersion.Snapshot.Id,
+                "新目录移动后响应丢失保留锁及新旧内容");
+        }
+
         static async Task TestFirstPhysicalProjectionAsync(string root)
         {
             string source = Path.Combine(root, "projection-publish-source");
@@ -2099,6 +2191,7 @@ namespace FNSyncPlus.Tests
             public bool CorruptObjectUpload { get; set; }
             public bool CorruptProjectionUpload { get; set; }
             public bool FailAfterCandidateMove { get; set; }
+            public bool FailAfterArchiveMove { get; set; }
             public bool FailReuseCopy { get; set; }
             public bool FailReuseCopyAfter { get; set; }
             public Action? AfterObjectUpload { get; set; }
@@ -2151,6 +2244,22 @@ namespace FNSyncPlus.Tests
                 if (Directory.Exists(destination) || File.Exists(destination)) return Task.FromResult(VerifiedMoveOutcome.DestinationExists);
                 Directory.Move(source, destination);
                 if (FailAfterCandidateMove) throw new IOException("模拟移动后响应丢失");
+                return Task.FromResult(VerifiedMoveOutcome.Moved);
+            }
+            public Task<VerifiedMoveOutcome> MoveCurrentToArchiveAsync(string backupRoot, string archiveDirectory, CancellationToken ct = default)
+            {
+                ct.ThrowIfCancellationRequested();
+                string root = PathHelper.NormalizeRelPath(backupRoot);
+                string archive = PathHelper.NormalizeRelPath(archiveDirectory);
+                string prefix = $"{root}/.fnsync/projections/archive-";
+                if (!PathHelper.IsSafeRelativePath(root) || !PathHelper.IsSafeRelativePath(archive) ||
+                    !archive.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !Guid.TryParseExact(archive[prefix.Length..], "N", out _))
+                    throw new ArgumentException("无效的测试归档目录");
+                string source = Path.Combine(rootPath, root.Replace('/', Path.DirectorySeparatorChar), "current");
+                string destination = Path.Combine(rootPath, archive.Replace('/', Path.DirectorySeparatorChar), "current");
+                if (Directory.Exists(destination) || File.Exists(destination)) return Task.FromResult(VerifiedMoveOutcome.DestinationExists);
+                Directory.Move(source, destination);
+                if (FailAfterArchiveMove) throw new IOException("模拟归档后响应丢失");
                 return Task.FromResult(VerifiedMoveOutcome.Moved);
             }
             public async Task<string?> CopyIntoNewObjectAsync(string sourcePath, string backupRoot, string expectedSha256, long expectedSize, CancellationToken ct = default)

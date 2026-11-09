@@ -44,6 +44,8 @@ namespace FNSyncPlus.Core.Storage
     {
         Task<VerifiedMoveOutcome> MoveCandidateDirectoryAsync(string backupRoot, string candidateDirectory,
             CancellationToken ct = default);
+        Task<VerifiedMoveOutcome> MoveCurrentToArchiveAsync(string backupRoot, string archiveDirectory,
+            CancellationToken ct = default);
     }
 
     /// <summary>Experimental server-side copy into a new, independently verified object.</summary>
