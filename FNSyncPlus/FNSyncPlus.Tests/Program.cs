@@ -294,6 +294,48 @@ namespace FNSyncPlus.Tests
                 Assert(!new FnOsFileListResponse().IsSuccess && !new FnOsFileListResponse { Result = "fail", Files = new() }.IsSuccess, "fnOS 文件列表拒绝空响应或明确失败");
                 var versionProvider = new FaultInjectingProvider(root);
                 var versions = new VersionedManifestStore();
+                string newSource = Path.Combine(root, "version-new-source");
+                Directory.CreateDirectory(Path.Combine(newSource, "空目录"));
+                string newLongName = new string('长', 100) + ".txt";
+                File.WriteAllText(Path.Combine(newSource, newLongName), "new initial content");
+                var newBackup = new ExperimentalVersionedBackup();
+                var created = await newBackup.CreateNewAsync(versionProvider, newSource, "version-new-target");
+                string newRestore = Path.Combine(root, "version-new-restore");
+                var newRestoreReport = await new RestoreEngine(new ManifestManager()).RunRestoreVersionedAsync(versionProvider, "version-new-target", newRestore);
+                Assert(created.Snapshot.Sequence == 1 && created.UploadedFiles == 1 && newRestoreReport.RestoredFiles == 1 &&
+                    File.ReadAllText(Path.Combine(newRestore, newLongName)) == "new initial content" && Directory.Exists(Path.Combine(newRestore, "空目录")),
+                    "新目标首批备份只提交完整版本，可恢复长文件名和空目录");
+                string occupiedTarget = Path.Combine(root, "version-new-occupied");
+                Directory.CreateDirectory(occupiedTarget);
+                File.WriteAllText(Path.Combine(occupiedTarget, "keep.txt"), "existing target");
+                bool occupiedRejected = false;
+                try { await newBackup.CreateNewAsync(versionProvider, newSource, "version-new-occupied"); }
+                catch (IOException) { occupiedRejected = true; }
+                Assert(occupiedRejected && File.ReadAllText(Path.Combine(occupiedTarget, "keep.txt")) == "existing target" &&
+                    !Directory.Exists(Path.Combine(occupiedTarget, ".fnsync")), "新建备份拒绝复用已有目录并保留原内容");
+                using (var initialCancel = new CancellationTokenSource())
+                {
+                    initialCancel.Cancel();
+                    bool canceledInitial = false;
+                    try { await newBackup.CreateNewAsync(versionProvider, newSource, "version-new-canceled", initialCancel.Token); }
+                    catch (OperationCanceledException) { canceledInitial = true; }
+                    Assert(canceledInitial && !Directory.Exists(Path.Combine(root, "version-new-canceled")), "首批备份预检取消时不创建远端目录");
+                }
+                var corruptInitialProvider = new FaultInjectingProvider(root) { CorruptObjectUpload = true };
+                bool initialFailure = false;
+                try { await newBackup.CreateNewAsync(corruptInitialProvider, newSource, "version-new-failed"); }
+                catch (InvalidDataException) { initialFailure = true; }
+                Assert(initialFailure && Directory.Exists(Path.Combine(root, "version-new-failed")) &&
+                    await versions.LoadAsync(versionProvider, "version-new-failed") == null,
+                    "首批上传损坏时保留测试目录但不提交空清单");
+                async Task<bool> TryCreateConcurrentAsync()
+                {
+                    try { await newBackup.CreateNewAsync(versionProvider, newSource, "version-new-race"); return true; }
+                    catch (IOException) { return false; }
+                }
+                var newRace = await Task.WhenAll(Task.Run(TryCreateConcurrentAsync), Task.Run(TryCreateConcurrentAsync));
+                Assert(newRace.Count(x => x) == 1 && (await versions.LoadAsync(versionProvider, "version-new-race"))?.Manifest.Files.Count == 1,
+                    "两个创建者竞争新目标时只有一方可提交首个版本");
                 bool unsafeTargetRejected = false;
                 try { await versions.SaveAsync(versionProvider, "../outside", new Manifest(), null); }
                 catch (ArgumentException) { unsafeTargetRejected = true; }

@@ -699,12 +699,22 @@ namespace FNSyncPlus.WinUI.ViewModels
                         destSub = item.TargetSubFolder;
                     }
 
-                    var mkRes = await fnProvider.CreateDirectoryAsync(destSub);
-                    if (!mkRes.Success && mkRes.ErrorCode != 17)
+                    try
+                    {
+                        var created = await fnProvider.TryCreateDirectoryExclusiveAsync(destSub);
+                        if (created != ExclusiveDirectoryResult.Created)
+                        {
+                            item.IsFailed = true;
+                            item.StatusText = "❌ 目标目录已存在";
+                            item.ErrorMessage = "飞牛上已有同名目录，未建立任务。请选择其他备份位置，避免覆盖已有文件。";
+                            continue;
+                        }
+                    }
+                    catch (Exception ex)
                     {
                         item.IsFailed = true;
                         item.StatusText = "❌ 创建个人空间目录失败";
-                        item.ErrorMessage = mkRes.ErrorMessage;
+                        item.ErrorMessage = ex.Message;
                         continue;
                     }
 
@@ -740,7 +750,10 @@ namespace FNSyncPlus.WinUI.ViewModels
                     _settings.Save();
                 }
 
-                StatusMessage = $"全部 {createdCount} 个个人空间同步任务已成功建立并启动！";
+                int fnFailedCount = PlannedTasks.Count - createdCount;
+                StatusMessage = fnFailedCount == 0
+                    ? $"{createdCount} 个个人空间同步任务已建立并启动。"
+                    : $"已建立 {createdCount} 个任务，{fnFailedCount} 个未建立；请查看各项原因。";
                 
                 // 全部创建成功后，重置会话，杜绝残留旧文件夹记录
                 if (createdCount == PlannedTasks.Count)

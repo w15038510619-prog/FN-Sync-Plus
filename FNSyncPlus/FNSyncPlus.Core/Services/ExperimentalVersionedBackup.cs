@@ -18,7 +18,12 @@ public sealed class ExperimentalVersionedBackup
     private readonly VersionedManifestStore _versions = new();
     private readonly ImmutableContentStore _objects = new();
 
-    public async Task<Result> RunAsync(INasStorageProvider provider, string sourceDirectory, string target,
+    public Task<Result> RunAsync(INasStorageProvider provider, string sourceDirectory, string target,
+        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart)
+        => RunCoreAsync(provider, sourceDirectory, target, false, token, strategy);
+
+    /// <summary>Creates a brand-new destination and commits its first complete version; never adopts an existing directory.</summary>
+    public async Task<Result> CreateNewAsync(INasStorageProvider provider, string sourceDirectory, string target,
         CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart)
     {
         ArgumentNullException.ThrowIfNull(provider);
@@ -27,9 +32,30 @@ public sealed class ExperimentalVersionedBackup
             throw new DirectoryNotFoundException("备份源目录不存在");
         if (strategy is not (BackupStrategy.Smart or BackupStrategy.Archive))
             throw new NotSupportedException("实验性同步尚不支持镜像删除");
+        if (provider is not IExclusiveDirectoryProvider exclusive)
+            throw new NotSupportedException("存储不支持独占创建新的备份目录");
+        var preflight = Scan(PathHelper.EnsureLongPathPrefix(sourceDirectory), token);
+        foreach (var file in preflight.Files)
+            await HashSourceAsync(file.RelativePath, file.FullPath, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        if (await exclusive.TryCreateDirectoryExclusiveAsync(target, token).ConfigureAwait(false) != ExclusiveDirectoryResult.Created)
+            throw new IOException("备份目标已存在，拒绝复用或覆盖");
+        return await RunCoreAsync(provider, sourceDirectory, target, true, token, strategy).ConfigureAwait(false);
+    }
+
+    private async Task<Result> RunCoreAsync(INasStorageProvider provider, string sourceDirectory, string target,
+        bool creating, CancellationToken token, BackupStrategy strategy)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("备份目标必须是安全的相对路径", nameof(target));
+        if (string.IsNullOrWhiteSpace(sourceDirectory) || !Directory.Exists(sourceDirectory))
+            throw new DirectoryNotFoundException("备份源目录不存在");
+        if (strategy is not (BackupStrategy.Smart or BackupStrategy.Archive))
+            throw new NotSupportedException("实验性同步尚不支持镜像删除");
         string sourceRoot = PathHelper.EnsureLongPathPrefix(sourceDirectory);
-        var initial = await _versions.LoadForWritingAsync(provider, target, token).ConfigureAwait(false)
-            ?? throw new InvalidDataException("目标没有版本化清单，必须先进行安全迁移");
+        var initial = await _versions.LoadForWritingAsync(provider, target, token).ConfigureAwait(false);
+        if (creating && initial != null) throw new InvalidDataException("新目标已出现版本化清单，拒绝覆盖");
+        if (!creating && initial == null) throw new InvalidDataException("目标没有版本化清单，必须先进行安全迁移");
         var lease = await ExperimentalRemoteLease.TryAcquireAsync(provider, target, token).ConfigureAwait(false)
             ?? throw new IOException("目标被其他写入者占用或存在未释放的锁");
         bool commitMayHaveStarted = false;
@@ -37,12 +63,12 @@ public sealed class ExperimentalVersionedBackup
         Exception? primaryFailure = null;
         try
         {
-            var oldSnapshot = await _versions.LoadForWritingAsync(provider, target, token).ConfigureAwait(false)
-                ?? throw new InvalidDataException("目标没有版本化清单，必须先进行安全迁移");
-            if (!string.Equals(initial.Id, oldSnapshot.Id, StringComparison.Ordinal))
+            var oldSnapshot = await _versions.LoadForWritingAsync(provider, target, token).ConfigureAwait(false);
+            if (!string.Equals(initial?.Id, oldSnapshot?.Id, StringComparison.Ordinal))
                 throw new IOException("获取锁期间备份版本发生变化，请重新扫描");
-            var manifest = JsonSerializer.Deserialize<Manifest>(JsonSerializer.SerializeToUtf8Bytes(oldSnapshot.Manifest))
-                ?? throw new InvalidDataException("无法复制版本化清单");
+            var manifest = oldSnapshot == null ? new Manifest() :
+                JsonSerializer.Deserialize<Manifest>(JsonSerializer.SerializeToUtf8Bytes(oldSnapshot.Manifest))
+                    ?? throw new InvalidDataException("无法复制版本化清单");
             if (manifest.Files == null || manifest.Directories == null || manifest.History == null)
                 throw new InvalidDataException("版本化清单字段不完整");
             if (!string.IsNullOrWhiteSpace(manifest.SourceRoot) &&
@@ -237,7 +263,7 @@ public sealed class ExperimentalVersionedBackup
             manifest.UpdatedAt = DateTimeOffset.UtcNow;
             token.ThrowIfCancellationRequested();
             commitMayHaveStarted = true;
-            var snapshot = await _versions.SaveAsync(provider, target, manifest, oldSnapshot.Id, token).ConfigureAwait(false);
+            var snapshot = await _versions.SaveAsync(provider, target, manifest, oldSnapshot?.Id, token).ConfigureAwait(false);
             committed = true;
             return new Result(snapshot, uploaded, unchanged, renamed, strategy == BackupStrategy.Smart ? deleted.Count : 0);
         }
