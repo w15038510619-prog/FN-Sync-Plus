@@ -108,6 +108,7 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             IsScanning = true;
             RestoreStatusText = "正在从 NAS 备份根目录检索备份包清单...";
+            DetailedErrorMessage = string.Empty;
             DiscoveredPackages.Clear();
             PackageFiles.Clear();
             HistoryFilesList.Clear();
@@ -116,14 +117,15 @@ namespace FNSyncPlus.WinUI.ViewModels
             try
             {
                 List<DiscoveredBackupPackage> packages;
+                var scanWarnings = new List<string>();
                 if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
                 {
                     string relScan = NasScanRoot == "我的文件" ? "" : NasScanRoot.TrimStart('/');
-                    packages = await _restoreEngine.DiscoverBackupPackagesAsync(fnProvider, relScan);
+                    packages = await _restoreEngine.DiscoverBackupPackagesAsync(fnProvider, relScan, warnings: scanWarnings);
                 }
                 else
                 {
-                    packages = await _restoreEngine.DiscoverBackupPackagesAsync(NasScanRoot.Trim());
+                    packages = await _restoreEngine.DiscoverBackupPackagesAsync(NasScanRoot.Trim(), warnings: scanWarnings);
                 }
 
                 foreach (var p in packages)
@@ -134,11 +136,17 @@ namespace FNSyncPlus.WinUI.ViewModels
                 if (DiscoveredPackages.Count > 0)
                 {
                     SelectedPackage = DiscoveredPackages[0];
-                    RestoreStatusText = $"检索完成，发现 {DiscoveredPackages.Count} 个完整备份包。";
+                    RestoreStatusText = $"检索完成，发现 {DiscoveredPackages.Count} 个备份清单。";
                 }
                 else
                 {
                     RestoreStatusText = "未在指定位置找到包含有效清单 (manifest.json) 的备份包。";
+                }
+                if (scanWarnings.Count > 0)
+                {
+                    DetailedErrorMessage = string.Join(System.Environment.NewLine, scanWarnings);
+                    foreach (var warning in scanWarnings) RestoreLogs.Add($"[扫描警告] {warning}");
+                    RestoreStatusText = $"扫描未完成：发现 {DiscoveredPackages.Count} 个备份清单，{scanWarnings.Count} 处读取失败；悬停查看原因。";
                 }
             }
             catch (Exception ex)
@@ -166,6 +174,8 @@ namespace FNSyncPlus.WinUI.ViewModels
             try
             {
                 List<RestorePreviewItem> files;
+                var historyItems = new List<ManifestHistoryEntry>();
+                Exception? historyError = null;
                 if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
                 {
                     files = await _restoreEngine.PreviewBackupAsync(fnProvider, pkg.NasFolderUnc);
@@ -174,19 +184,17 @@ namespace FNSyncPlus.WinUI.ViewModels
                         var mfMgr = new ManifestManager();
                         var manifest = await mfMgr.LoadManifestAsync(fnProvider, pkg.NasFolderUnc);
                         if (manifest?.History != null)
-                        {
-                            foreach (var h in manifest.History)
-                            {
-                                HistoryFilesList.Add(h);
-                            }
-                        }
+                            historyItems.AddRange(manifest.History);
                     }
-                    catch { }
+                    catch (Exception ex) { historyError = ex; }
                 }
                 else
                 {
                     files = await _restoreEngine.PreviewBackupAsync(pkg.NasFolderUnc);
                 }
+
+                if (!ReferenceEquals(SelectedPackage, pkg)) return;
+                foreach (var history in historyItems) HistoryFilesList.Add(history);
 
                 foreach (var f in files)
                 {
@@ -199,10 +207,17 @@ namespace FNSyncPlus.WinUI.ViewModels
                         Sha256 = f.Sha256
                     });
                 }
+                if (historyError != null)
+                {
+                    DetailedErrorMessage = historyError.ToString();
+                    RestoreStatusText = "文件预览已加载，但历史清单读取失败；悬停查看原因。";
+                }
             }
             catch (Exception ex)
             {
+                if (!ReferenceEquals(SelectedPackage, pkg)) return;
                 DetailedErrorMessage = ex.ToString();
+                RestoreStatusText = "备份清单读取失败；悬停查看原因。";
             }
         }
 

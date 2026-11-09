@@ -97,12 +97,13 @@ namespace FNSyncPlus.Core.Services
         /// 在 NAS 备份根目录下自动发现所有包含清单元数据的备份任务包（完全不依赖原电脑本地配置）
         /// 例如在 \\server\私人备份 下自动发现【工作资料】、【项目文件】、【照片备份】
         /// </summary>
-        public async Task<List<DiscoveredBackupPackage>> DiscoverBackupPackagesAsync(string nasBackupRootUnc, CancellationToken cancellationToken = default)
+        public async Task<List<DiscoveredBackupPackage>> DiscoverBackupPackagesAsync(string nasBackupRootUnc, CancellationToken cancellationToken = default,
+            ICollection<string>? warnings = null)
         {
             var result = new List<DiscoveredBackupPackage>();
             if (string.IsNullOrWhiteSpace(nasBackupRootUnc) || !Directory.Exists(nasBackupRootUnc))
             {
-                return result;
+                throw new DirectoryNotFoundException("备份扫描目录不存在或无法访问");
             }
 
             await Task.Run(async () =>
@@ -113,12 +114,12 @@ namespace FNSyncPlus.Core.Services
                 // 1. 检查根目录本身是否就是一个备份包
                 string rootMeta = Path.Combine(longRoot, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName);
                 string legacyRootMeta = Path.Combine(longRoot, Manifest.LegacyManifestFileName);
-                if (File.Exists(rootMeta) || File.Exists(legacyRootMeta))
+                try
                 {
-                    try
+                    if (ManifestFilePresent(rootMeta) || ManifestFilePresent(legacyRootMeta))
                     {
                         var m = await _manifestManager.LoadManifestAsync(nasBackupRootUnc, cancellationToken);
-                        if (m.Files.Count > 0)
+                        if (!m.IsNew)
                         {
                             result.Add(new DiscoveredBackupPackage
                             {
@@ -132,14 +133,16 @@ namespace FNSyncPlus.Core.Services
                             });
                         }
                     }
-                    catch { }
                 }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { ReportDiscoveryIssue(warnings, "读取扫描根目录清单失败", ex); }
 
                 // 2. 扫描根目录下的所有子文件夹
                 try
                 {
                     foreach (var sub in rootDi.EnumerateDirectories())
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         if (sub.Name.Equals(Manifest.MetadataDirName, StringComparison.OrdinalIgnoreCase) ||
                             sub.Name.StartsWith("$") ||
                             sub.Name.Equals(".recycle", StringComparison.OrdinalIgnoreCase))
@@ -151,9 +154,9 @@ namespace FNSyncPlus.Core.Services
                         string subMeta = Path.Combine(sub.FullName, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName);
                         string legacySubMeta = Path.Combine(sub.FullName, Manifest.LegacyManifestFileName);
 
-                        if (File.Exists(subMeta) || File.Exists(legacySubMeta))
+                        try
                         {
-                            try
+                            if (ManifestFilePresent(subMeta) || ManifestFilePresent(legacySubMeta))
                             {
                                 var m = await _manifestManager.LoadManifestAsync(subUnc, cancellationToken);
                                 result.Add(new DiscoveredBackupPackage
@@ -167,11 +170,13 @@ namespace FNSyncPlus.Core.Services
                                     LastUpdated = m.UpdatedAt
                                 });
                             }
-                            catch { }
                         }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex) { ReportDiscoveryIssue(warnings, $"读取备份目录失败: {sub.Name}", ex); }
                     }
                 }
-                catch { }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { ReportDiscoveryIssue(warnings, "枚举备份目录失败", ex); }
             }, cancellationToken);
 
             return result;
@@ -183,21 +188,23 @@ namespace FNSyncPlus.Core.Services
         public async Task<List<DiscoveredBackupPackage>> DiscoverBackupPackagesAsync(
             INasStorageProvider storageProvider, 
             string nasBackupRootRel = "", 
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            ICollection<string>? warnings = null)
         {
             var result = new List<DiscoveredBackupPackage>();
-            if (storageProvider == null || !storageProvider.IsAuthenticated) return result;
+            if (storageProvider == null || !storageProvider.IsAuthenticated) throw new InvalidOperationException("存储未连接，无法扫描备份");
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (storageProvider is SmbStorageProvider && (nasBackupRootRel.StartsWith(@"\\") || nasBackupRootRel.Contains(@":\")))
             {
-                return await DiscoverBackupPackagesAsync(nasBackupRootRel, cancellationToken).ConfigureAwait(false);
+                return await DiscoverBackupPackagesAsync(nasBackupRootRel, cancellationToken, warnings).ConfigureAwait(false);
             }
 
             try
             {
                 // 1. 检查根目录本身是否包含清单
                 var rootManifest = await _manifestManager.LoadManifestAsync(storageProvider, nasBackupRootRel, cancellationToken).ConfigureAwait(false);
-                if (rootManifest.Files.Count > 0)
+                if (!rootManifest.IsNew)
                 {
                     result.Add(new DiscoveredBackupPackage
                     {
@@ -215,12 +222,13 @@ namespace FNSyncPlus.Core.Services
                 var entries = await storageProvider.ListEntriesAsync(nasBackupRootRel, cancellationToken).ConfigureAwait(false);
                 foreach (var entry in entries)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (entry.IsDirectory && !entry.Name.StartsWith(".") && !entry.Name.StartsWith("$"))
                     {
                         try
                         {
                             var subManifest = await _manifestManager.LoadManifestAsync(storageProvider, entry.RelativePath, cancellationToken).ConfigureAwait(false);
-                            if (subManifest.Files.Count > 0)
+                            if (!subManifest.IsNew)
                             {
                                 result.Add(new DiscoveredBackupPackage
                                 {
@@ -234,13 +242,35 @@ namespace FNSyncPlus.Core.Services
                                 });
                             }
                         }
-                        catch { }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex) { ReportDiscoveryIssue(warnings, $"读取备份目录失败: {entry.Name}", ex); }
                     }
                 }
             }
-            catch { }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { ReportDiscoveryIssue(warnings, "扫描备份目录失败", ex); }
 
             return result;
+        }
+
+        private void ReportDiscoveryIssue(ICollection<string>? warnings, string context, Exception error)
+        {
+            string message = $"{context}: {error.Message}";
+            Log("WARN", message);
+            if (warnings == null) throw new IOException(message, error);
+            warnings.Add(message);
+        }
+
+        private static bool ManifestFilePresent(string path)
+        {
+            try
+            {
+                if ((File.GetAttributes(path) & FileAttributes.Directory) != 0)
+                    throw new InvalidDataException("清单路径是目录");
+                return true;
+            }
+            catch (FileNotFoundException) { return false; }
+            catch (DirectoryNotFoundException) { return false; }
         }
 
         /// <summary>

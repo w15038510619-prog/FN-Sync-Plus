@@ -186,6 +186,17 @@ namespace FNSyncPlus.Tests
                 settings.Tasks.Add(new SyncTask { TaskName = "失败测试", TaskId = "task_fail_legitimate", SourceFolder = @"C:\Fake" });
                 settings.Save();
                 Assert(AppSettings.LoadFromPath(config).Tasks.Single().TaskName == "失败测试", "合法任务名称和路径在加载后保留");
+                Assert(PathHelper.EnsureLongPathPrefix(@"C:/folder/file.txt") == @"\\?\C:\folder\file.txt" &&
+                    PathHelper.EnsureLongPathPrefix(@"C:/") == @"\\?\C:\" &&
+                    PathHelper.EnsureLongPathPrefix(@"C:\\\") == @"\\?\C:\" &&
+                    PathHelper.EnsureLongPathPrefix(@"\\?\C:\") == @"\\?\C:\" &&
+                    PathHelper.EnsureLongPathPrefix(@"C:relative.txt") == @"C:relative.txt" &&
+                    PathHelper.EnsureLongPathPrefix(@"//server/share/file.txt") == @"\\?\UNC\server\share\file.txt",
+                    "长路径前缀规范化分隔符并保留盘符根目录");
+                string mixedPathTest = Path.Combine(root, "mixed-separator.txt");
+                File.WriteAllText(mixedPathTest, "mixed separators");
+                Assert(HashHelper.ComputeFileSha256(mixedPathTest.Replace('\\', '/')) == HashHelper.ComputeFileSha256(mixedPathTest),
+                    "带正斜杠的本地路径可正常读取并计算哈希");
                 File.WriteAllText(config, "{broken");
                 bool failed = false;
                 try { AppSettings.LoadFromPath(config); } catch (IOException) { failed = true; }
@@ -421,6 +432,55 @@ namespace FNSyncPlus.Tests
                     string path = Path.Combine(full, ".fnsync", "manifest.json");
                     return (folder, path, File.ReadAllBytes(path));
                 }
+                await MakeLegacyAsync("scan-root/good", 4);
+                Directory.CreateDirectory(Path.Combine(root, "scan-root", "empty"));
+                Directory.CreateDirectory(Path.Combine(root, "scan-root", "completely-empty"));
+                Directory.CreateDirectory(Path.Combine(root, "scan-root", "bad"));
+                await manifestManager.SaveManifestAtomicAsync(versionProvider, "scan-root/empty", new Manifest {
+                    Directories = new() { new ManifestDirEntry { OriginalRel = "空目录", StoredRel = "空目录" } }
+                });
+                await manifestManager.SaveManifestAtomicAsync(versionProvider, "scan-root/completely-empty", new Manifest());
+                var absentManifest = await manifestManager.LoadManifestAsync(versionProvider, "scan-root/bad");
+                var emptyManifest = await manifestManager.LoadManifestAsync(versionProvider, "scan-root/completely-empty");
+                Assert(absentManifest.IsNew && !emptyManifest.IsNew && emptyManifest.Files.Count == 0 && emptyManifest.Directories.Count == 0,
+                    "无清单目录与真正的空备份可区分");
+                var scanProvider = new FaultInjectingProvider(root) { FailItemSuffix = "/bad/.fnsync" };
+                var scanWarnings = new List<string>();
+                var discovered = await historyEngine.DiscoverBackupPackagesAsync(scanProvider, "scan-root", warnings: scanWarnings);
+                Assert(discovered.Any(p => p.PackageName == "good") && discovered.Any(p => p.PackageName == "empty" && p.FileCount == 0) &&
+                    discovered.Any(p => p.PackageName == "completely-empty" && p.FileCount == 0) &&
+                    scanWarnings.Count == 1 && scanWarnings[0].Contains("bad", StringComparison.Ordinal),
+                    "扫描发现空目录备份并报告无法读取的目录");
+                scanProvider.FailItemSuffix = null;
+                scanProvider.FailListPath = "scan-root";
+                bool scanFailureReported = false;
+                try { await historyEngine.DiscoverBackupPackagesAsync(scanProvider, "scan-root"); }
+                catch (IOException) { scanFailureReported = true; }
+                Assert(scanFailureReported, "备份根目录读取失败不会被误报为空结果");
+                using var canceledScanToken = new CancellationTokenSource();
+                canceledScanToken.Cancel();
+                bool scanCanceled = false;
+                try { await historyEngine.DiscoverBackupPackagesAsync(scanProvider, "scan-root", canceledScanToken.Token); }
+                catch (OperationCanceledException) { scanCanceled = true; }
+                Assert(scanCanceled, "取消备份扫描会传播取消状态");
+                bool missingScanRejected = false;
+                try { await historyEngine.DiscoverBackupPackagesAsync(Path.Combine(root, "missing-scan-root")); }
+                catch (DirectoryNotFoundException) { missingScanRejected = true; }
+                Assert(missingScanRejected, "不存在的本地扫描目录不会被误报为无备份");
+                string badLocalMetadata = Path.Combine(root, "scan-root", "bad", ".fnsync");
+                Directory.CreateDirectory(badLocalMetadata);
+                File.WriteAllText(Path.Combine(badLocalMetadata, "manifest.json"), "{broken");
+                var localScanWarnings = new List<string>();
+                var localDiscovered = await historyEngine.DiscoverBackupPackagesAsync(Path.Combine(root, "scan-root"), warnings: localScanWarnings);
+                Assert(localDiscovered.Any(p => p.PackageName == "good") && localDiscovered.Any(p => p.PackageName == "empty") &&
+                    localDiscovered.Any(p => p.PackageName == "completely-empty") &&
+                    localScanWarnings.Count == 1 && localScanWarnings[0].Contains("bad", StringComparison.Ordinal),
+                    "本地扫描保留有效结果并报告损坏的清单");
+                Directory.CreateDirectory(Path.Combine(root, "scan-root", "bad-type", ".fnsync", "manifest.json"));
+                var invalidTypeWarnings = new List<string>();
+                var validDespiteInvalidType = await historyEngine.DiscoverBackupPackagesAsync(Path.Combine(root, "scan-root"), warnings: invalidTypeWarnings);
+                Assert(validDespiteInvalidType.Any(p => p.PackageName == "good") &&
+                    invalidTypeWarnings.Any(w => w.Contains("bad-type", StringComparison.Ordinal)), "清单路径是目录时显示扫描警告");
                 var migration = new LegacyBackupMigration();
                 string unrelatedDirectory = Path.Combine(root, "migration-unrelated");
                 Directory.CreateDirectory(unrelatedDirectory);
@@ -1063,12 +1123,18 @@ namespace FNSyncPlus.Tests
             public Action? AfterObjectUpload { get; set; }
             public Action? AfterObjectOpen { get; set; }
             public Action? OnObjectUploaded { get; set; }
+            public string? FailItemSuffix { get; set; }
+            public string? FailListPath { get; set; }
             public FaultInjectingProvider(string root) { rootPath = root; inner = new SmbStorageProvider(rootUncPath: root); }
             public StorageProviderType ProviderType => ClaimFnOs ? StorageProviderType.FnOsPersonal : StorageProviderType.LocalFileSystem;
             public bool IsAuthenticated => inner.IsAuthenticated;
             public string RootDisplayPath => inner.RootDisplayPath;
             public Task<StorageAuthResult> ConnectAndAuthenticateAsync(string server, string username, string password, string? twoFactorCode = null, CancellationToken ct = default) => inner.ConnectAndAuthenticateAsync(server, username, password, twoFactorCode, ct);
-            public Task<IReadOnlyList<NasStorageItem>> ListEntriesAsync(string? path = null, CancellationToken ct = default) => inner.ListEntriesAsync(path, ct);
+            public Task<IReadOnlyList<NasStorageItem>> ListEntriesAsync(string? path = null, CancellationToken ct = default)
+            {
+                if (FailListPath != null && string.Equals(path, FailListPath, StringComparison.Ordinal)) throw new IOException("模拟目录列表读取失败");
+                return inner.ListEntriesAsync(path, ct);
+            }
             public Task<StorageOperationResult> CreateDirectoryAsync(string path, CancellationToken ct = default) => inner.CreateDirectoryAsync(path, ct);
             public Task<ExclusiveDirectoryResult> TryCreateDirectoryExclusiveAsync(string path, CancellationToken ct = default)
             {
@@ -1082,8 +1148,16 @@ namespace FNSyncPlus.Tests
                     return Task.FromResult(ExclusiveDirectoryResult.Created);
                 }
             }
-            public Task<bool> ExistsAsync(string path, CancellationToken ct = default) => inner.ExistsAsync(path, ct);
-            public Task<NasStorageItem?> GetItemAsync(string path, CancellationToken ct = default) => inner.GetItemAsync(path, ct);
+            public Task<bool> ExistsAsync(string path, CancellationToken ct = default)
+            {
+                if (FailItemSuffix != null && path.EndsWith(FailItemSuffix, StringComparison.Ordinal)) throw new IOException("模拟项目读取失败");
+                return inner.ExistsAsync(path, ct);
+            }
+            public Task<NasStorageItem?> GetItemAsync(string path, CancellationToken ct = default)
+            {
+                if (FailItemSuffix != null && path.EndsWith(FailItemSuffix, StringComparison.Ordinal)) throw new IOException("模拟项目读取失败");
+                return inner.GetItemAsync(path, ct);
+            }
             public async Task<StorageOperationResult> UploadFileAsync(string path, Stream stream, long size, DateTime modified, bool overwrite = true, IProgress<long>? progress = null, CancellationToken ct = default)
             {
                 if (CorruptObjectUpload && path.Contains("/.fnsync/objects/obj-", StringComparison.Ordinal))

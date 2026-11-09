@@ -193,6 +193,7 @@ namespace FNSyncPlus.Core.Services
                 return new Manifest
                 {
                     Version = Manifest.CurrentVersion,
+                    IsNew = true,
                     TargetRoot = PathHelper.RemoveLongPathPrefix(targetRootDirectory),
                     UpdatedAt = DateTimeOffset.UtcNow
                 };
@@ -241,7 +242,7 @@ namespace FNSyncPlus.Core.Services
                 string manifestRelPath = string.IsNullOrEmpty(cleanFolder) ? ".fnsync/manifest.json" : $"{cleanFolder}/.fnsync/manifest.json";
                 string metaDir = string.IsNullOrEmpty(cleanFolder) ? ".fnsync" : $"{cleanFolder}/.fnsync";
                 if (!await storageProvider.ExistsAsync(metaDir, cancellationToken).ConfigureAwait(false))
-                    return new Manifest { Version = Manifest.CurrentVersion, TargetRoot = targetFolder, UpdatedAt = DateTimeOffset.UtcNow };
+                    return new Manifest { Version = Manifest.CurrentVersion, IsNew = true, TargetRoot = targetFolder, UpdatedAt = DateTimeOffset.UtcNow };
                 await RejectVersionedMetadataAsync(storageProvider, metaDir, cancellationToken).ConfigureAwait(false);
 
                 string bakRelPath = manifestRelPath + ".bak";
@@ -271,6 +272,7 @@ namespace FNSyncPlus.Core.Services
                 return new Manifest
                 {
                     Version = Manifest.CurrentVersion,
+                    IsNew = true,
                     TargetRoot = targetFolder,
                     UpdatedAt = DateTimeOffset.UtcNow
                 };
