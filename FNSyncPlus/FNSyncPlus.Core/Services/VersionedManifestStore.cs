@@ -8,7 +8,7 @@ using FNSyncPlus.Core.Utils;
 namespace FNSyncPlus.Core.Services;
 
 /// <summary>
-/// Experimental immutable manifest protocol. This is not wired into production reads or writes.
+/// Experimental immutable manifest protocol. Restore discovery can read it; task writes remain isolated.
 /// Its correctness depends on complete directory listings and read-after-write consistency.
 /// </summary>
 public sealed class VersionedManifestStore
@@ -24,6 +24,7 @@ public sealed class VersionedManifestStore
     }
 
     public sealed record Snapshot(Manifest Manifest, long Sequence, string Id);
+    public sealed record RestoreInspection(Snapshot? Snapshot, bool HasInvalidRecords);
 
     private static string DirectoryPath(string target)
     {
@@ -139,6 +140,13 @@ public sealed class VersionedManifestStore
         var (snapshot, _, hasReceipts, _) = await ScanAsync(provider, target, token).ConfigureAwait(false);
         if (snapshot == null && hasReceipts) throw new InvalidDataException("版本化清单提交均无效，拒绝返回空清单");
         return snapshot;
+    }
+
+    public async Task<RestoreInspection> InspectForRestoreAsync(INasStorageProvider provider, string target, CancellationToken token = default)
+    {
+        var (snapshot, _, hasReceipts, hasInvalidRecords) = await ScanAsync(provider, target, token).ConfigureAwait(false);
+        if (snapshot == null && hasReceipts) throw new InvalidDataException("版本化清单提交均无效，拒绝返回空清单");
+        return new RestoreInspection(snapshot, hasInvalidRecords);
     }
 
     /// <summary>A readable fallback is not sufficient for writing when any commit record is invalid.</summary>

@@ -330,6 +330,12 @@ namespace FNSyncPlus.Tests
                 File.WriteAllText(secondCandidate, "{}");
                 loadedVersion = await versions.LoadAsync(versionProvider, "version-healthy");
                 Assert(loadedVersion?.Id == firstVersion.Id, "较新版本损坏时回退到完整旧版本");
+                var damagedWarnings = new List<string>();
+                var damagedPackages = await new RestoreEngine(new ManifestManager()).DiscoverBackupPackagesAsync(
+                    versionProvider, "version-healthy", warnings: damagedWarnings);
+                Assert(damagedPackages.Count == 1 && damagedPackages[0].VersionId == firstVersion.Id &&
+                    damagedPackages[0].HasDamagedVersionRecords && damagedWarnings.Count == 1,
+                    "恢复发现回退的旧版本时显示损坏记录警告");
                 File.WriteAllBytes(secondCandidate, goodSecondCandidate);
                 string otherId = Guid.NewGuid().ToString("N");
                 File.Copy(Path.Combine(versionsDir, $"candidate-{firstVersion.Id}.json"), Path.Combine(versionsDir, $"candidate-{otherId}.json"));
@@ -651,6 +657,57 @@ namespace FNSyncPlus.Tests
                     priorRestored && File.ReadAllText(Path.Combine(priorRestore, longOriginal)) == "legacy active" &&
                     File.ReadAllText(Path.Combine(versionedRestorePath, longOriginal)) == "edited active" && Directory.Exists(Path.Combine(versionedRestorePath, "空目录")),
                     "版本化增量更新可分别恢复最新内容和旧版本");
+                var packageWarnings = new List<string>();
+                var packageList = await historyEngine.DiscoverBackupPackagesAsync(versionProvider, batchFixture.folder, warnings: packageWarnings);
+                var versionedPackage = packageList.Single(p => p.NasFolderUnc == batchFixture.folder);
+                var packageManifest = await historyEngine.ReadPackageManifestAsync(versionProvider, versionedPackage);
+                Assert(versionedPackage.VersionId == editedBatch.Snapshot.Id && packageManifest.Files.Count == 2 &&
+                    packageManifest.History.Any(h => h.OriginalRel == longOriginal && h.Reason == "superseded"),
+                    "恢复中心发现版本化备份并读取同一版本的文件与历史");
+                string packageRestore = Path.Combine(root, "versioned-package-restore");
+                var packageReport = await historyEngine.RunRestorePackageAsync(versionProvider, versionedPackage, packageRestore);
+                string packageRetry = Path.Combine(root, "versioned-package-retry");
+                var retryReport = await historyEngine.RetryRestorePackageAsync(versionProvider, versionedPackage, packageRetry, new[] { longOriginal });
+                string packageHistory = Path.Combine(root, "versioned-package-history");
+                var packageHistoryReport = await historyEngine.RestorePackageHistoryAsync(versionProvider, versionedPackage, packageHistory, priorHistory);
+                Assert(packageReport.RestoredFiles == 2 && retryReport.RestoredFiles == 1 &&
+                    packageHistoryReport.RestoredFiles == 1 && File.ReadAllText(Path.Combine(packageHistory, longOriginal)) == "legacy active" &&
+                    File.ReadAllText(Path.Combine(packageRestore, longOriginal)) == "edited active" &&
+                    File.ReadAllText(Path.Combine(packageRetry, longOriginal)) == "edited active",
+                    "恢复中心从版本化清单恢复当前、重试及历史文件并核对原名内容");
+                File.WriteAllText(Path.Combine(packageHistory, longOriginal), "user existing file");
+                var historySkipped = await historyEngine.RestorePackageHistoryAsync(versionProvider, versionedPackage, packageHistory, priorHistory);
+                bool keptExisting = historySkipped.SkippedFiles == 1 && File.ReadAllText(Path.Combine(packageHistory, longOriginal)) == "user existing file";
+                var historyOverwritten = await historyEngine.RestorePackageHistoryAsync(versionProvider, versionedPackage, packageHistory, priorHistory, ConflictResolution.Overwrite);
+                Assert(keptExisting && historyOverwritten.RestoredFiles == 1 && File.ReadAllText(Path.Combine(packageHistory, longOriginal)) == "legacy active",
+                    "历史版本默认跳过现有文件，仅明确覆盖时替换");
+                var stalePackage = new DiscoveredBackupPackage { NasFolderUnc = batchFixture.folder, VersionId = batchBase.Id };
+                bool stalePackageRejected = false, missingRetryRejected = false, invalidHistoryRejected = false;
+                string staleDestination = Path.Combine(root, "stale-package-restore");
+                try { await historyEngine.RunRestorePackageAsync(versionProvider, stalePackage, staleDestination); }
+                catch (IOException) { stalePackageRejected = true; }
+                try { await historyEngine.RetryRestorePackageAsync(versionProvider, versionedPackage, packageRetry, new[] { "does-not-exist.txt" }); }
+                catch (InvalidDataException) { missingRetryRejected = true; }
+                try { await historyEngine.RestorePackageHistoryAsync(versionProvider, versionedPackage, packageHistory,
+                    new ManifestHistoryEntry { OriginalRel = "other.txt", StoredRel = priorHistory.StoredRel, Sha256 = priorHistory.Sha256, Size = priorHistory.Size }); }
+                catch (InvalidDataException) { invalidHistoryRejected = true; }
+                Assert(stalePackageRejected && missingRetryRejected && invalidHistoryRejected && !Directory.Exists(staleDestination),
+                    "版本变化、重试文件或历史记录不匹配时拒绝恢复");
+                string mixedRoot = "restore-discovery-mixed";
+                string validFolder = mixedRoot + "/valid";
+                string unfinishedFolder = mixedRoot + "/unfinished";
+                await manifestManager.SaveManifestAtomicAsync(versionProvider, validFolder, new Manifest());
+                await manifestManager.SaveManifestAtomicAsync(versionProvider, unfinishedFolder, new Manifest());
+                Directory.CreateDirectory(Path.Combine(root, mixedRoot, ".fnsync"));
+                File.WriteAllText(Path.Combine(root, mixedRoot, ".fnsync", "manifest.json"), "{broken");
+                Directory.CreateDirectory(Path.Combine(root, unfinishedFolder, ".fnsync", "manifest-versions"));
+                Directory.CreateDirectory(Path.Combine(root, mixedRoot, "ordinary-folder"));
+                var strictDiscoveryProvider = new FaultInjectingProvider(root) { ThrowOnMissingParent = true };
+                var discoveryWarnings = new List<string>();
+                var mixedPackages = await historyEngine.DiscoverBackupPackagesAsync(strictDiscoveryProvider, mixedRoot, warnings: discoveryWarnings);
+                Assert(mixedPackages.Any(p => p.NasFolderUnc == validFolder) &&
+                    !mixedPackages.Any(p => p.NasFolderUnc == unfinishedFolder) && discoveryWarnings.Count == 2,
+                    "根清单损坏仍发现有效子备份，未完成的版本化迁移不回退旧清单");
                 string wrongSource = Path.Combine(root, "wrong-source");
                 Directory.CreateDirectory(wrongSource);
                 bool wrongSourceRejected = false;
@@ -1233,6 +1290,7 @@ namespace FNSyncPlus.Tests
             public string? FailItemSuffix { get; set; }
             public string? FailListPath { get; set; }
             public string? BlockUploadSuffix { get; set; }
+            public bool ThrowOnMissingParent { get; set; }
             public TaskCompletionSource UploadEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
             public TaskCompletionSource ContinueUpload { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
             public FaultInjectingProvider(string root) { rootPath = root; inner = new SmbStorageProvider(rootUncPath: root); }
@@ -1266,6 +1324,12 @@ namespace FNSyncPlus.Tests
             public Task<NasStorageItem?> GetItemAsync(string path, CancellationToken ct = default)
             {
                 if (FailItemSuffix != null && path.EndsWith(FailItemSuffix, StringComparison.Ordinal)) throw new IOException("模拟项目读取失败");
+                if (ThrowOnMissingParent)
+                {
+                    string? parent = Path.GetDirectoryName(path.Replace('/', Path.DirectorySeparatorChar));
+                    if (!string.IsNullOrEmpty(parent) && !Directory.Exists(Path.Combine(rootPath, parent)))
+                        throw new IOException("模拟远端父目录不存在");
+                }
                 return inner.GetItemAsync(path, ct);
             }
             public async Task<StorageOperationResult> UploadFileAsync(string path, Stream stream, long size, DateTime modified, bool overwrite = true, IProgress<long>? progress = null, CancellationToken ct = default)

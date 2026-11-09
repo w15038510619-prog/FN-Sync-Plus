@@ -64,6 +64,8 @@ namespace FNSyncPlus.Core.Services
         public long TotalSizeBytes { get; set; }
         public int LongNameCount { get; set; }
         public DateTimeOffset LastUpdated { get; set; }
+        public string? VersionId { get; set; }
+        public bool HasDamagedVersionRecords { get; set; }
 
         public string FormattedSize
         {
@@ -91,6 +93,56 @@ namespace FNSyncPlus.Core.Services
         private void Log(string level, string message)
         {
             LogEmitted?.Invoke(level, $"[{DateTime.Now:HH:mm:ss}] [{level}] {message}");
+        }
+
+        private static DiscoveredBackupPackage PackageFromManifest(string name, string path, Manifest manifest, string? versionId = null) => new()
+        {
+            PackageName = name,
+            NasFolderUnc = path,
+            OriginalSourceRoot = manifest.SourceRoot,
+            FileCount = manifest.Files.Count,
+            TotalSizeBytes = manifest.Files.Sum(f => f.Size),
+            LongNameCount = manifest.Files.Count(f => f.IsLongName),
+            LastUpdated = manifest.UpdatedAt,
+            VersionId = versionId
+        };
+
+        private async Task<DiscoveredBackupPackage?> DiscoverProviderPackageAsync(INasStorageProvider provider,
+            string path, string name, CancellationToken token)
+        {
+            if (!string.IsNullOrEmpty(path))
+            {
+                string metaPath = $"{path.TrimEnd('/', '\\')}/.fnsync";
+                var metaDirectory = await provider.GetItemAsync(metaPath, token).ConfigureAwait(false);
+                if (metaDirectory != null && !metaDirectory.IsDirectory) throw new InvalidDataException("备份元数据路径不是目录");
+                var versionDirectory = metaDirectory == null ? null :
+                    await provider.GetItemAsync($"{metaPath}/manifest-versions", token).ConfigureAwait(false);
+                if (versionDirectory != null)
+                {
+                    if (!versionDirectory.IsDirectory) throw new InvalidDataException("版本化清单路径不是目录");
+                    var inspection = await new VersionedManifestStore().InspectForRestoreAsync(provider, path, token).ConfigureAwait(false);
+                    var snapshot = inspection.Snapshot ?? throw new InvalidDataException("存在版本化清单目录，但没有有效提交");
+                    var package = PackageFromManifest(name, path, snapshot.Manifest, snapshot.Id);
+                    package.HasDamagedVersionRecords = inspection.HasInvalidRecords;
+                    return package;
+                }
+            }
+            var manifest = await _manifestManager.LoadManifestAsync(provider, path, token).ConfigureAwait(false);
+            return manifest.IsNew ? null : PackageFromManifest(name, path, manifest);
+        }
+
+        public async Task<Manifest> ReadPackageManifestAsync(INasStorageProvider provider,
+            DiscoveredBackupPackage package, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(provider);
+            ArgumentNullException.ThrowIfNull(package);
+            if (package.VersionId == null)
+                return await _manifestManager.LoadManifestAsync(provider, package.NasFolderUnc, cancellationToken).ConfigureAwait(false);
+            var snapshot = await new VersionedManifestStore().LoadAsync(provider, package.NasFolderUnc, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidDataException("版本化清单不存在，请重新扫描备份");
+            if (!string.Equals(snapshot.Id, package.VersionId, StringComparison.Ordinal))
+                throw new IOException("备份版本已变化，请重新扫描后再恢复");
+            return snapshot.Manifest;
         }
 
         /// <summary>
@@ -202,23 +254,18 @@ namespace FNSyncPlus.Core.Services
 
             try
             {
-                // 1. 检查根目录本身是否包含清单
-                var rootManifest = await _manifestManager.LoadManifestAsync(storageProvider, nasBackupRootRel, cancellationToken).ConfigureAwait(false);
-                if (!rootManifest.IsNew)
-                {
-                    result.Add(new DiscoveredBackupPackage
-                    {
-                        PackageName = "个人空间根备份",
-                        NasFolderUnc = nasBackupRootRel,
-                        OriginalSourceRoot = rootManifest.SourceRoot,
-                        FileCount = rootManifest.Files.Count,
-                        TotalSizeBytes = rootManifest.Files.Sum(f => f.Size),
-                        LongNameCount = rootManifest.Files.Count(f => f.IsLongName),
-                        LastUpdated = rootManifest.UpdatedAt
-                    });
-                }
+                var rootPackage = await DiscoverProviderPackageAsync(storageProvider, nasBackupRootRel,
+                    "个人空间根备份", cancellationToken).ConfigureAwait(false);
+                if (rootPackage != null) result.Add(rootPackage);
+                if (rootPackage?.HasDamagedVersionRecords == true)
+                    ReportDiscoveryIssue(warnings, "版本化清单包含损坏记录，可能已回退到较早版本", new InvalidDataException("请核对备份版本"));
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { ReportDiscoveryIssue(warnings, "读取扫描根目录清单失败", ex); }
 
-                // 2. 枚举子目录
+            try
+            {
+                // 2. 枚举子目录；根目录自身损坏时仍尝试发现其他有效备份。
                 var entries = await storageProvider.ListEntriesAsync(nasBackupRootRel, cancellationToken).ConfigureAwait(false);
                 foreach (var entry in entries)
                 {
@@ -227,20 +274,11 @@ namespace FNSyncPlus.Core.Services
                     {
                         try
                         {
-                            var subManifest = await _manifestManager.LoadManifestAsync(storageProvider, entry.RelativePath, cancellationToken).ConfigureAwait(false);
-                            if (!subManifest.IsNew)
-                            {
-                                result.Add(new DiscoveredBackupPackage
-                                {
-                                    PackageName = entry.Name,
-                                    NasFolderUnc = entry.RelativePath,
-                                    OriginalSourceRoot = subManifest.SourceRoot,
-                                    FileCount = subManifest.Files.Count,
-                                    TotalSizeBytes = subManifest.Files.Sum(f => f.Size),
-                                    LongNameCount = subManifest.Files.Count(f => f.IsLongName),
-                                    LastUpdated = subManifest.UpdatedAt
-                                });
-                            }
+                            var package = await DiscoverProviderPackageAsync(storageProvider, entry.RelativePath,
+                                entry.Name, cancellationToken).ConfigureAwait(false);
+                            if (package != null) result.Add(package);
+                            if (package?.HasDamagedVersionRecords == true)
+                                ReportDiscoveryIssue(warnings, $"备份 {entry.Name} 的版本记录损坏，可能已回退", new InvalidDataException("请核对备份版本"));
                         }
                         catch (OperationCanceledException) { throw; }
                         catch (Exception ex) { ReportDiscoveryIssue(warnings, $"读取备份目录失败: {entry.Name}", ex); }
@@ -594,6 +632,51 @@ namespace FNSyncPlus.Core.Services
                 ?? throw new InvalidDataException("未找到有效的版本化清单");
             return await RunRestoreManifestAsync(storageProvider, nasBackupFolderRel, localDestinationFolder,
                 snapshot.Manifest, conflictResolution, cancellationToken).ConfigureAwait(false);
+        }
+
+        public async Task<RestoreProgressReport> RunRestorePackageAsync(INasStorageProvider provider,
+            DiscoveredBackupPackage package, string destination,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
+            CancellationToken cancellationToken = default)
+        {
+            var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
+            if (manifest.IsNew) throw new InvalidDataException("备份清单已不存在，请重新扫描");
+            return await RunRestoreManifestAsync(provider, package.NasFolderUnc, destination,
+                manifest, conflictResolution, cancellationToken).ConfigureAwait(false);
+        }
+
+        public async Task<RestoreProgressReport> RetryRestorePackageAsync(INasStorageProvider provider,
+            DiscoveredBackupPackage package, string destination, IEnumerable<string> originalPaths,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
+            CancellationToken cancellationToken = default)
+        {
+            var requested = new HashSet<string>(originalPaths, StringComparer.OrdinalIgnoreCase);
+            var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
+            if (manifest.IsNew) throw new InvalidDataException("备份清单已不存在，请重新扫描");
+            var selected = manifest.Files.Where(f => requested.Contains(f.OriginalRel)).ToList();
+            if (requested.Count == 0 || selected.Count != requested.Count)
+                throw new InvalidDataException("重试文件与当前备份清单不一致，请重新扫描");
+            manifest.Files = selected;
+            return await RunRestoreFilteredAsync(provider, package.NasFolderUnc, destination,
+                manifest, conflictResolution, cancellationToken).ConfigureAwait(false);
+        }
+
+        public async Task<RestoreProgressReport> RestorePackageHistoryAsync(INasStorageProvider provider,
+            DiscoveredBackupPackage package, string destination, ManifestHistoryEntry requested,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(requested);
+            var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
+            if (manifest.IsNew || manifest.History == null) throw new InvalidDataException("历史清单不可用，请重新扫描");
+            var matches = manifest.History.Where(h => h != null &&
+                string.Equals(h.OriginalRel, requested.OriginalRel, StringComparison.Ordinal) &&
+                string.Equals(h.StoredRel, requested.StoredRel, StringComparison.Ordinal) &&
+                string.Equals(h.Sha256, requested.Sha256, StringComparison.OrdinalIgnoreCase) &&
+                h.Size == requested.Size && h.ArchivedAt == requested.ArchivedAt).ToList();
+            if (matches.Count != 1) throw new InvalidDataException("历史记录已变化或无法唯一确认，请重新扫描");
+            return await RunRestoreHistoryFileDetailedAsync(provider, package.NasFolderUnc, destination,
+                matches[0], cancellationToken, conflictResolution).ConfigureAwait(false);
         }
 
         private async Task<RestoreProgressReport> RunRestoreManifestAsync(
