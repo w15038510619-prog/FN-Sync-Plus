@@ -384,6 +384,19 @@ namespace FNSyncPlus.Tests
                         catch (ArgumentException) { aliasesRejected++; }
                     }
                     Assert(aliasesRejected == 3, "复用目录的飞牛路径别名不能绕过根目录和重叠保护");
+                    const string candidateRoot = "backup/.fnsync/projections/candidate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+                    int candidateRejected = 0;
+                    foreach (var input in new[] {
+                        ("/backup", candidateRoot, ".fnsync/objects/obj-a", "file.txt", new string('a', 64)),
+                        ("backup", "other/.fnsync/projections/candidate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ".fnsync/objects/obj-a", "file.txt", new string('a', 64)),
+                        ("backup", candidateRoot, "../outside", "file.txt", new string('a', 64)),
+                        ("backup", candidateRoot, ".fnsync/objects/obj-a", "../outside", new string('a', 64)),
+                        ("backup", candidateRoot, ".fnsync/objects/obj-a", "file.txt", "invalid") })
+                    {
+                        try { await moveProvider.CopyObjectToCandidateAsync(input.Item1, input.Item2, input.Item3, input.Item4, input.Item5, 1); }
+                        catch (ArgumentException) { candidateRejected++; }
+                    }
+                    Assert(candidateRejected == 5, "候选服务端复制在联网前拒绝越界、错误目录和无效哈希");
                 }
                 var versionProvider = new FaultInjectingProvider(root);
                 var versions = new VersionedManifestStore();
@@ -443,6 +456,16 @@ namespace FNSyncPlus.Tests
                 Assert(staleProjectionRejected && changedSnapshot.Id != created.Snapshot.Id && !File.Exists(Path.Combine(staleCandidate, "receipt.json")) &&
                     File.ReadAllText(physicalFile) == "new initial content",
                     "准备候选目录期间版本变化时不生成完成记录并保留原候选目录");
+                using (var projectionCancellation = new CancellationTokenSource())
+                {
+                    var cancelProvider = new FaultInjectingProvider(root) { CancelUploadSuffix = ".txt", UploadCancellation = projectionCancellation };
+                    bool canceledProjection = false;
+                    try { await new ExperimentalPhysicalSnapshot().PrepareAsync(cancelProvider, "version-new-target", projectionCancellation.Token); }
+                    catch (OperationCanceledException) { canceledProjection = true; }
+                    Assert(canceledProjection && (await versions.LoadForWritingAsync(versionProvider, "version-new-target"))?.Id == changedSnapshot.Id &&
+                        File.ReadAllText(physicalFile) == "new initial content",
+                        "取消候选目录准备不改变已提交版本或之前的候选内容");
+                }
                 string reuseSource = Path.Combine(root, "reuse-source");
                 string reuseExisting = Path.Combine(root, "reuse-existing");
                 Directory.CreateDirectory(Path.Combine(reuseSource, "missing-folder"));

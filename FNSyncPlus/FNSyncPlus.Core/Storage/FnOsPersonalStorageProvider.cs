@@ -552,6 +552,85 @@ namespace FNSyncPlus.Core.Storage
         }
 
         /// <summary>
+        /// Experimental server-side copy into a unique candidate tree. Each copy uses its own
+        /// exclusive work directory; uncertain outcomes are left in place and never retried.
+        /// </summary>
+        public async Task CopyObjectToCandidateAsync(string backupRoot, string candidateRoot, string objectRel,
+            string physicalRel, string expectedSha256, long expectedSize, CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (!PathHelper.IsSafeRelativePath(backupRoot) || !PathHelper.IsSafeRelativePath(candidateRoot) ||
+                !PathHelper.IsSafeRelativePath(objectRel) || !PathHelper.IsSafeRelativePath(physicalRel))
+                throw new ArgumentException("候选复制路径必须是安全的相对路径");
+            string root = NormalizeRelativePath(backupRoot);
+            string candidate = NormalizeRelativePath(candidateRoot);
+            string objectPath = PathHelper.NormalizeRelPath(objectRel);
+            string physical = PathHelper.NormalizeRelPath(physicalRel);
+            string candidatePrefix = $"{root}/.fnsync/projections/candidate-";
+            if (!PathHelper.IsSafeRelativePath(root) || !PathHelper.IsSafeRelativePath(candidate) ||
+                !PathHelper.IsSafeRelativePath(objectPath) || !PathHelper.IsSafeRelativePath(physical) ||
+                !candidate.StartsWith(candidatePrefix, StringComparison.OrdinalIgnoreCase) ||
+                !Guid.TryParseExact(candidate[candidatePrefix.Length..], "N", out _) ||
+                !objectPath.StartsWith(".fnsync/objects/obj-", StringComparison.Ordinal) ||
+                expectedSize < 0 || expectedSha256?.Length != 64 || !expectedSha256.All(Uri.IsHexDigit))
+                throw new ArgumentException("候选复制路径或校验值无效");
+
+            string source = $"{root}/{objectPath}";
+            string target = $"{candidate}/tree/{physical}";
+            int separator = target.LastIndexOf('/');
+            string targetDirectory = target[..separator];
+            string desiredName = target[(separator + 1)..];
+            var sourceItem = await GetItemAsync(source, ct).ConfigureAwait(false);
+            var destinationDirectory = await GetItemAsync(targetDirectory, ct).ConfigureAwait(false);
+            bool sourceValid = sourceItem != null && !sourceItem.IsDirectory && sourceItem.Size == expectedSize &&
+                await VerifyFileIntegrityAsync(source, expectedSha256, expectedSize, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            if (!sourceValid)
+                throw new InvalidDataException("源备份对象校验失败");
+            if (destinationDirectory == null || !destinationDirectory.IsDirectory || await GetItemAsync(target, ct).ConfigureAwait(false) != null)
+                throw new IOException("候选目标目录不存在或目标文件已存在");
+
+            string work = $"{candidate}/work-{Guid.NewGuid():N}";
+            if (await TryCreateDirectoryExclusiveAsync(work, ct).ConfigureAwait(false) != ExclusiveDirectoryResult.Created)
+                throw new IOException("候选复制工作目录冲突");
+            string sourceName = source[(source.LastIndexOf('/') + 1)..];
+            string copied = $"{work}/{sourceName}";
+            long copyTimeoutSeconds = Math.Clamp(120L + expectedSize / (4L * 1024 * 1024), 120L, 24L * 60 * 60);
+            string json = await _apiClient.SendSignedTaskRpcAsync("file.cp", new Dictionary<string, object?> {
+                ["files"] = new[] { "/" + CombineWithPersonalRoot(source) },
+                ["pathTo"] = "/" + CombineWithPersonalRoot(work), ["overwrite"] = "skip",
+                ["details"] = new { name = sourceName, count = 1 }
+            }, TimeSpan.FromSeconds(copyTimeoutSeconds), ct).ConfigureAwait(false);
+            using (var response = JsonDocument.Parse(json))
+                if (!response.RootElement.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.String || result.GetString() != "succ" ||
+                    (response.RootElement.TryGetProperty("errno", out var error) && error.ValueKind == JsonValueKind.Number && error.TryGetInt32(out int code) && code != 0))
+                    throw new IOException("飞牛候选复制未确认成功，保留工作目录供检查");
+            bool copyValid = await VerifyFileIntegrityAsync(copied, expectedSha256, expectedSize, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            if (!copyValid)
+                throw new InvalidDataException("飞牛候选复制内容校验失败");
+
+            if (!string.Equals(sourceName, desiredName, StringComparison.Ordinal))
+            {
+                string renamed = $"{work}/{desiredName}";
+                string renameJson = await _apiClient.SendSignedRpcAsync("file.rename", new Dictionary<string, object?> {
+                    ["path"] = "/" + CombineWithPersonalRoot(copied), ["newName"] = desiredName
+                }, ct).ConfigureAwait(false);
+                using var response = JsonDocument.Parse(renameJson);
+                bool responseSucceeded = response.RootElement.TryGetProperty("result", out var result) &&
+                    result.ValueKind == JsonValueKind.String && result.GetString() == "succ";
+                var oldItem = await GetItemAsync(copied, ct).ConfigureAwait(false);
+                bool renamedValid = await VerifyFileIntegrityAsync(renamed, expectedSha256, expectedSize, ct).ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
+                if (!responseSucceeded || oldItem != null || !renamedValid)
+                    throw new IOException("候选文件改名结果不确定，保留工作目录供检查");
+                copied = renamed;
+            }
+            if (await MoveFileVerifiedAsync(copied, targetDirectory, expectedSha256, expectedSize, ct).ConfigureAwait(false) != VerifiedMoveOutcome.Moved)
+                throw new IOException("候选文件移动未确认完成，保留工作目录供检查");
+        }
+
+        /// <summary>
         /// Experimental: copy an existing file on the NAS into a newly created object directory.
         /// The source and the copy are independently hashed. Nothing is deleted or overwritten.
         /// </summary>

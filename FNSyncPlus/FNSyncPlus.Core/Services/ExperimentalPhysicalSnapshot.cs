@@ -15,7 +15,7 @@ public sealed class ExperimentalPhysicalSnapshot
     public sealed record FileMapping(string OriginalRel, string PhysicalRel, string ObjectRel, long Size, string Sha256);
     public sealed record DirectoryMapping(string OriginalRel, string PhysicalRel);
     public sealed record Result(string VersionId, string CandidateRoot, IReadOnlyList<FileMapping> Files,
-        IReadOnlyList<DirectoryMapping> Directories);
+        IReadOnlyList<DirectoryMapping> Directories, int ServerSideCopies);
 
     public async Task<Result> PrepareAsync(INasStorageProvider provider, string backupRoot, CancellationToken token = default)
     {
@@ -75,15 +75,26 @@ public sealed class ExperimentalPhysicalSnapshot
 
         foreach (var directory in directories)
             await EnsureDirectoryAsync(provider, $"{tree}/{directory.PhysicalRel}", token).ConfigureAwait(false);
+        int serverSideCopies = 0;
         foreach (var file in files)
         {
             int slash = file.PhysicalRel.LastIndexOf('/');
             if (slash >= 0) await EnsureDirectoryAsync(provider, $"{tree}/{file.PhysicalRel[..slash]}", token).ConfigureAwait(false);
             string target = $"{tree}/{file.PhysicalRel}";
-            using var input = await provider.OpenReadAsync($"{root}/{file.ObjectRel}", token).ConfigureAwait(false);
-            var upload = await provider.UploadFileAsync(target, input, file.Size, DateTime.UtcNow, false, null, token).ConfigureAwait(false);
-            if (!upload.Success) throw new IOException($"候选文件写入失败: {upload.ErrorMessage}");
-            if (!await provider.VerifyFileIntegrityAsync(target, file.Sha256, file.Size, token).ConfigureAwait(false))
+            if (provider is FnOsPersonalStorageProvider fnOs)
+            {
+                await fnOs.CopyObjectToCandidateAsync(root, candidate, file.ObjectRel, file.PhysicalRel, file.Sha256, file.Size, token).ConfigureAwait(false);
+                serverSideCopies++;
+            }
+            else
+            {
+                using var input = await provider.OpenReadAsync($"{root}/{file.ObjectRel}", token).ConfigureAwait(false);
+                var upload = await provider.UploadFileAsync(target, input, file.Size, DateTime.UtcNow, false, null, token).ConfigureAwait(false);
+                if (!upload.Success) throw new IOException($"候选文件写入失败: {upload.ErrorMessage}");
+            }
+            bool verified = await provider.VerifyFileIntegrityAsync(target, file.Sha256, file.Size, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            if (!verified)
                 throw new InvalidDataException($"候选文件校验失败: {file.OriginalRel}");
         }
         // This detects changes during preparation, but is not a publication lock. A future
@@ -91,13 +102,15 @@ public sealed class ExperimentalPhysicalSnapshot
         var latest = await versions.LoadForWritingAsync(provider, root, token).ConfigureAwait(false);
         if (latest?.Id != snapshot.Id) throw new IOException("准备候选目录期间备份版本已变化，拒绝使用该候选目录");
 
-        var result = new Result(snapshot.Id, tree, files, directories);
+        var result = new Result(snapshot.Id, tree, files, directories, serverSideCopies);
         byte[] receipt = JsonSerializer.SerializeToUtf8Bytes(result);
         using var receiptStream = new MemoryStream(receipt, writable: false);
         string receiptPath = $"{candidate}/receipt.json";
         var receiptUpload = await provider.UploadFileAsync(receiptPath, receiptStream, receipt.Length, DateTime.UtcNow, false, null, token).ConfigureAwait(false);
         string receiptHash = Convert.ToHexString(SHA256.HashData(receipt)).ToLowerInvariant();
-        if (!receiptUpload.Success || !await provider.VerifyFileIntegrityAsync(receiptPath, receiptHash, receipt.Length, token).ConfigureAwait(false))
+        bool receiptVerified = receiptUpload.Success && await provider.VerifyFileIntegrityAsync(receiptPath, receiptHash, receipt.Length, token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        if (!receiptVerified)
             throw new IOException("候选目录记录未通过回读校验");
         return result;
     }
