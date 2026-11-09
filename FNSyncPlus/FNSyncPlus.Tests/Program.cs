@@ -302,6 +302,7 @@ namespace FNSyncPlus.Tests
                 catch (InvalidDataException) { refused = true; }
                 Assert(refused, "主备清单均损坏时拒绝返回空清单");
                 Assert(new FnOsFileListResponse { Files = new() }.IsSuccess, "fnOS 文件列表允许省略 result 的有效响应");
+                Assert(new FnOsFileListResponse { Result = "succ" }.IsSuccess, "fnOS 空目录允许成功响应省略 files");
                 Assert(!new FnOsFileListResponse().IsSuccess && !new FnOsFileListResponse { Result = "fail", Files = new() }.IsSuccess, "fnOS 文件列表拒绝空响应或明确失败");
                 await using (var rpcClient = new FnOsApiClient())
                 {
@@ -1277,6 +1278,8 @@ namespace FNSyncPlus.Tests
                 await TestTaskRemovalWhileRunningAsync(root);
                 await TestTaskRemovalFailureAsync(root);
                 await TestIsolatedVersionedTaskAsync(root);
+                await TestReconnectSchedulingAsync(root);
+                await TestShutdownAsync(root);
             }
             finally
             {
@@ -1493,6 +1496,118 @@ namespace FNSyncPlus.Tests
             try { nonisolated.UseExperimentalVersionedBackup = true; }
             catch (InvalidOperationException) { refused = true; }
             Assert(refused, "正式配置无法启用隔离试验备份");
+        }
+
+        static async Task TestReconnectSchedulingAsync(string root)
+        {
+            string source = Path.Combine(root, "reconnect-source");
+            string manualSource = Path.Combine(root, "reconnect-manual-source");
+            string localSource = Path.Combine(root, "reconnect-local-source");
+            Directory.CreateDirectory(source);
+            Directory.CreateDirectory(manualSource);
+            Directory.CreateDirectory(localSource);
+            File.WriteAllText(Path.Combine(source, "sample.txt"), "first");
+            var provider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+            var settings = AppSettings.CreateInMemory();
+            string oldDirectory = Environment.CurrentDirectory;
+            try
+            {
+                Environment.CurrentDirectory = root;
+                using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "reconnect-logs")));
+                manager.UseExperimentalVersionedBackup = true;
+                manager.StorageProviderSupplier = () => provider;
+                manager.SetNasOnlineState(false);
+                var automatic = new SyncTask { TaskName = "重连自动", SourceFolder = source, DestinationFolder = "reconnect-target", ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.RealtimeOnly };
+                var manual = new SyncTask { TaskName = "重连手动", SourceFolder = manualSource, DestinationFolder = "reconnect-manual-target", ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+                var local = new SyncTask { TaskName = "本地任务", SourceFolder = localSource, DestinationFolder = Path.Combine(root, "reconnect-local-target"), ProviderType = StorageProviderType.LocalFileSystem, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+                manager.AddTask(automatic);
+                manager.AddTask(manual);
+                manager.AddTask(local);
+                var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                manager.TaskStateChanged += t => { if (t.TaskId == automatic.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) completed.TrySetResult(); };
+                manager.SetNasOnlineState(true);
+                if (await Task.WhenAny(completed.Task, Task.Delay(15000)) != completed.Task || automatic.State != TaskSyncState.Completed)
+                    throw new IOException("重连补偿测试未完成: " + automatic.LastError);
+                var versions = new VersionedManifestStore();
+                var first = await versions.LoadAsync(provider, automatic.DestinationFolder);
+                manager.SetNasOnlineState(true);
+                manager.SetNasOnlineState(true);
+                await Task.Delay(1000);
+                var second = await versions.LoadAsync(provider, automatic.DestinationFolder);
+                Assert(first?.Sequence == 1 && second?.Id == first.Id && manual.State == TaskSyncState.Idle && local.State == TaskSyncState.Idle &&
+                    !Directory.Exists(Path.Combine(root, "reconnect-manual-target")) && !Directory.Exists(local.DestinationFolder),
+                    "重复连接状态不重复同步，也不触发手动或本地任务");
+                automatic.ScheduleMode = TaskSyncScheduleMode.PeriodicOnly;
+                manager.UpdateTask(automatic);
+                File.WriteAllText(Path.Combine(source, "sample.txt"), "second");
+                provider.BlockUploadContains = "/.fnsync/objects/obj-";
+                manager.TriggerSync(automatic.TaskId);
+                if (await Task.WhenAny(provider.UploadEntered.Task, Task.Delay(15000)) != provider.UploadEntered.Task)
+                    throw new TimeoutException("重连时运行中的任务没有到达上传测试点");
+                manager.SetNasOnlineState(false);
+                manager.SetNasOnlineState(true);
+                provider.BlockUploadContains = null;
+                provider.ContinueUpload.TrySetResult();
+                VersionedManifestStore.Snapshot? afterReconnect = null;
+                for (int attempt = 0; attempt < 150; attempt++)
+                {
+                    await Task.Delay(100);
+                    afterReconnect = await versions.LoadAsync(provider, automatic.DestinationFolder);
+                    if (afterReconnect?.Sequence >= 3) break;
+                }
+                Assert(afterReconnect?.Sequence >= 3, "运行中重连会在当前任务结束后安排补偿扫描");
+                await Task.Delay(300);
+                manager.PauseTask(manual.TaskId);
+                manager.ResumeTask(manual.TaskId);
+                await Task.Delay(300);
+                Assert(manual.State == TaskSyncState.Idle && !Directory.Exists(Path.Combine(root, "reconnect-manual-target")),
+                    "恢复仅手动任务不会自动开始备份");
+                manager.PauseTask(automatic.TaskId);
+                manager.SetNasOnlineState(false);
+                manager.SetNasOnlineState(true);
+                await Task.Delay(300);
+                string? pausedVersion = (await versions.LoadAsync(provider, automatic.DestinationFolder))?.Id;
+                Assert(automatic.State == TaskSyncState.Paused && pausedVersion == afterReconnect?.Id,
+                    "网络恢复不会启动暂停的任务");
+            }
+            finally { Environment.CurrentDirectory = oldDirectory; }
+        }
+
+        static async Task TestShutdownAsync(string root)
+        {
+            string source = Path.Combine(root, "shutdown-source");
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "hold.txt"), "source remains");
+            var provider = new FaultInjectingProvider(root) { ClaimFnOs = true, BlockUploadContains = "/.fnsync/objects/obj-" };
+            var settings = AppSettings.CreateInMemory();
+            string oldDirectory = Environment.CurrentDirectory;
+            try
+            {
+                Environment.CurrentDirectory = root;
+                using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "shutdown-logs")));
+                manager.UseExperimentalVersionedBackup = true;
+                manager.StorageProviderSupplier = () => provider;
+                var task = new SyncTask { TaskName = "退出测试", SourceFolder = source, DestinationFolder = "shutdown-target", ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+                manager.AddTask(task);
+                manager.TriggerSync(task.TaskId);
+                if (await Task.WhenAny(provider.UploadEntered.Task, Task.Delay(15000)) != provider.UploadEntered.Task)
+                    throw new TimeoutException("退出测试未进入上传");
+                bool premature = await manager.ShutdownAsync(TimeSpan.FromMilliseconds(300));
+                manager.TriggerSync(task.TaskId);
+                Assert(!premature && File.ReadAllText(Path.Combine(source, "hold.txt")) == "source remains",
+                    "任务尚未停止时退出等待超时，不误报已停止");
+                provider.ContinueUpload.TrySetResult();
+                bool stopped = await manager.ShutdownAsync(TimeSpan.FromSeconds(10));
+                bool refusedAdd = false;
+                string newSource = Path.Combine(root, "shutdown-new-source");
+                Directory.CreateDirectory(newSource);
+                try { manager.AddTask(new SyncTask { TaskName = "停止后", SourceFolder = newSource, DestinationFolder = "shutdown-other" }); }
+                catch (InvalidOperationException) { refusedAdd = true; }
+                Assert(stopped && refusedAdd && task.State == TaskSyncState.Paused &&
+                    !Directory.Exists(Path.Combine(root, "shutdown-target", ".fnsync", "manifest-versions")),
+                    "实际停止后退出完成，未提交中断版本且不再接受新任务");
+            }
+            finally { provider.ContinueUpload.TrySetResult(); Environment.CurrentDirectory = oldDirectory; }
         }
 
         sealed class FaultInjectingProvider : INasStorageProvider, IExclusiveDirectoryProvider

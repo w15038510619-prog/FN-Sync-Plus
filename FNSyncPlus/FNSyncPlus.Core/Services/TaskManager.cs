@@ -41,6 +41,10 @@ namespace FNSyncPlus.Core.Services
         private readonly Task _queueWorkerTask;
 
         private bool _isNasOnline = true;
+        private bool _nasStateInitialized;
+        private bool _stopping;
+        private Task? _shutdownTask;
+        private int _resourcesDisposed;
         public bool IsNasOnline => _isNasOnline;
 
         public event Action<SyncTask, SyncProgressReport>? TaskProgressChanged;
@@ -126,6 +130,7 @@ namespace FNSyncPlus.Core.Services
 
             lock (_taskLifecycleLock)
             {
+                if (_stopping) throw new InvalidOperationException("程序正在停止，不能添加任务");
                 lock (_settings.Tasks)
                 {
                     _settings.Tasks.Add(task);
@@ -228,7 +233,7 @@ namespace FNSyncPlus.Core.Services
         {
             lock (_taskLifecycleLock)
             {
-                if (_removingTasks.Contains(task.TaskId)) return;
+                if (_stopping || _removingTasks.Contains(task.TaskId)) return;
                 var existing = _settings.Tasks.FirstOrDefault(t => t.TaskId == task.TaskId);
                 if (existing != null)
                 {
@@ -260,7 +265,7 @@ namespace FNSyncPlus.Core.Services
         {
             lock (_taskLifecycleLock)
             {
-                if (_removingTasks.Contains(taskId) || _runningCompletions.ContainsKey(taskId)) return;
+                if (_stopping || _removingTasks.Contains(taskId) || _runningCompletions.ContainsKey(taskId)) return;
                 var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
                 if (task == null || !task.Enabled || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing)
                 {
@@ -334,7 +339,7 @@ namespace FNSyncPlus.Core.Services
         {
             lock (_taskLifecycleLock)
             {
-                if (_removingTasks.Contains(taskId) || _runningCompletions.ContainsKey(taskId)) return;
+                if (_stopping || _removingTasks.Contains(taskId) || _runningCompletions.ContainsKey(taskId)) return;
                 var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
                 if (task == null) return;
 
@@ -343,8 +348,8 @@ namespace FNSyncPlus.Core.Services
                 ApplyTaskAutomation(task); // 重新挂载监听与定时轮询
                 _settings.Save();
                 TaskStateChanged?.Invoke(task);
-                AppendTaskLog(task, "INFO", "任务已恢复，已重新激活变动监听，即将触发首次检查。");
-                TriggerSync(taskId);
+                AppendTaskLog(task, "INFO", "任务已恢复，自动化设置已重新生效。");
+                if (task.ScheduleMode != TaskSyncScheduleMode.ManualOnly) TriggerSync(taskId);
             }
         }
 
@@ -371,7 +376,7 @@ namespace FNSyncPlus.Core.Services
                         lock (_taskLifecycleLock)
                         {
                             task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-                            if (task == null || _removingTasks.Contains(taskId) || !task.Enabled || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing || task.State == TaskSyncState.ConfigurationError) continue;
+                            if (_stopping || task == null || _removingTasks.Contains(taskId) || !task.Enabled || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing || task.State == TaskSyncState.ConfigurationError) continue;
                         }
 
                         // 等待获取全局并发信号量槽位
@@ -381,7 +386,7 @@ namespace FNSyncPlus.Core.Services
                         TaskCompletionSource completion;
                         lock (_taskLifecycleLock)
                         {
-                            if (!_settings.Tasks.Contains(task) || _removingTasks.Contains(taskId) ||
+                            if (_stopping || !_settings.Tasks.Contains(task) || _removingTasks.Contains(taskId) ||
                                 _runningCompletions.ContainsKey(taskId) || !task.Enabled ||
                                 task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing ||
                                 task.State == TaskSyncState.ConfigurationError)
@@ -935,50 +940,109 @@ namespace FNSyncPlus.Core.Services
 
         public void SetNasOnlineState(bool isOnline)
         {
-            _isNasOnline = isOnline;
-            if (!_isNasOnline)
+            SyncTask[] tasks;
+            lock (_taskLifecycleLock)
             {
-                foreach (var task in _settings.Tasks.Where(t => t.IsRunning))
+                if (_stopping || (_nasStateInitialized && _isNasOnline == isOnline)) return;
+                _nasStateInitialized = true;
+                _isNasOnline = isOnline;
+                tasks = _settings.Tasks.Where(t => t.ProviderType != StorageProviderType.LocalFileSystem).ToArray();
+            }
+            if (!isOnline)
+            {
+                foreach (var task in tasks)
                 {
-                    task.State = TaskSyncState.OfflineWaiting;
-                    task.LastSyncStatus = "NAS离线等待恢复";
-                    TaskStateChanged?.Invoke(task);
+                    lock (_taskLifecycleLock)
+                    {
+                        if (_stopping || _isNasOnline) break;
+                        if (!_settings.Tasks.Contains(task) || !task.IsRunning) continue;
+                        task.State = TaskSyncState.OfflineWaiting;
+                        task.LastSyncStatus = "NAS离线等待恢复";
+                        TaskStateChanged?.Invoke(task);
+                    }
                 }
             }
             else
             {
                 // 网络恢复时唤醒并触发重连补偿检查
-                foreach (var task in _settings.Tasks.Where(t => t.Enabled && t.State != TaskSyncState.Paused))
+                foreach (var task in tasks)
                 {
-                    if (task.State == TaskSyncState.OfflineWaiting)
+                    lock (_taskLifecycleLock)
                     {
-                        task.State = TaskSyncState.Idle;
-                        task.LastSyncStatus = "网络已恢复";
-                        TaskStateChanged?.Invoke(task);
+                        if (_stopping || !_isNasOnline) break;
+                        if (!_settings.Tasks.Contains(task) || !task.Enabled || task.State == TaskSyncState.Paused) continue;
+                        if (task.State == TaskSyncState.OfflineWaiting)
+                        {
+                            task.State = TaskSyncState.Idle;
+                            task.LastSyncStatus = "网络已恢复";
+                            TaskStateChanged?.Invoke(task);
+                        }
+                        if (task.ScheduleMode == TaskSyncScheduleMode.ManualOnly) continue;
+                        AppendTaskLog(task, "INFO", "NAS 连接已恢复，触发重连补偿检查...");
+                        if (_runningCompletions.TryGetValue(task.TaskId, out var running))
+                        {
+                            _ = running.Task.ContinueWith(_ =>
+                            {
+                                lock (_taskLifecycleLock)
+                                {
+                                    if (!_managerCts.IsCancellationRequested && _isNasOnline && task.Enabled &&
+                                        task.State != TaskSyncState.Paused && task.ScheduleMode != TaskSyncScheduleMode.ManualOnly)
+                                        TriggerSync(task.TaskId);
+                                }
+                            }, TaskScheduler.Default);
+                        }
+                        else TriggerSync(task.TaskId);
                     }
-                    AppendTaskLog(task, "INFO", "NAS 连接已恢复，触发重连补偿检查...");
-                    TriggerSync(task.TaskId);
                 }
             }
         }
 
         #endregion
 
-        public void Dispose()
+        private Task BeginShutdown()
         {
+            Task completion;
+            lock (_taskLifecycleLock)
+            {
+                if (_shutdownTask != null) return _shutdownTask;
+                _stopping = true;
+                completion = Task.WhenAll(_runningCompletions.Values.Select(v => v.Task).Append(_queueWorkerTask));
+                _shutdownTask = completion;
+            }
             _managerCts.Cancel();
-            _queueSignal.Dispose();
-            _concurrencySemaphore.Dispose();
-
             foreach (var w in _watchers.Values) { try { w.Dispose(); } catch { } }
             foreach (var t in _watcherDebounceTimers.Values) { try { t.Dispose(); } catch { } }
             foreach (var t in _intervalTimers.Values) { try { t.Dispose(); } catch { } }
-            foreach (var cts in _runningCts.Values) { try { cts.Cancel(); cts.Dispose(); } catch { } }
-
+            foreach (var cts in _runningCts.Values) { try { cts.Cancel(); } catch (ObjectDisposedException) { } }
             _watchers.Clear();
             _watcherDebounceTimers.Clear();
             _intervalTimers.Clear();
-            _runningCts.Clear();
+            _ = completion.ContinueWith(_ => DisposeResources(), CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            return completion;
+        }
+
+        /// <summary>Stops scheduling and waits for all running tasks to actually finish. Timeout leaves the manager stopped.</summary>
+        public async Task<bool> ShutdownAsync(TimeSpan timeout)
+        {
+            if (timeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
+            Task completion = BeginShutdown();
+            if (await Task.WhenAny(completion, Task.Delay(timeout)).ConfigureAwait(false) != completion) return false;
+            try { await completion.ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+            return true;
+        }
+
+        private void DisposeResources()
+        {
+            if (Interlocked.Exchange(ref _resourcesDisposed, 1) != 0) return;
+            _queueSignal.Dispose();
+            _concurrencySemaphore.Dispose();
+        }
+
+        public void Dispose()
+        {
+            _ = BeginShutdown();
         }
     }
 }

@@ -20,6 +20,8 @@ namespace FNSyncPlus.WinUI
         private readonly AppWindow _appWindow;
         private TrayIcon? _trayIcon;
         private bool _explicitExit;
+        private bool _shutdownInProgress;
+        private bool _shutdownComplete;
 
         public MainWindow(string initialView = "Tasks", int wizardStep = 0)
         {
@@ -201,17 +203,49 @@ namespace FNSyncPlus.WinUI
             }
         }
 
-        private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+        private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
         {
-            if (_explicitExit || !_settings.MinimizeToTray || _trayIcon == null) return;
+            if (_shutdownComplete) return;
+            if (!_explicitExit && _settings.MinimizeToTray && _trayIcon != null)
+            {
+                args.Cancel = true;
+                try { sender.Hide(); }
+                catch (Exception ex) { App.LogCrashException(ex, "MainWindow.HideToTray"); }
+                return;
+            }
+            args.Cancel = true;
+            if (_shutdownInProgress) return;
+            _shutdownInProgress = true;
+            string priorTitle = AppTitleText.Text;
             try
             {
-                sender.Hide();
-                args.Cancel = true;
+                ShowFromTray();
+                AppTitleText.Text = "正在停止任务，请稍候…";
+                bool stopped = await AppServices.GetService<TaskManager>().ShutdownAsync(TimeSpan.FromSeconds(15));
+                if (stopped)
+                {
+                    _shutdownComplete = true;
+                    Close();
+                    return;
+                }
+                var dialog = new ContentDialog
+                {
+                    Title = "仍有任务正在停止",
+                    Content = "尚未确认所有任务已停止。请稍后重试退出；新的同步任务不会再启动。",
+                    CloseButtonText = "知道了",
+                    XamlRoot = Content.XamlRoot
+                };
+                await dialog.ShowAsync();
             }
             catch (Exception ex)
             {
-                App.LogCrashException(ex, "MainWindow.HideToTray");
+                App.LogCrashException(ex, "MainWindow.Shutdown");
+                AppTitleText.Text = "无法确认任务是否停止，请查看日志后重试退出";
+            }
+            finally
+            {
+                if (!_shutdownComplete && AppTitleText.Text == "正在停止任务，请稍候…") AppTitleText.Text = priorTitle;
+                _shutdownInProgress = false;
             }
         }
 
