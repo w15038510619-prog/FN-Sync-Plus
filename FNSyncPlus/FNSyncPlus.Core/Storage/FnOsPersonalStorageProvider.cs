@@ -576,7 +576,7 @@ namespace FNSyncPlus.Core.Storage
                 throw new ArgumentException("候选复制路径或校验值无效");
 
             string source = $"{root}/{objectPath}";
-            string target = $"{candidate}/tree/{physical}";
+            string target = $"{candidate}/current/{physical}";
             int separator = target.LastIndexOf('/');
             string targetDirectory = target[..separator];
             string desiredName = target[(separator + 1)..];

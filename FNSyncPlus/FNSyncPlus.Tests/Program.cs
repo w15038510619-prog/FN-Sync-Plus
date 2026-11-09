@@ -2095,7 +2095,7 @@ namespace FNSyncPlus.Tests
                     using var corrupt = new MemoryStream(Encoding.UTF8.GetBytes("corrupted"));
                     return await inner.UploadFileAsync(path, corrupt, corrupt.Length, modified, overwrite, progress, ct);
                 }
-                if (CorruptProjectionUpload && path.Contains("/.fnsync/projections/", StringComparison.Ordinal) && path.Contains("/tree/", StringComparison.Ordinal))
+                if (CorruptProjectionUpload && path.Contains("/.fnsync/projections/", StringComparison.Ordinal) && path.Contains("/current/", StringComparison.Ordinal))
                 {
                     using var corrupt = new MemoryStream(Encoding.UTF8.GetBytes("corrupted"));
                     return await inner.UploadFileAsync(path, corrupt, corrupt.Length, modified, overwrite, progress, ct);

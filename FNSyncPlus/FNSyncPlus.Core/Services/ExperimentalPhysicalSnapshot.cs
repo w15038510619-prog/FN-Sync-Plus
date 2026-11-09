@@ -69,7 +69,9 @@ public sealed class ExperimentalPhysicalSnapshot
         string candidate = $"{projectionParent}/candidate-{Guid.NewGuid():N}";
         if (await exclusive.TryCreateDirectoryExclusiveAsync(candidate, token).ConfigureAwait(false) != ExclusiveDirectoryResult.Created)
             throw new IOException("候选目录已存在，拒绝复用");
-        string tree = $"{candidate}/tree";
+        // The staged tree already has the eventual name, allowing a future verified
+        // cross-directory move without a separate rename during publication.
+        string tree = $"{candidate}/current";
         if (await exclusive.TryCreateDirectoryExclusiveAsync(tree, token).ConfigureAwait(false) != ExclusiveDirectoryResult.Created)
             throw new IOException("候选文件树已存在，拒绝复用");
 
