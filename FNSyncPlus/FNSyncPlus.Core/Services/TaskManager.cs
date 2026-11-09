@@ -40,7 +40,7 @@ namespace FNSyncPlus.Core.Services
         private readonly CancellationTokenSource _managerCts = new();
         private readonly Task _queueWorkerTask;
 
-        private bool _isNasOnline = true;
+        private volatile bool _isNasOnline = true;
         private bool _nasStateInitialized;
         private bool _stopping;
         private Task? _shutdownTask;

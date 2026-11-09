@@ -1040,9 +1040,10 @@ namespace FNSyncPlus.Core.Services
             return Path.Combine(folder, "credentials.dat");
         }
 
-        public static void SaveCredentials(string server, string username, string password, string? isolatedPath = null)
+        public static bool SaveCredentials(string server, string username, string password, string? isolatedPath = null)
         {
             string? tempPath = null;
+            bool saved = false;
             try
             {
                 string payload = $"{server}\n{username}\n{password}";
@@ -1054,13 +1055,15 @@ namespace FNSyncPlus.Core.Services
                 File.WriteAllBytes(tempPath, encrypted);
                 if (File.Exists(path)) File.Replace(tempPath, path, null);
                 else File.Move(tempPath, path);
+                saved = true;
             }
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"保存凭据失败: {ex.Message}"); }
             finally
             {
                 try { if (tempPath != null && File.Exists(tempPath)) File.Delete(tempPath); }
-                catch (Exception ex) { System.Diagnostics.Debug.WriteLine($"清理凭据临时文件失败: {ex.Message}"); }
+                catch (Exception ex) { saved = false; System.Diagnostics.Debug.WriteLine($"清理凭据临时文件失败: {ex.Message}"); }
             }
+            return saved;
         }
 
         public static (string Server, string Username, string Password)? LoadCredentials(string? isolatedPath = null)
@@ -1083,17 +1086,15 @@ namespace FNSyncPlus.Core.Services
             return null;
         }
 
-        public static void ClearSavedCredentials(string? isolatedPath = null)
+        public static bool ClearSavedCredentials(string? isolatedPath = null)
         {
             try
             {
                 string path = isolatedPath ?? GetCredentialStoragePath();
-                if (File.Exists(path))
-                {
-                    File.Delete(path);
-                }
+                File.Delete(path);
+                return !File.Exists(path);
             }
-            catch { }
+            catch { return false; }
         }
 
         #endregion

@@ -26,6 +26,11 @@ namespace FNSyncPlus.Core.Storage
 
         public StorageProviderType ProviderType => StorageProviderType.FnOsPersonal;
         public bool IsAuthenticated => _apiClient.IsAuthenticated;
+        public event Action? ConnectionLost
+        {
+            add => _apiClient.ConnectionLost += value;
+            remove => _apiClient.ConnectionLost -= value;
+        }
         public string RootDisplayPath => string.IsNullOrEmpty(_personalRootPath)
             ? "飞牛官方个人空间 [我的文件]"
             : $"飞牛官方个人空间 [我的文件] ({_personalRootPath})";
@@ -124,6 +129,8 @@ namespace FNSyncPlus.Core.Storage
                     PersonalRootPath = _personalRootPath
                 };
             }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) when (ex is IOException or System.Net.Http.HttpRequestException or System.Net.WebSockets.WebSocketException or System.Net.Sockets.SocketException) { throw; }
             catch (Exception ex)
             {
                 return new StorageAuthResult
@@ -167,6 +174,7 @@ namespace FNSyncPlus.Core.Storage
                     PersonalRootPath = _personalRootPath
                 };
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 return new StorageAuthResult

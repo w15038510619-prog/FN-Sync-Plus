@@ -219,12 +219,17 @@ namespace FNSyncPlus.Tests
                 Assert(duplicateTrustRejected && AppSettings.ReadTrustedCertificates(trustedConfig).Count == 0,
                     "重复或损坏的信任配置不会自动放行证书");
                 string isolatedCredentials = Path.Combine(root, "credentials", "credentials.dat");
-                SmbAuthService.SaveCredentials("test.invalid", "test-user", "test-secret", isolatedCredentials);
+                bool savedCredentials = SmbAuthService.SaveCredentials("test.invalid", "test-user", "test-secret", isolatedCredentials);
                 var isolatedSaved = SmbAuthService.LoadCredentials(isolatedCredentials);
-                Assert(isolatedSaved.HasValue && isolatedSaved.Value.Server == "test.invalid" && isolatedSaved.Value.Password == "test-secret" &&
+                Assert(savedCredentials && isolatedSaved.HasValue && isolatedSaved.Value.Server == "test.invalid" && isolatedSaved.Value.Password == "test-secret" &&
                     !Encoding.UTF8.GetString(File.ReadAllBytes(isolatedCredentials)).Contains("test-secret"), "独立测试凭据可由当前 Windows 用户加密保存并读取");
-                SmbAuthService.ClearSavedCredentials(isolatedCredentials);
-                Assert(!File.Exists(isolatedCredentials), "只清除明确指定的隔离测试凭据");
+                bool clearedCredentials = SmbAuthService.ClearSavedCredentials(isolatedCredentials);
+                Assert(clearedCredentials && !File.Exists(isolatedCredentials), "只清除明确指定的隔离测试凭据");
+                string blockedParent = Path.Combine(root, "credential-parent-is-file");
+                File.WriteAllText(blockedParent, "not a directory");
+                Assert(!SmbAuthService.SaveCredentials("test.invalid", "test-user", "test-secret", Path.Combine(blockedParent, "credentials.dat")) &&
+                    !SmbAuthService.ClearSavedCredentials(root) && File.ReadAllText(blockedParent) == "not a directory",
+                    "凭据保存或清除失败会明确返回失败，不误报成功");
 
                 string backup = Path.Combine(root, "backup");
                 string target = Path.Combine(root, "restore");
@@ -329,6 +334,30 @@ namespace FNSyncPlus.Tests
                     try { await rpcClient.SendSignedTaskRpcAsync("file.mv", new Dictionary<string, object?>(), TimeSpan.FromSeconds(1)); }
                     catch (InvalidOperationException) { sendFailed = true; }
                     Assert(sendFailed && taskRequests.Count == 0, "异步 RPC 发送失败时清除待处理请求");
+                    var normalRequests = (Dictionary<string, TaskCompletionSource<string>>)type.GetField("_pendingRequests", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rpcClient)!;
+                    var socketField = type.GetField("_webSocket", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+                    var stopped = type.GetMethod("MarkControlChannelStopped", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+                    using var socket = new System.Net.WebSockets.ClientWebSocket();
+                    socketField.SetValue(rpcClient, socket);
+                    var pendingNormal = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var pendingLong = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    normalRequests.Add("normal-disconnect", pendingNormal);
+                    taskRequests.Add("long-disconnect", pendingLong);
+                    int lostEvents = 0;
+                    rpcClient.ConnectionLost += () => lostEvents++;
+                    stopped.Invoke(rpcClient, new object[] { socket, false });
+                    Assert(!rpcClient.IsAuthenticated && lostEvents == 1 && pendingNormal.Task.IsFaulted && pendingLong.Task.IsFaulted &&
+                        normalRequests.Count == 0 && taskRequests.Count == 0,
+                        "控制连接意外中断立即撤销登录状态并结束等待的请求");
+                    _ = pendingNormal.Task.Exception; _ = pendingLong.Task.Exception;
+                    using var newSocket = new System.Net.WebSockets.ClientWebSocket();
+                    socketField.SetValue(rpcClient, newSocket);
+                    rpcClient.SetAuthenticatedForTesting("isolated-test", 1, 1);
+                    stopped.Invoke(rpcClient, new object[] { socket, false });
+                    bool staleIgnored = rpcClient.IsAuthenticated && lostEvents == 1;
+                    stopped.Invoke(rpcClient, new object[] { newSocket, true });
+                    Assert(staleIgnored && !rpcClient.IsAuthenticated && lostEvents == 1,
+                        "旧连接结束不会影响新会话，主动断开不误报网络中断");
                 }
                 await using (var moveApi = new FnOsApiClient())
                 {
@@ -1338,6 +1367,7 @@ namespace FNSyncPlus.Tests
                 await TestReconnectSchedulingAsync(root);
                 await TestShutdownAsync(root);
                 await TestPausePersistsAsync(root);
+                await TestDisconnectLockAsync(root);
             }
             finally
             {
@@ -1733,6 +1763,48 @@ namespace FNSyncPlus.Tests
                 File.ReadAllText(Path.Combine(target, "sample.txt")) == "local synthetic content",
                 "显式恢复成功后保存状态并正常同步");
             await restarted.ShutdownAsync(TimeSpan.FromSeconds(5));
+        }
+
+        static async Task TestDisconnectLockAsync(string root)
+        {
+            var settings = AppSettings.CreateInMemory();
+            settings.IsolatedCredentialPath = Path.Combine(root, "missing-reconnect-credentials.dat");
+            using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "connection-lock-logs")));
+            var connection = new NasConnectionService(new SmbAuthService(), settings, manager);
+            var reconnectField = typeof(NasConnectionService).GetField("_reconnectCts", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+            var startReconnect = typeof(NasConnectionService).GetMethod("StartAutomaticReconnect", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+            var gate = (SemaphoreSlim)typeof(NasConnectionService).GetField("_connectionLock", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(connection)!;
+            if (!SmbAuthService.SaveCredentials("test.invalid", "test-user", "test-secret", settings.IsolatedCredentialPath)) throw new IOException("无法建立隔离凭据");
+            startReconnect.Invoke(connection, new object[] { 0L });
+            bool scheduled = reconnectField.GetValue(connection) != null;
+            await gate.WaitAsync();
+            var forgetting = connection.ForgetSavedCredentialsAsync();
+            try
+            {
+                if (forgetting.IsCompleted) throw new InvalidDataException("清除凭据没有等待连接操作");
+                // Simulate an already-running connection saving again before it releases the lock.
+                settings.RememberCredentials = true;
+                if (!SmbAuthService.SaveCredentials("test.invalid", "test-user", "test-secret", settings.IsolatedCredentialPath)) throw new IOException("无法写入隔离凭据");
+            }
+            finally { gate.Release(); }
+            var forgot = await forgetting;
+            startReconnect.Invoke(connection, new object[] { 0L });
+            Assert(scheduled && forgot.Success && !settings.RememberCredentials && !File.Exists(settings.IsolatedCredentialPath) && reconnectField.GetValue(connection) == null,
+                "清除凭据等待正在连接的操作，取消重连并防止凭据被重新写回");
+            await gate.WaitAsync();
+            var disconnect = connection.DisconnectAsync();
+            try
+            {
+                await Task.Delay(5300);
+                Assert(!disconnect.IsCompleted, "断开连接未获取互斥锁时继续等待，不擅自重置会话");
+            }
+            finally { gate.Release(); }
+            await disconnect;
+            bool first = gate.Wait(0);
+            bool second = gate.Wait(0);
+            if (first) gate.Release();
+            if (second) gate.Release();
+            Assert(first && !second, "断开连接只释放自身持有的互斥锁");
         }
 
         sealed class FaultInjectingProvider : INasStorageProvider, IExclusiveDirectoryProvider, IExperimentalContentReuseProvider

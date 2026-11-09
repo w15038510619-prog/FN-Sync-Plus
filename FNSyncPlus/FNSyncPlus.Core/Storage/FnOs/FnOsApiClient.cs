@@ -44,6 +44,9 @@ namespace FNSyncPlus.Core.Storage.FnOs
         private readonly Dictionary<string, TaskCompletionSource<string>> _pendingTaskRequests = new();
         private CancellationTokenSource? _receiveCts;
         private Task? _receiveLoopTask;
+        private CancellationTokenSource? _heartbeatCts;
+        private Task? _heartbeatTask;
+        private long _lastHeartbeatUtcTicks;
 
         private string? _host;
         private int _port;
@@ -57,7 +60,13 @@ namespace FNSyncPlus.Core.Storage.FnOs
         private byte[]? _hmacKeyBytes;
 
         public bool IsConnected => _webSocket?.State == WebSocketState.Open;
-        public bool IsAuthenticated { get; private set; }
+        private volatile bool _isAuthenticated;
+        public bool IsAuthenticated { get => _isAuthenticated; private set => _isAuthenticated = value; }
+        public DateTime? LastSuccessfulHeartbeatUtc
+        {
+            get { long ticks = Interlocked.Read(ref _lastHeartbeatUtcTicks); return ticks == 0 ? null : new DateTime(ticks, DateTimeKind.Utc); }
+        }
+        public event Action? ConnectionLost;
         public string? AuthToken { get; private set; }
         public string? LongToken { get; private set; }
         public string? AuthenticatedUser { get; private set; }
@@ -188,6 +197,26 @@ namespace FNSyncPlus.Core.Storage.FnOs
         /// </summary>
         public async Task ConnectAsync(string host, int port, bool useSsl, CancellationToken ct = default)
         {
+            await StopHeartbeatAsync().ConfigureAwait(false);
+            _receiveCts?.Cancel();
+            if (_receiveLoopTask != null)
+            {
+                try { await _receiveLoopTask.ConfigureAwait(false); } catch (OperationCanceledException) { }
+            }
+            _receiveCts?.Dispose();
+            _webSocket?.Dispose();
+            IsAuthenticated = false;
+            AuthToken = null;
+            LongToken = null;
+            AuthenticatedUser = null;
+            CurrentUid = null;
+            CurrentVolumeId = null;
+            _rsaPublicKeyPem = null;
+            _sessionId = null;
+            _aesKey = null;
+            _iv = null;
+            _hmacKeyBytes = null;
+            Interlocked.Exchange(ref _lastHeartbeatUtcTicks, 0);
             _host = host;
             _port = port;
             _useSsl = useSsl;
@@ -195,7 +224,6 @@ namespace FNSyncPlus.Core.Storage.FnOs
             string scheme = useSsl ? "wss" : "ws";
             var uri = new Uri($"{scheme}://{host}:{port}/websocket?type=main");
 
-            _webSocket?.Dispose();
             _webSocket = new ClientWebSocket();
             if (useSsl)
             {
@@ -209,9 +237,10 @@ namespace FNSyncPlus.Core.Storage.FnOs
             await _webSocket.ConnectAsync(uri, ct);
 
             // 启动消息接收循环
-            _receiveCts?.Cancel();
             _receiveCts = new CancellationTokenSource();
-            _receiveLoopTask = Task.Run(() => ReceiveLoopAsync(_receiveCts.Token));
+            var activeSocket = _webSocket;
+            var receiveToken = _receiveCts.Token;
+            _receiveLoopTask = Task.Run(() => ReceiveLoopAsync(activeSocket, receiveToken));
 
             // 发送首个握手请求获取 RSA 公钥 (util.crypto.getRSAPub)
             string getPubMsg = $"{{\"reqid\":\"{FnOsCryptoHelper.GenerateReqId()}\",\"req\":\"util.crypto.getRSAPub\"}}";
@@ -233,20 +262,20 @@ namespace FNSyncPlus.Core.Storage.FnOs
             }
         }
 
-        private async Task ReceiveLoopAsync(CancellationToken ct)
+        private async Task ReceiveLoopAsync(ClientWebSocket socket, CancellationToken ct)
         {
             var buffer = new byte[64 * 1024];
             var ms = new MemoryStream();
 
             try
             {
-                while (!ct.IsCancellationRequested && _webSocket != null && _webSocket.State == WebSocketState.Open)
+                while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
                 {
                     ms.SetLength(0);
                     WebSocketReceiveResult result;
                     do
                     {
-                        result = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                        result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
                         if (result.MessageType == WebSocketMessageType.Close)
                         {
                             return;
@@ -259,7 +288,72 @@ namespace FNSyncPlus.Core.Storage.FnOs
                     ProcessIncomingMessage(text);
                 }
             }
-            catch { }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+            catch (Exception) { /* The caller receives an explicit connection-lost signal below. */ }
+            finally { MarkControlChannelStopped(socket, ct.IsCancellationRequested); ms.Dispose(); }
+        }
+
+        private void MarkControlChannelStopped(ClientWebSocket socket, bool intentional)
+        {
+            List<TaskCompletionSource<string>> pending;
+            bool wasAuthenticated;
+            lock (_pendingRequests)
+            {
+                if (!ReferenceEquals(_webSocket, socket)) return;
+                wasAuthenticated = IsAuthenticated;
+                IsAuthenticated = false;
+                pending = _pendingRequests.Values.Concat(_pendingTaskRequests.Values).ToList();
+                _pendingRequests.Clear();
+                _pendingTaskRequests.Clear();
+            }
+            foreach (var request in pending)
+                request.TrySetException(new IOException("飞牛控制连接已中断，已发送的远端操作结果可能不确定"));
+            if (!intentional && wasAuthenticated) ConnectionLost?.Invoke();
+        }
+
+        private void StartHeartbeat()
+        {
+            if (_webSocket == null || !IsAuthenticated || (_heartbeatTask != null && !_heartbeatTask.IsCompleted)) return;
+            _heartbeatCts = new CancellationTokenSource();
+            var socket = _webSocket;
+            var token = _heartbeatCts.Token;
+            _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(socket, token));
+        }
+
+        private async Task HeartbeatLoopAsync(ClientWebSocket socket, CancellationToken token)
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+            try
+            {
+                while (await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
+                {
+                    if (!ReferenceEquals(_webSocket, socket) || !IsAuthenticated) return;
+                    string response = await SendSignedRpcAsync("user.info", new Dictionary<string, object?>(), token).ConfigureAwait(false);
+                    using var document = JsonDocument.Parse(response);
+                    if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                        (document.RootElement.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.String && result.GetString() == "fail") ||
+                        (document.RootElement.TryGetProperty("errno", out var error) && error.ValueKind == JsonValueKind.Number && error.TryGetInt32(out int code) && code != 0))
+                        throw new IOException("飞牛会话检查失败");
+                    Interlocked.Exchange(ref _lastHeartbeatUtcTicks, DateTime.UtcNow.Ticks);
+                }
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+            catch (Exception)
+            {
+                if (ReferenceEquals(_webSocket, socket))
+                {
+                    try { socket.Abort(); } catch (ObjectDisposedException) { }
+                }
+            }
+        }
+
+        private async Task StopHeartbeatAsync()
+        {
+            _heartbeatCts?.Cancel();
+            if (_heartbeatTask != null) await _heartbeatTask.ConfigureAwait(false);
+            _heartbeatCts?.Dispose();
+            _heartbeatCts = null;
+            _heartbeatTask = null;
         }
 
         private void ProcessIncomingMessage(string rawMessage)
@@ -371,19 +465,26 @@ namespace FNSyncPlus.Core.Storage.FnOs
 
             string envelopeJson = JsonSerializer.Serialize(envelope);
 
-            var tcs = new TaskCompletionSource<string>();
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             lock (_pendingRequests)
             {
                 _pendingRequests[reqId] = tcs;
             }
 
-            await SendRawTextAsync(envelopeJson, ct);
-
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            using var reg = linked.Token.Register(() => tcs.TrySetCanceled());
-
-            string responseJson = await tcs.Task;
+            string responseJson;
+            try
+            {
+                await SendRawTextAsync(envelopeJson, ct).ConfigureAwait(false);
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+                using var reg = linked.Token.Register(() => tcs.TrySetCanceled());
+                responseJson = await tcs.Task.ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_pendingRequests)
+                    if (_pendingRequests.TryGetValue(reqId, out var pending) && ReferenceEquals(pending, tcs)) _pendingRequests.Remove(reqId);
+            }
             var loginResp = JsonSerializer.Deserialize<FnOsLoginResponse>(responseJson);
 
             if (loginResp?.Result == "succ" && !string.IsNullOrEmpty(loginResp.EncryptedSecretBase64))
@@ -392,10 +493,14 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 byte[] rawSecretCipher = Convert.FromBase64String(loginResp.EncryptedSecretBase64);
                 _hmacKeyBytes = FnOsCryptoHelper.DecryptAesCbc(rawSecretCipher, _aesKey, _iv);
 
-                AuthToken = loginResp.Token;
-                LongToken = loginResp.LongToken;
-                AuthenticatedUser = username;
-                IsAuthenticated = true;
+                lock (_pendingRequests)
+                {
+                    if (!IsConnected) throw new IOException("登录时飞牛控制连接已中断");
+                    AuthToken = loginResp.Token;
+                    LongToken = loginResp.LongToken;
+                    AuthenticatedUser = username;
+                    IsAuthenticated = true;
+                }
 
                 // 登录成功后立即通过 user.info 获取当前用户的权威 UID 与账户信息
                 try
@@ -408,7 +513,10 @@ namespace FNSyncPlus.Core.Storage.FnOs
                         CurrentUid = uidProp.GetInt32();
                     }
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch { }
+                if (!IsAuthenticated || !IsConnected) throw new IOException("登录后飞牛控制连接已中断");
+                StartHeartbeat();
             }
 
             return loginResp ?? new FnOsLoginResponse { Result = "failed", ErrMsg = "Empty response" };
@@ -449,19 +557,26 @@ namespace FNSyncPlus.Core.Storage.FnOs
             };
 
             string envelopeJson = JsonSerializer.Serialize(envelope);
-            var tcs = new TaskCompletionSource<string>();
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             lock (_pendingRequests)
             {
                 _pendingRequests[reqId] = tcs;
             }
 
-            await SendRawTextAsync(envelopeJson, ct).ConfigureAwait(false);
-
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            using var reg = linked.Token.Register(() => tcs.TrySetCanceled());
-
-            string responseJson = await tcs.Task.ConfigureAwait(false);
+            string responseJson;
+            try
+            {
+                await SendRawTextAsync(envelopeJson, ct).ConfigureAwait(false);
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+                using var reg = linked.Token.Register(() => tcs.TrySetCanceled());
+                responseJson = await tcs.Task.ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_pendingRequests)
+                    if (_pendingRequests.TryGetValue(reqId, out var pending) && ReferenceEquals(pending, tcs)) _pendingRequests.Remove(reqId);
+            }
             var loginResp = JsonSerializer.Deserialize<FnOsLoginResponse>(responseJson);
 
             if (loginResp?.Result == "succ" && !string.IsNullOrEmpty(loginResp.EncryptedSecretBase64))
@@ -469,10 +584,14 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 byte[] rawSecretCipher = Convert.FromBase64String(loginResp.EncryptedSecretBase64);
                 _hmacKeyBytes = FnOsCryptoHelper.DecryptAesCbc(rawSecretCipher, _aesKey, _iv);
 
-                AuthToken = loginResp.Token;
-                LongToken = loginResp.LongToken;
-                AuthenticatedUser = username;
-                IsAuthenticated = true;
+                lock (_pendingRequests)
+                {
+                    if (!IsConnected) throw new IOException("登录时飞牛控制连接已中断");
+                    AuthToken = loginResp.Token;
+                    LongToken = loginResp.LongToken;
+                    AuthenticatedUser = username;
+                    IsAuthenticated = true;
+                }
 
                 try
                 {
@@ -484,7 +603,10 @@ namespace FNSyncPlus.Core.Storage.FnOs
                         CurrentUid = uidProp.GetInt32();
                     }
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch { }
+                if (!IsAuthenticated || !IsConnected) throw new IOException("登录后飞牛控制连接已中断");
+                StartHeartbeat();
             }
 
             return loginResp ?? new FnOsLoginResponse { Result = "failed", ErrMsg = "Empty response" };
@@ -902,6 +1024,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
 
         public async ValueTask DisposeAsync()
         {
+            await StopHeartbeatAsync().ConfigureAwait(false);
             _receiveCts?.Cancel();
             if (_receiveLoopTask != null)
             {

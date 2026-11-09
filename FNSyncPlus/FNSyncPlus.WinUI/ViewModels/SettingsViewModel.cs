@@ -8,6 +8,7 @@ namespace FNSyncPlus.WinUI.ViewModels
     public partial class SettingsViewModel : ObservableObject
     {
         private readonly AppSettings _settings;
+        private readonly NasConnectionService _connectionService;
 
         [ObservableProperty]
         private bool _startWithWindows;
@@ -21,9 +22,10 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private string _statusNotice = string.Empty;
 
-        public SettingsViewModel(AppSettings settings)
+        public SettingsViewModel(AppSettings settings, NasConnectionService connectionService)
         {
             _settings = settings;
+            _connectionService = connectionService;
 
             _startWithWindows = settings.StartWithWindows;
             _minimizeToTray = settings.MinimizeToTray;
@@ -56,11 +58,10 @@ namespace FNSyncPlus.WinUI.ViewModels
         }
 
         [RelayCommand]
-        public void ClearCredentials()
+        public async System.Threading.Tasks.Task ClearCredentials()
         {
-            if (!_settings.IsInMemoryOnly || !string.IsNullOrEmpty(_settings.IsolatedCredentialPath))
-                SmbAuthService.ClearSavedCredentials(_settings.IsolatedCredentialPath);
-            StatusNotice = _settings.IsInMemoryOnly ? "已清除隔离测试会话保存的凭据。" : "已清除本机保存的 NAS 登录凭据。";
+            var result = await _connectionService.ForgetSavedCredentialsAsync();
+            StatusNotice = result.Message;
         }
     }
 }

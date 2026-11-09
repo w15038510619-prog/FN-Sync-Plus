@@ -31,6 +31,10 @@ namespace FNSyncPlus.Core.Services
 
         private readonly SemaphoreSlim _connectionLock = new(1, 1);
         private CancellationTokenSource? _activeConnectionCts;
+        private readonly object _reconnectLock = new();
+        private CancellationTokenSource? _reconnectCts;
+        private long _connectionIntentVersion;
+        private bool _disconnectRequested;
 
         private NasConnectionState _state = NasConnectionState.Disconnected;
         private string _serverAddress = string.Empty;
@@ -217,13 +221,21 @@ namespace FNSyncPlus.Core.Services
         /// <summary>
         /// 执行 NAS 连接与身份认证 (默认首选飞牛原生个人空间模式)
         /// </summary>
-        public async Task<(bool Success, string Message)> ConnectAsync(
+        public Task<(bool Success, string Message)> ConnectAsync(
             string server,
             string user,
             string password,
             bool rememberCredentials,
             StorageProviderType providerType = StorageProviderType.FnOsPersonal,
             string? twoFactorCode = null)
+        {
+            CancelAutomaticReconnect(disconnectRequested: false);
+            return ConnectCoreAsync(server, user, password, rememberCredentials, providerType, twoFactorCode, CancellationToken.None);
+        }
+
+        private async Task<(bool Success, string Message)> ConnectCoreAsync(
+            string server, string user, string password, bool rememberCredentials,
+            StorageProviderType providerType, string? twoFactorCode, CancellationToken reconnectToken)
         {
             if (string.IsNullOrWhiteSpace(server) || string.IsNullOrWhiteSpace(user))
             {
@@ -238,8 +250,10 @@ namespace FNSyncPlus.Core.Services
             }
 
             _activeConnectionCts?.Cancel();
-            _activeConnectionCts = new CancellationTokenSource();
-            var ct = _activeConnectionCts.Token;
+            _activeConnectionCts?.Dispose();
+            var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(reconnectToken);
+            _activeConnectionCts = attemptCts;
+            var ct = attemptCts.Token;
 
             try
             {
@@ -263,6 +277,7 @@ namespace FNSyncPlus.Core.Services
                     {
                         certInfo = await FnOsApiClient.ProbeCertificateAsync(host, port, ct).ConfigureAwait(false);
                     }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                     catch (Exception ex)
                     {
                         LogDiagnostics("ConnectAsync.TlsProbe", ex);
@@ -309,10 +324,33 @@ namespace FNSyncPlus.Core.Services
                     // 阶段 2-4：证书核对通过，发起 WebSocket 握手、账号鉴权与个人空间验证
                     // =========================================================================
                     var fnProvider = new FnOsPersonalStorageProvider(certInfo.Thumbprint);
+                    fnProvider.ConnectionLost += () => _ = HandleFnOsConnectionLostAsync(fnProvider);
                     StorageAuthResult authResult;
                     try
                     {
                         authResult = await fnProvider.ConnectAndAuthenticateAsync(server.Trim(), user.Trim(), password, twoFactorCode, ct).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                    {
+                        await fnProvider.DisposeAsync().ConfigureAwait(false);
+                        LastError = "飞牛连接超时，将等待网络恢复。";
+                        State = NasConnectionState.ConnectionLost;
+                        _taskManager.SetNasOnlineState(false);
+                        return (false, LastError);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        await fnProvider.DisposeAsync().ConfigureAwait(false);
+                        throw;
+                    }
+                    catch (Exception ex) when (ex is IOException or System.Net.Http.HttpRequestException or System.Net.WebSockets.WebSocketException or System.Net.Sockets.SocketException)
+                    {
+                        await fnProvider.DisposeAsync().ConfigureAwait(false);
+                        LogDiagnostics("ConnectAsync.Network", ex);
+                        LastError = "飞牛连接中断或暂时不可用，将等待网络恢复。";
+                        State = NasConnectionState.ConnectionLost;
+                        _taskManager.SetNasOnlineState(false);
+                        return (false, LastError);
                     }
                     catch (Exception ex)
                     {
@@ -328,7 +366,7 @@ namespace FNSyncPlus.Core.Services
                     {
                         TwoFactorRequired = true;
                         TwoFactorAccessToken = authResult.TwoFactorAccessToken;
-                        CurrentStorageProvider = fnProvider;
+                        await ReplaceCurrentProviderAsync(fnProvider).ConfigureAwait(false);
                         LastError = authResult.ErrorMessage;
                         State = NasConnectionState.AuthenticationFailed;
                         return (false, authResult.ErrorMessage);
@@ -336,7 +374,7 @@ namespace FNSyncPlus.Core.Services
 
                     if (authResult.Success)
                     {
-                        CurrentStorageProvider = fnProvider;
+                        await ReplaceCurrentProviderAsync(fnProvider).ConfigureAwait(false);
                         CurrentUid = authResult.UserUid;
                         PersonalRootDisplay = fnProvider.RootDisplayPath;
 
@@ -347,20 +385,24 @@ namespace FNSyncPlus.Core.Services
                         _settings.RememberCredentials = rememberCredentials;
                         _settings.Save();
 
+                        string? credentialWarning = null;
                         if (rememberCredentials && (!_settings.IsInMemoryOnly || !string.IsNullOrEmpty(_settings.IsolatedCredentialPath)))
                         {
-                            SmbAuthService.SaveCredentials(ServerAddress, Username, password, _settings.IsolatedCredentialPath);
+                            if (!SmbAuthService.SaveCredentials(ServerAddress, Username, password, _settings.IsolatedCredentialPath))
+                                credentialWarning = "登录凭据未能保存，断线后可能需要重新登录。";
                         }
-                        else if (!_settings.IsInMemoryOnly)
+                        else if (!rememberCredentials && (!_settings.IsInMemoryOnly || !string.IsNullOrEmpty(_settings.IsolatedCredentialPath)))
                         {
-                            SmbAuthService.ClearSavedCredentials();
+                            if (!SmbAuthService.ClearSavedCredentials(_settings.IsolatedCredentialPath))
+                                credentialWarning = "旧的本机登录凭据未能清除，请检查文件权限。";
                         }
 
                         _taskManager.SetNasOnlineState(true);
                         LastConnectedTime = DateTime.Now;
                         State = NasConnectionState.Connected;
+                        if (credentialWarning != null) LastError = credentialWarning;
 
-                        return (true, $"登录成功！已成功连接飞牛官方「我的文件」个人空间 (UID: {CurrentUid})。");
+                        return (true, $"登录成功！已成功连接飞牛官方「我的文件」个人空间 (UID: {CurrentUid})。{credentialWarning}");
                     }
                     else
                     {
@@ -377,7 +419,7 @@ namespace FNSyncPlus.Core.Services
                     var (success, errorMsg) = await _smbService.ConnectNasAsync(server.Trim(), user.Trim(), password).ConfigureAwait(false);
                     if (success)
                     {
-                        CurrentStorageProvider = new SmbStorageProvider(_smbService, $@"\\{server.Trim()}");
+                        await ReplaceCurrentProviderAsync(new SmbStorageProvider(_smbService, $@"\\{server.Trim()}")).ConfigureAwait(false);
                         ServerAddress = server.Trim();
                         Username = user.Trim();
                         _settings.NasServer = ServerAddress;
@@ -385,19 +427,23 @@ namespace FNSyncPlus.Core.Services
                         _settings.RememberCredentials = rememberCredentials;
                         _settings.Save();
 
+                        string? credentialWarning = null;
                         if (rememberCredentials && (!_settings.IsInMemoryOnly || !string.IsNullOrEmpty(_settings.IsolatedCredentialPath)))
                         {
-                            SmbAuthService.SaveCredentials(ServerAddress, Username, password, _settings.IsolatedCredentialPath);
+                            if (!SmbAuthService.SaveCredentials(ServerAddress, Username, password, _settings.IsolatedCredentialPath))
+                                credentialWarning = "登录凭据未能保存，断线后可能需要重新登录。";
                         }
-                        else if (!_settings.IsInMemoryOnly)
+                        else if (!rememberCredentials && (!_settings.IsInMemoryOnly || !string.IsNullOrEmpty(_settings.IsolatedCredentialPath)))
                         {
-                            SmbAuthService.ClearSavedCredentials();
+                            if (!SmbAuthService.ClearSavedCredentials(_settings.IsolatedCredentialPath))
+                                credentialWarning = "旧的本机登录凭据未能清除，请检查文件权限。";
                         }
 
                         _taskManager.SetNasOnlineState(true);
                         LastConnectedTime = DateTime.Now;
                         State = NasConnectionState.Connected;
-                        return (true, $"登录成功！已成功建立与 \\\\{ServerAddress} 的 SMB 验证会话。");
+                        if (credentialWarning != null) LastError = credentialWarning;
+                        return (true, $"登录成功！已成功建立与 \\\\{ServerAddress} 的 SMB 验证会话。{credentialWarning}");
                     }
                     else
                     {
@@ -412,6 +458,7 @@ namespace FNSyncPlus.Core.Services
             {
                 LastError = "连接操作已取消。";
                 State = NasConnectionState.Disconnected;
+                _taskManager.SetNasOnlineState(false);
                 return (false, LastError);
             }
             catch (Exception ex)
@@ -424,6 +471,8 @@ namespace FNSyncPlus.Core.Services
             }
             finally
             {
+                if (ReferenceEquals(_activeConnectionCts, attemptCts)) _activeConnectionCts = null;
+                attemptCts.Dispose();
                 _connectionLock.Release();
             }
         }
@@ -468,10 +517,19 @@ namespace FNSyncPlus.Core.Services
         /// </summary>
         public async Task DisconnectAsync()
         {
-            if (!await _connectionLock.WaitAsync(5000).ConfigureAwait(false))
+            CancelAutomaticReconnect(disconnectRequested: true);
+            bool lockAcquired = await _connectionLock.WaitAsync(5000).ConfigureAwait(false);
+            if (!lockAcquired)
             {
-                // 超时无法获取锁时强制重置
-                _activeConnectionCts?.Cancel();
+                // Ask the in-flight connection attempt to stop, but never mutate shared
+                // connection state or release a semaphore we do not own.
+                try { _activeConnectionCts?.Cancel(); } catch (ObjectDisposedException) { }
+                lockAcquired = await _connectionLock.WaitAsync(5000).ConfigureAwait(false);
+                if (!lockAcquired)
+                {
+                    LastError = "连接操作仍未结束，暂时无法断开；请稍后重试。";
+                    return;
+                }
             }
 
             try
@@ -535,7 +593,7 @@ namespace FNSyncPlus.Core.Services
             }
             finally
             {
-                try { _connectionLock.Release(); } catch { }
+                _connectionLock.Release();
             }
         }
 
@@ -580,6 +638,109 @@ namespace FNSyncPlus.Core.Services
             State = NasConnectionState.ConnectionLost;
             _taskManager.SetNasOnlineState(false);
             return false;
+        }
+
+        private async Task HandleFnOsConnectionLostAsync(FnOsPersonalStorageProvider provider)
+        {
+            long intentVersion;
+            await _connectionLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (!ReferenceEquals(CurrentStorageProvider, provider) || provider.IsAuthenticated) return;
+                LastError = "飞牛控制连接已中断，请重新连接后继续备份。";
+                State = NasConnectionState.ConnectionLost;
+                _taskManager.SetNasOnlineState(false);
+                lock (_reconnectLock) intentVersion = _connectionIntentVersion;
+            }
+            finally { _connectionLock.Release(); }
+            StartAutomaticReconnect(intentVersion);
+        }
+
+        private void CancelAutomaticReconnect(bool disconnectRequested)
+        {
+            CancellationTokenSource? existing;
+            lock (_reconnectLock)
+            {
+                _disconnectRequested = disconnectRequested;
+                _connectionIntentVersion++;
+                existing = _reconnectCts;
+                _reconnectCts = null;
+            }
+            try { existing?.Cancel(); } catch (ObjectDisposedException) { }
+        }
+
+        /// <summary>Stops retries and waits for any in-flight connection before removing saved credentials.</summary>
+        public async Task<(bool Success, string Message)> ForgetSavedCredentialsAsync()
+        {
+            _settings.RememberCredentials = false;
+            CancelAutomaticReconnect(disconnectRequested: false);
+            if (!await _connectionLock.WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false))
+                return (false, "连接操作仍未结束，凭据尚未清除，请稍后重试。");
+            try
+            {
+                // An already-running login may have saved its preference while we waited.
+                _settings.RememberCredentials = false;
+                bool removed = _settings.IsInMemoryOnly && string.IsNullOrEmpty(_settings.IsolatedCredentialPath) ||
+                    SmbAuthService.ClearSavedCredentials(_settings.IsolatedCredentialPath);
+                try { _settings.Save(); }
+                catch (Exception ex) { return (false, $"凭据清除结果：{(removed ? "已清除" : "失败")}；保存设置失败：{ex.Message}"); }
+                if (!removed) return (false, "清除凭据失败，请检查文件权限。");
+                return (true, _settings.IsInMemoryOnly ? "已清除隔离测试会话保存的凭据，并停止自动重连。" : "已清除本机保存的 NAS 登录凭据，并停止自动重连。");
+            }
+            finally { _connectionLock.Release(); }
+        }
+
+        private void StartAutomaticReconnect(long intentVersion)
+        {
+            if (!_settings.RememberCredentials || (_settings.IsInMemoryOnly && string.IsNullOrEmpty(_settings.IsolatedCredentialPath))) return;
+            CancellationTokenSource retry;
+            lock (_reconnectLock)
+            {
+                if (_disconnectRequested || intentVersion != _connectionIntentVersion || _reconnectCts != null) return;
+                retry = new CancellationTokenSource();
+                _reconnectCts = retry;
+            }
+            _ = RunAutomaticReconnectAsync(retry, intentVersion);
+        }
+
+        private async Task RunAutomaticReconnectAsync(CancellationTokenSource retry, long intentVersion)
+        {
+            int[] seconds = { 2, 5, 10, 30 };
+            bool connectedOnce = false;
+            try
+            {
+                for (int attempt = 0; ; attempt++)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(seconds[Math.Min(attempt, seconds.Length - 1)]), retry.Token).ConfigureAwait(false);
+                    var credentials = SmbAuthService.LoadCredentials(_settings.IsolatedCredentialPath);
+                    if (credentials == null || !string.Equals(credentials.Value.Server, ServerAddress, StringComparison.OrdinalIgnoreCase) ||
+                        !string.Equals(credentials.Value.Username, Username, StringComparison.OrdinalIgnoreCase)) return;
+                    lock (_reconnectLock)
+                        if (_disconnectRequested || intentVersion != _connectionIntentVersion) return;
+                    var result = await ConnectCoreAsync(credentials.Value.Server, credentials.Value.Username, credentials.Value.Password,
+                        true, StorageProviderType.FnOsPersonal, null, retry.Token).ConfigureAwait(false);
+                    if (result.Success) { connectedOnce = true; return; }
+                    if (State == NasConnectionState.AuthenticationFailed || CertificateConfirmationRequired || TwoFactorRequired) return;
+                    retry.Token.ThrowIfCancellationRequested();
+                }
+            }
+            catch (OperationCanceledException) when (retry.IsCancellationRequested) { }
+            catch (Exception ex) { LogDiagnostics("AutomaticReconnect", ex); }
+            finally
+            {
+                lock (_reconnectLock)
+                    if (ReferenceEquals(_reconnectCts, retry)) _reconnectCts = null;
+                retry.Dispose();
+                if (connectedOnce && State == NasConnectionState.ConnectionLost) StartAutomaticReconnect(intentVersion);
+            }
+        }
+
+        private async Task ReplaceCurrentProviderAsync(INasStorageProvider provider)
+        {
+            var previous = CurrentStorageProvider;
+            CurrentStorageProvider = provider;
+            if (previous != null && !ReferenceEquals(previous, provider))
+                await previous.DisposeAsync().ConfigureAwait(false);
         }
 
         private static void ParseHostAndPort(string server, out string host, out int port)
