@@ -12,7 +12,6 @@ namespace FNSyncPlus.WinUI.Dialogs
         private readonly TaskManager _taskManager;
 
         public bool WasConfigSaved { get; private set; }
-        public bool WasTaskRemoved { get; private set; }
 
         public TaskSettingsDialog(SyncTask task, TaskManager taskManager)
         {
@@ -22,7 +21,6 @@ namespace FNSyncPlus.WinUI.Dialogs
             InitializeComponent();
 
             PrimaryButtonClick += OnPrimaryButtonClick;
-            SecondaryButtonClick += OnSecondaryButtonClick;
 
             LoadTaskSettings();
         }
@@ -134,21 +132,6 @@ namespace FNSyncPlus.WinUI.Dialogs
 
             _taskManager.UpdateTask(_task);
             WasConfigSaved = true;
-        }
-
-        private async void OnSecondaryButtonClick(ContentDialog sender, ContentDialogButtonClickEventArgs args)
-        {
-            // 拦截默认关闭，改为安全移除
-            var deferral = args.GetDeferral();
-            try
-            {
-                await _taskManager.RemoveTaskAsync(_task.TaskId);
-                WasTaskRemoved = true;
-            }
-            finally
-            {
-                deferral.Complete();
-            }
         }
     }
 }
