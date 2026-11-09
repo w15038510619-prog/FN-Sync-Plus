@@ -685,6 +685,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
                     uploadPath = string.IsNullOrEmpty(parentDir) ? checkRes.ErrMsg : $"{parentDir}/{checkRes.ErrMsg}";
                 }
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 if (ex.Message.Contains("4104") || ex.Message.Contains("Path Is Too Long"))

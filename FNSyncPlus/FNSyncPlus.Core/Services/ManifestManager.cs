@@ -75,6 +75,25 @@ namespace FNSyncPlus.Core.Services
             return Path.Combine(GetMetadataDirectory(targetRootDirectory), Manifest.StagingDirName);
         }
 
+        private static void RejectVersionedMetadata(string metadataDirectory)
+        {
+            foreach (string name in new[] { "manifest-versions", "lock-generations" })
+            {
+                string path = Path.Combine(metadataDirectory, name);
+                try { _ = File.GetAttributes(path); }
+                catch (FileNotFoundException) { continue; }
+                catch (DirectoryNotFoundException) { continue; }
+                throw new InvalidDataException("备份存在版本化迁移或锁记录，旧版清单入口拒绝读写；请使用受支持的恢复流程");
+            }
+        }
+
+        private static async Task RejectVersionedMetadataAsync(INasStorageProvider provider, string metadataDirectory, CancellationToken token)
+        {
+            foreach (string name in new[] { "manifest-versions", "lock-generations" })
+                if (await provider.GetItemAsync($"{metadataDirectory}/{name}", token).ConfigureAwait(false) != null)
+                    throw new InvalidDataException("备份存在版本化迁移或锁记录，旧版清单入口拒绝读写；请使用受支持的恢复流程");
+        }
+
         /// <summary>
         /// 尝试对目标 NAS 目录获取独占同步锁，防止多任务或跨机器并发写入同一个目标目录
         /// </summary>
@@ -115,6 +134,7 @@ namespace FNSyncPlus.Core.Services
                 string metaDir = Path.Combine(longTarget, Manifest.MetadataDirName);
                 string isolatedPath = Path.Combine(metaDir, Manifest.IsolatedManifestFileName);
                 string backupPath = Path.Combine(metaDir, Manifest.IsolatedManifestFileName + ".bak");
+                RejectVersionedMetadata(metaDir);
 
                 // 1. 优先从隔离元数据目录 .fnsync/manifest.json 读取
                 if (File.Exists(isolatedPath) || File.Exists(backupPath))
@@ -222,6 +242,7 @@ namespace FNSyncPlus.Core.Services
                 string metaDir = string.IsNullOrEmpty(cleanFolder) ? ".fnsync" : $"{cleanFolder}/.fnsync";
                 if (!await storageProvider.ExistsAsync(metaDir, cancellationToken).ConfigureAwait(false))
                     return new Manifest { Version = Manifest.CurrentVersion, TargetRoot = targetFolder, UpdatedAt = DateTimeOffset.UtcNow };
+                await RejectVersionedMetadataAsync(storageProvider, metaDir, cancellationToken).ConfigureAwait(false);
 
                 string bakRelPath = manifestRelPath + ".bak";
                 bool hasMain = await storageProvider.ExistsAsync(manifestRelPath, cancellationToken).ConfigureAwait(false);
@@ -282,6 +303,7 @@ namespace FNSyncPlus.Core.Services
                 string metaDir = string.IsNullOrEmpty(cleanFolder) ? ".fnsync" : $"{cleanFolder}/.fnsync";
                 var directoryResult = await storageProvider.CreateDirectoryAsync(metaDir, cancellationToken).ConfigureAwait(false);
                 if (!directoryResult.Success) throw new IOException($"无法创建清单目录: {directoryResult.ErrorMessage}");
+                await RejectVersionedMetadataAsync(storageProvider, metaDir, cancellationToken).ConfigureAwait(false);
 
                 byte[] manifestBytes = JsonSerializer.SerializeToUtf8Bytes(manifest, JsonOptions);
 
@@ -346,6 +368,8 @@ namespace FNSyncPlus.Core.Services
             {
                 Directory.CreateDirectory(metaDir);
             }
+
+            RejectVersionedMetadata(metaDir);
 
             manifest.UpdatedAt = DateTimeOffset.UtcNow;
             string currentPath = Path.Combine(metaDir, Manifest.IsolatedManifestFileName);

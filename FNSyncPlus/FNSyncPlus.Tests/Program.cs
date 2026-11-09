@@ -361,6 +361,319 @@ namespace FNSyncPlus.Tests
                 bool newRestored = await historyEngine.RunRestoreHistoryFileAsync(versionProvider, "content-target", restoredNew, currentForRestore);
                 Assert(oldRestored && newRestored && File.ReadAllText(Path.Combine(restoredOld, longOriginal)) == "旧内容" &&
                     File.ReadAllText(Path.Combine(restoredNew, longOriginal)) == "新内容", "原型清单和内容对象恢复 300 字节名称的旧版及新版");
+
+                async Task<(string folder, string manifestPath, byte[] original)> MakeLegacyAsync(string folder, int format, bool missingHash = false)
+                {
+                    string full = Path.Combine(root, folder);
+                    Directory.CreateDirectory(full);
+                    string activePath = Path.Combine(full, "current.txt");
+                    string historyPath = Path.Combine(full, "history.txt");
+                    File.WriteAllText(activePath, "legacy active");
+                    File.WriteAllText(historyPath, "legacy history");
+                    var legacy = new Manifest { Version = format, Files = new() { new ManifestFileEntry {
+                        OriginalRel = longOriginal, StoredRel = "current.txt", Size = new FileInfo(activePath).Length,
+                        Sha256 = missingHash ? "" : HashHelper.ComputeFileSha256(activePath)
+                    } }, History = new() { new ManifestHistoryEntry {
+                        OriginalRel = longOriginal, StoredRel = "history.txt", Size = new FileInfo(historyPath).Length,
+                        Sha256 = HashHelper.ComputeFileSha256(historyPath), Reason = "superseded"
+                    } }, Directories = new() { new ManifestDirEntry { OriginalRel = "空目录", StoredRel = "空目录" } } };
+                    await manifestManager.SaveManifestAtomicAsync(versionProvider, folder, legacy);
+                    string path = Path.Combine(full, ".fnsync", "manifest.json");
+                    return (folder, path, File.ReadAllBytes(path));
+                }
+                var migration = new LegacyBackupMigration();
+                string unrelatedDirectory = Path.Combine(root, "migration-unrelated");
+                Directory.CreateDirectory(unrelatedDirectory);
+                bool unrelatedMigrationRejected = false;
+                try { await migration.MigrateAsync(versionProvider, "migration-unrelated"); }
+                catch (InvalidDataException) { unrelatedMigrationRejected = true; }
+                Assert(unrelatedMigrationRejected && !Directory.Exists(Path.Combine(unrelatedDirectory, ".fnsync")),
+                    "不含旧清单的目录不会被迁移或创建元数据");
+                string versionedRestorableFolder = "";
+                foreach (int legacyVersion in new[] { 3, 4 })
+                {
+                    var fixture = await MakeLegacyAsync($"migration-v{legacyVersion}", legacyVersion);
+                    var migratedSnapshot = await migration.MigrateAsync(versionProvider, fixture.folder);
+                    var loadedMigration = await versions.LoadAsync(versionProvider, fixture.folder);
+                    string migratedRestore = Path.Combine(root, $"migration-restore-{legacyVersion}");
+                    bool restoredHistory = await historyEngine.RunRestoreHistoryFileAsync(versionProvider, fixture.folder, migratedRestore, loadedMigration!.Manifest.History.Single());
+                    bool preserved = fixture.original.SequenceEqual(File.ReadAllBytes(fixture.manifestPath)) &&
+                        File.ReadAllText(Path.Combine(root, fixture.folder, "current.txt")) == "legacy active" &&
+                        File.ReadAllText(Path.Combine(root, fixture.folder, "history.txt")) == "legacy history";
+                    Assert(migratedSnapshot.Manifest.Version == legacyVersion && preserved && restoredHistory &&
+                        File.ReadAllText(Path.Combine(migratedRestore, longOriginal)) == "legacy history" &&
+                        migratedSnapshot.Manifest.Files.Single().StoredRel.StartsWith(".fnsync/objects/", StringComparison.Ordinal),
+                        $"v{legacyVersion} 旧备份迁移保留原文件并可恢复历史");
+                    string currentRestore = Path.Combine(root, $"migration-current-{legacyVersion}");
+                    var currentReport = await historyEngine.RunRestoreVersionedAsync(versionProvider, fixture.folder, currentRestore);
+                    Assert(currentReport.RestoredFiles == 1 && currentReport.IntegrityVerifiedFiles == 1 &&
+                        File.ReadAllText(Path.Combine(currentRestore, longOriginal)) == "legacy active" && Directory.Exists(Path.Combine(currentRestore, "空目录")),
+                        $"v{legacyVersion} 迁移后恢复当前文件和空目录");
+                    File.WriteAllText(Path.Combine(currentRestore, longOriginal), "user existing");
+                    var skipReport = await historyEngine.RunRestoreVersionedAsync(versionProvider, fixture.folder, currentRestore);
+                    Assert(skipReport.SkippedFiles == 1 && File.ReadAllText(Path.Combine(currentRestore, longOriginal)) == "user existing",
+                        $"v{legacyVersion} 版本化恢复默认不覆盖用户文件");
+                    bool legacyReadRejected = false, legacyWriteRejected = false, localReadRejected = false, localWriteRejected = false;
+                    try { await manifestManager.LoadManifestAsync(versionProvider, fixture.folder); } catch (InvalidDataException) { legacyReadRejected = true; }
+                    try { await manifestManager.SaveManifestAtomicAsync(versionProvider, fixture.folder, new Manifest()); } catch (InvalidDataException) { legacyWriteRejected = true; }
+                    try { await manifestManager.LoadManifestAsync(Path.Combine(root, fixture.folder)); } catch (InvalidDataException) { localReadRejected = true; }
+                    try { await manifestManager.SaveManifestAtomicAsync(Path.Combine(root, fixture.folder), new Manifest()); } catch (InvalidDataException) { localWriteRejected = true; }
+                    Assert(legacyReadRejected && legacyWriteRejected && localReadRejected && localWriteRejected &&
+                        fixture.original.SequenceEqual(File.ReadAllBytes(fixture.manifestPath)),
+                        $"v{legacyVersion} 迁移后旧清单入口拒绝读取和覆盖");
+                    versionedRestorableFolder = fixture.folder;
+                    bool repeatedRejected = false;
+                    try { await migration.MigrateAsync(versionProvider, fixture.folder); }
+                    catch (InvalidOperationException) { repeatedRejected = true; }
+                    Assert(repeatedRejected, $"v{legacyVersion} 已迁移备份拒绝重复迁移");
+                }
+                var missingHashFixture = await MakeLegacyAsync("migration-no-hash", 3, true);
+                bool noHashRejected = false;
+                try { await migration.MigrateAsync(versionProvider, missingHashFixture.folder); }
+                catch (InvalidDataException) { noHashRejected = true; }
+                Assert(noHashRejected && missingHashFixture.original.SequenceEqual(File.ReadAllBytes(missingHashFixture.manifestPath)) &&
+                    await versions.LoadAsync(versionProvider, missingHashFixture.folder) == null, "旧备份缺少哈希时拒绝迁移且保留原清单");
+                var corruptCopyFixture = await MakeLegacyAsync("migration-corrupt-copy", 4);
+                versionProvider.CorruptObjectUpload = true;
+                bool corruptCopyRejected = false;
+                try { await migration.MigrateAsync(versionProvider, corruptCopyFixture.folder); }
+                catch (InvalidDataException) { corruptCopyRejected = true; }
+                versionProvider.CorruptObjectUpload = false;
+                Assert(corruptCopyRejected && corruptCopyFixture.original.SequenceEqual(File.ReadAllBytes(corruptCopyFixture.manifestPath)) &&
+                    await versions.LoadAsync(versionProvider, corruptCopyFixture.folder) == null, "迁移对象损坏时不提交新清单");
+                var changedLegacyFixture = await MakeLegacyAsync("migration-legacy-changed", 4);
+                versionProvider.AfterObjectUpload = () => File.AppendAllText(changedLegacyFixture.manifestPath, " ");
+                bool changedLegacyRejected = false;
+                try { await migration.MigrateAsync(versionProvider, changedLegacyFixture.folder); }
+                catch (IOException) { changedLegacyRejected = true; }
+                Assert(changedLegacyRejected && !changedLegacyFixture.original.SequenceEqual(File.ReadAllBytes(changedLegacyFixture.manifestPath)) &&
+                    await versions.LoadAsync(versionProvider, changedLegacyFixture.folder) == null, "迁移期间旧清单被修改时拒绝提交并保留外部修改");
+                var canceledMigrationFixture = await MakeLegacyAsync("migration-canceled", 4);
+                using var migrationCancellation = new CancellationTokenSource();
+                versionProvider.AfterObjectUpload = migrationCancellation.Cancel;
+                bool migrationCanceled = false;
+                try { await migration.MigrateAsync(versionProvider, canceledMigrationFixture.folder, migrationCancellation.Token); }
+                catch (OperationCanceledException) { migrationCanceled = true; }
+                Assert(migrationCanceled && canceledMigrationFixture.original.SequenceEqual(File.ReadAllBytes(canceledMigrationFixture.manifestPath)) &&
+                    await versions.LoadAsync(versionProvider, canceledMigrationFixture.folder) == null, "迁移中取消不提交新清单");
+                var lockedMigrationFixture = await MakeLegacyAsync("migration-locked", 4);
+                var heldMigrationLease = await ExperimentalRemoteLease.TryAcquireAsync(versionProvider, lockedMigrationFixture.folder);
+                bool lockedMigrationRejected = false;
+                try { await migration.MigrateAsync(versionProvider, lockedMigrationFixture.folder); }
+                catch (IOException) { lockedMigrationRejected = true; }
+                Assert(heldMigrationLease != null && lockedMigrationRejected &&
+                    lockedMigrationFixture.original.SequenceEqual(File.ReadAllBytes(lockedMigrationFixture.manifestPath)) &&
+                    await versions.LoadAsync(versionProvider, lockedMigrationFixture.folder) == null, "迁移目标锁被占用时拒绝迁移");
+                await heldMigrationLease!.ReleaseAsync();
+                var unknownMigrationFixture = await MakeLegacyAsync("migration-unknown", 4);
+                versionProvider.ErrorAfterCompleteContains = "/commit-";
+                bool migrationOutcomeUnknown = false;
+                try { await migration.MigrateAsync(versionProvider, unknownMigrationFixture.folder); }
+                catch (IOException) { migrationOutcomeUnknown = true; }
+                versionProvider.ErrorAfterCompleteContains = null;
+                var uncertainMigration = await versions.LoadAsync(versionProvider, unknownMigrationFixture.folder);
+                var blockedAfterUnknown = await ExperimentalRemoteLease.TryAcquireAsync(versionProvider, unknownMigrationFixture.folder);
+                Assert(migrationOutcomeUnknown && uncertainMigration != null && blockedAfterUnknown == null &&
+                    unknownMigrationFixture.original.SequenceEqual(File.ReadAllBytes(unknownMigrationFixture.manifestPath)),
+                    "迁移提交响应丢失时保留锁并阻止后续写入");
+                var releaseErrorFixture = await MakeLegacyAsync("migration-release-error", 4);
+                versionProvider.ErrorAfterCompleteContains = "/released";
+                bool committedReleaseErrorReported = false;
+                try { await migration.MigrateAsync(versionProvider, releaseErrorFixture.folder); }
+                catch (IOException ex) { committedReleaseErrorReported = ex.Message.Contains("已提交", StringComparison.Ordinal); }
+                versionProvider.ErrorAfterCompleteContains = null;
+                Assert(committedReleaseErrorReported && await versions.LoadAsync(versionProvider, releaseErrorFixture.folder) != null,
+                    "迁移已提交但释放响应丢失时明确报告已提交");
+                var beforeCommitReleaseFixture = await MakeLegacyAsync("migration-failed-release", 3, true);
+                versionProvider.ErrorAfterCompleteContains = "/released";
+                bool bothErrorsReported = false;
+                try { await migration.MigrateAsync(versionProvider, beforeCommitReleaseFixture.folder); }
+                catch (IOException ex) { bothErrorsReported = ex.Message.Contains("未提交", StringComparison.Ordinal) && ex.InnerException is AggregateException; }
+                versionProvider.ErrorAfterCompleteContains = null;
+                Assert(bothErrorsReported && await versions.LoadAsync(versionProvider, beforeCommitReleaseFixture.folder) == null,
+                    "迁移失败且释放失败时保留两种错误并明确未提交");
+                var batchFixture = await MakeLegacyAsync("versioned-batch", 4);
+                var batchBase = await migration.MigrateAsync(versionProvider, batchFixture.folder);
+                string batchSource = Path.Combine(root, "versioned-batch-source");
+                Directory.CreateDirectory(Path.Combine(batchSource, "空目录"));
+                string batchExisting = Path.Combine(batchSource, longOriginal);
+                string batchNew = Path.Combine(batchSource, "new.txt");
+                File.WriteAllText(batchExisting, "legacy active");
+                File.WriteAllText(batchNew, "new content");
+                var versionedBackup = new ExperimentalVersionedBackup();
+                bool legacySyncRejected = false, legacyRestoreRejected = false;
+                string priorTestDirectory = Environment.CurrentDirectory;
+                try
+                {
+                    Environment.CurrentDirectory = root;
+                    var legacySyncProvider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+                    try { await new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService())
+                        .RunSyncAsync(batchSource, batchFixture.folder, legacySyncProvider, BackupStrategy.Smart, null, CancellationToken.None); }
+                    catch (IOException) { legacySyncRejected = true; }
+                }
+                finally { Environment.CurrentDirectory = priorTestDirectory; }
+                try { await historyEngine.RunRestoreAsync(versionProvider, batchFixture.folder, Path.Combine(root, "stale-legacy-restore")); }
+                catch (InvalidDataException) { legacyRestoreRejected = true; }
+                Assert(legacySyncRejected && legacyRestoreRejected && !File.Exists(Path.Combine(root, batchFixture.folder, "new.txt")) &&
+                    batchFixture.original.SequenceEqual(File.ReadAllBytes(batchFixture.manifestPath)), "旧同步和恢复流程不再访问已迁移备份");
+                bool unrelatedSyncRejected = false;
+                try { await versionedBackup.RunAsync(versionProvider, batchSource, "migration-unrelated"); }
+                catch (InvalidDataException) { unrelatedSyncRejected = true; }
+                Assert(unrelatedSyncRejected && !Directory.Exists(Path.Combine(unrelatedDirectory, ".fnsync")),
+                    "无版本化清单的目录不会被增量同步写入");
+                bool brokenHeadSyncRejected = false;
+                try { await versionedBackup.RunAsync(versionProvider, batchSource, "version-test"); }
+                catch (InvalidDataException) { brokenHeadSyncRejected = true; }
+                Assert(brokenHeadSyncRejected && !Directory.Exists(Path.Combine(root, "version-test", ".fnsync", "lock-generations")),
+                    "版本记录损坏时在创建锁和上传对象前拒绝增量同步");
+                var firstBatch = await versionedBackup.RunAsync(versionProvider, batchSource, batchFixture.folder);
+                Assert(firstBatch.UploadedFiles == 1 && firstBatch.UnchangedFiles == 1 && firstBatch.Snapshot.Id != batchBase.Id &&
+                    firstBatch.Snapshot.Manifest.Files.Count == 2 && batchFixture.original.SequenceEqual(File.ReadAllBytes(batchFixture.manifestPath)),
+                    "版本化增量提交新增文件并保留旧主清单");
+                File.WriteAllText(batchExisting, "edited active");
+                var editedBatch = await versionedBackup.RunAsync(versionProvider, batchSource, batchFixture.folder);
+                string versionedRestorePath = Path.Combine(root, "versioned-batch-restore");
+                var editedRestore = await historyEngine.RunRestoreVersionedAsync(versionProvider, batchFixture.folder, versionedRestorePath);
+                var priorHistory = editedBatch.Snapshot.Manifest.History.Last(h => h.OriginalRel == longOriginal && h.Reason == "superseded");
+                string priorRestore = Path.Combine(root, "versioned-batch-old");
+                bool priorRestored = await historyEngine.RunRestoreHistoryFileAsync(versionProvider, batchFixture.folder, priorRestore, priorHistory);
+                Assert(editedBatch.UploadedFiles == 1 && editedBatch.UnchangedFiles == 1 && editedRestore.RestoredFiles == 2 &&
+                    priorRestored && File.ReadAllText(Path.Combine(priorRestore, longOriginal)) == "legacy active" &&
+                    File.ReadAllText(Path.Combine(versionedRestorePath, longOriginal)) == "edited active" && Directory.Exists(Path.Combine(versionedRestorePath, "空目录")),
+                    "版本化增量更新可分别恢复最新内容和旧版本");
+                string wrongSource = Path.Combine(root, "wrong-source");
+                Directory.CreateDirectory(wrongSource);
+                bool wrongSourceRejected = false;
+                try { await versionedBackup.RunAsync(versionProvider, wrongSource, batchFixture.folder); }
+                catch (InvalidDataException) { wrongSourceRejected = true; }
+                Assert(wrongSourceRejected && (await versions.LoadAsync(versionProvider, batchFixture.folder))?.Id == editedBatch.Snapshot.Id,
+                    "版本化增量拒绝与清单不匹配的源目录");
+                var heldBatch = await ExperimentalRemoteLease.TryAcquireAsync(versionProvider, batchFixture.folder);
+                bool busyBatchRejected = false;
+                try { await versionedBackup.RunAsync(versionProvider, batchSource, batchFixture.folder); }
+                catch (IOException) { busyBatchRejected = true; }
+                Assert(heldBatch != null && busyBatchRejected && (await versions.LoadAsync(versionProvider, batchFixture.folder))?.Id == editedBatch.Snapshot.Id,
+                    "版本化增量在目标被锁定时拒绝写入");
+                await heldBatch!.ReleaseAsync();
+                File.WriteAllText(batchNew, "updated new file");
+                versionProvider.CorruptObjectUpload = true;
+                bool failedBatch = false;
+                try { await versionedBackup.RunAsync(versionProvider, batchSource, batchFixture.folder); }
+                catch (InvalidDataException) { failedBatch = true; }
+                versionProvider.CorruptObjectUpload = false;
+                var retainedBatch = await versions.LoadAsync(versionProvider, batchFixture.folder);
+                string failedBatchRestore = Path.Combine(root, "versioned-batch-after-failure");
+                var retainedReport = await historyEngine.RunRestoreVersionedAsync(versionProvider, batchFixture.folder, failedBatchRestore);
+                Assert(failedBatch && retainedBatch?.Id == editedBatch.Snapshot.Id && retainedReport.RestoredFiles == 2 &&
+                    File.ReadAllText(Path.Combine(failedBatchRestore, "new.txt")) == "new content", "增量对象损坏时保留上一版本及可恢复内容");
+                File.Delete(batchExisting);
+                bool missingBatchRejected = false;
+                try { await versionedBackup.RunAsync(versionProvider, batchSource, batchFixture.folder); }
+                catch (InvalidDataException) { missingBatchRejected = true; }
+                Assert(missingBatchRejected && (await versions.LoadAsync(versionProvider, batchFixture.folder))?.Id == editedBatch.Snapshot.Id,
+                    "实验增量遇到删除或重命名时拒绝提交");
+                File.WriteAllText(batchExisting, "edited active");
+                using var batchCancellation = new CancellationTokenSource();
+                versionProvider.AfterObjectUpload = batchCancellation.Cancel;
+                bool batchCanceled = false;
+                try { await versionedBackup.RunAsync(versionProvider, batchSource, batchFixture.folder, batchCancellation.Token); }
+                catch (OperationCanceledException) { batchCanceled = true; }
+                Assert(batchCanceled && (await versions.LoadAsync(versionProvider, batchFixture.folder))?.Id == editedBatch.Snapshot.Id,
+                    "增量上传中取消保留上一版本");
+                versionProvider.ErrorAfterCompleteContains = "/commit-";
+                bool batchOutcomeUnknown = false;
+                try { await versionedBackup.RunAsync(versionProvider, batchSource, batchFixture.folder); }
+                catch (IOException ex) { batchOutcomeUnknown = ex.Message.Contains("不确定", StringComparison.Ordinal); }
+                versionProvider.ErrorAfterCompleteContains = null;
+                var batchUnknownSnapshot = await versions.LoadAsync(versionProvider, batchFixture.folder);
+                var batchUnknownLease = await ExperimentalRemoteLease.TryAcquireAsync(versionProvider, batchFixture.folder);
+                Assert(batchOutcomeUnknown && batchUnknownSnapshot?.Id != editedBatch.Snapshot.Id && batchUnknownLease == null,
+                    "增量提交响应丢失时保留锁并禁止后续写入");
+
+                var changingFixture = await MakeLegacyAsync("versioned-changing", 4);
+                var changingBase = await migration.MigrateAsync(versionProvider, changingFixture.folder);
+                string changingSource = Path.Combine(root, "versioned-changing-source");
+                Directory.CreateDirectory(changingSource);
+                string changingFirst = Path.Combine(changingSource, longOriginal);
+                File.WriteAllText(changingFirst, "changed before backup");
+                File.WriteAllText(Path.Combine(changingSource, "终文件.txt"), "second file");
+                int uploadedObjects = 0;
+                versionProvider.OnObjectUploaded = () => { if (++uploadedObjects == 2) File.WriteAllText(changingFirst, "changed while backup ran"); };
+                bool changingRejected = false;
+                try { await versionedBackup.RunAsync(versionProvider, changingSource, changingFixture.folder); }
+                catch (IOException) { changingRejected = true; }
+                versionProvider.OnObjectUploaded = null;
+                Assert(changingRejected && (await versions.LoadAsync(versionProvider, changingFixture.folder))?.Id == changingBase.Id,
+                    "增量期间已处理的源文件发生变化时拒绝提交");
+                var damagedHistoryFixture = await MakeLegacyAsync("versioned-damaged-history", 4);
+                var damagedHistoryBase = await migration.MigrateAsync(versionProvider, damagedHistoryFixture.folder);
+                string damagedHistoryPath = Path.Combine(root, damagedHistoryFixture.folder,
+                    damagedHistoryBase.Manifest.History.Single().StoredRel.Replace('/', Path.DirectorySeparatorChar));
+                File.WriteAllText(damagedHistoryPath, "damaged test object");
+                string damagedSource = Path.Combine(root, "versioned-damaged-source");
+                Directory.CreateDirectory(damagedSource);
+                File.WriteAllText(Path.Combine(damagedSource, longOriginal), "legacy active");
+                bool damagedHistoryRejected = false;
+                try { await versionedBackup.RunAsync(versionProvider, damagedSource, damagedHistoryFixture.folder); }
+                catch (InvalidDataException) { damagedHistoryRejected = true; }
+                Assert(damagedHistoryRejected && (await versions.LoadAsync(versionProvider, damagedHistoryFixture.folder))?.Id == damagedHistoryBase.Id,
+                    "已有历史对象损坏时拒绝提交新版本");
+                using var cancelRestore = new CancellationTokenSource();
+                versionProvider.AfterObjectOpen = cancelRestore.Cancel;
+                string canceledRestorePath = Path.Combine(root, "migration-canceled-restore");
+                bool restoreCanceled = false;
+                try { await historyEngine.RunRestoreVersionedAsync(versionProvider, versionedRestorableFolder, canceledRestorePath, cancellationToken: cancelRestore.Token); }
+                catch (OperationCanceledException) { restoreCanceled = true; }
+                Assert(restoreCanceled && Directory.GetFiles(canceledRestorePath, "*", SearchOption.AllDirectories).Length == 0,
+                    "版本化恢复取消时不提交或遗留临时文件");
+                await versions.SaveAsync(versionProvider, "unsafe-directories", new Manifest {
+                    Directories = new() { new ManifestDirEntry { OriginalRel = "../escape", StoredRel = "escape" } }
+                }, null);
+                string unsafeRestorePath = Path.Combine(root, "unsafe-directories-restore");
+                bool unsafeDirectoryRejected = false;
+                try { await historyEngine.RunRestoreVersionedAsync(versionProvider, "unsafe-directories", unsafeRestorePath); }
+                catch (InvalidDataException) { unsafeDirectoryRejected = true; }
+                Assert(unsafeDirectoryRejected && !Directory.Exists(unsafeRestorePath), "恢复开始前拒绝越界的目录记录");
+                var leaseProviderOne = new FaultInjectingProvider(root);
+                var leaseProviderTwo = new FaultInjectingProvider(root);
+                var lease = await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderOne, "lease-normal");
+                var busyLease = await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderTwo, "lease-normal");
+                Assert(lease != null && busyLease == null, "独占目录锁持有期间拒绝第二个写入者");
+                await lease!.ReleaseAsync();
+                await lease.ReleaseAsync();
+                var nextLease = await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderTwo, "lease-normal");
+                Assert(nextLease != null && Directory.Exists(Path.Combine(root, "lease-normal", ".fnsync", "lock-generations", "00000001")) &&
+                    Directory.Exists(Path.Combine(root, "lease-normal", ".fnsync", "lock-generations", "00000002")), "锁释放后下一代可获得且保留旧记录");
+                await nextLease!.ReleaseAsync();
+                string abandonedDir = Path.Combine(root, "lease-abandoned", ".fnsync", "lock-generations", "00000001");
+                Directory.CreateDirectory(abandonedDir);
+                Assert(await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderOne, "lease-abandoned") == null,
+                    "无持有者记录的遗留锁不会被自动抢占");
+                var badReleaseLease = await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderOne, "lease-bad-release");
+                string badReleasePath = Path.Combine(root, "lease-bad-release", ".fnsync", "lock-generations", "00000001", "released");
+                File.WriteAllText(badReleasePath, $"v1:{Guid.NewGuid():N}");
+                bool badReleaseRejected = false;
+                try { await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderTwo, "lease-bad-release"); }
+                catch (InvalidDataException) { badReleaseRejected = true; }
+                Assert(badReleaseLease != null && badReleaseRejected, "锁释放记录与持有者不一致时拒绝后续写入");
+                var retryReleaseLease = await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderOne, "lease-release-retry");
+                leaseProviderOne.ErrorAfterCompleteContains = "/released";
+                bool releaseUnknown = false;
+                try { await retryReleaseLease!.ReleaseAsync(); }
+                catch (IOException) { releaseUnknown = true; }
+                leaseProviderOne.ErrorAfterCompleteContains = null;
+                await retryReleaseLease!.ReleaseAsync();
+                var retryNext = await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderTwo, "lease-release-retry");
+                Assert(releaseUnknown && retryNext != null, "释放响应丢失后通过回读确认并可安全重试");
+                await retryNext!.ReleaseAsync();
+                var startLease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                async Task<ExperimentalRemoteLease?> RaceLease(FaultInjectingProvider p) { await startLease.Task; return await ExperimentalRemoteLease.TryAcquireAsync(p, "lease-race"); }
+                var racingOne = Task.Run(() => RaceLease(leaseProviderOne));
+                var racingTwo = Task.Run(() => RaceLease(leaseProviderTwo));
+                startLease.SetResult();
+                var racing = await Task.WhenAll(racingOne, racingTwo);
+                Assert(racing.Count(l => l != null) == 1, "并发获取独占目录锁时只有一个持有者");
+                await racing.Single(l => l != null)!.ReleaseAsync();
                 async Task<bool> TestAmbiguousRenameAsync(string suffix, bool duplicateOld, string content = "same content")
                 {
                     string source = Path.Combine(root, $"ambiguous-source-{suffix}");
@@ -529,9 +842,11 @@ namespace FNSyncPlus.Tests
             }
         }
 
-        sealed class FaultInjectingProvider : INasStorageProvider
+        sealed class FaultInjectingProvider : INasStorageProvider, IExclusiveDirectoryProvider
         {
             private readonly SmbStorageProvider inner;
+            private readonly string rootPath;
+            private static readonly object directoryLock = new();
             public bool InterruptMainUpload { get; set; }
             public bool ClaimFnOs { get; set; }
             public string? FailUploadSuffix { get; set; }
@@ -541,13 +856,28 @@ namespace FNSyncPlus.Tests
             public string? ErrorAfterCompleteContains { get; set; }
             public string? FailReadContains { get; set; }
             public bool CorruptObjectUpload { get; set; }
-            public FaultInjectingProvider(string root) => inner = new SmbStorageProvider(rootUncPath: root);
+            public Action? AfterObjectUpload { get; set; }
+            public Action? AfterObjectOpen { get; set; }
+            public Action? OnObjectUploaded { get; set; }
+            public FaultInjectingProvider(string root) { rootPath = root; inner = new SmbStorageProvider(rootUncPath: root); }
             public StorageProviderType ProviderType => ClaimFnOs ? StorageProviderType.FnOsPersonal : StorageProviderType.LocalFileSystem;
             public bool IsAuthenticated => inner.IsAuthenticated;
             public string RootDisplayPath => inner.RootDisplayPath;
             public Task<StorageAuthResult> ConnectAndAuthenticateAsync(string server, string username, string password, string? twoFactorCode = null, CancellationToken ct = default) => inner.ConnectAndAuthenticateAsync(server, username, password, twoFactorCode, ct);
             public Task<IReadOnlyList<NasStorageItem>> ListEntriesAsync(string? path = null, CancellationToken ct = default) => inner.ListEntriesAsync(path, ct);
             public Task<StorageOperationResult> CreateDirectoryAsync(string path, CancellationToken ct = default) => inner.CreateDirectoryAsync(path, ct);
+            public Task<ExclusiveDirectoryResult> TryCreateDirectoryExclusiveAsync(string path, CancellationToken ct = default)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (!PathHelper.IsSafeRelativePath(path)) throw new ArgumentException("不安全的测试路径", nameof(path));
+                string directory = Path.Combine(rootPath, path.Replace('/', Path.DirectorySeparatorChar));
+                lock (directoryLock)
+                {
+                    if (Directory.Exists(directory)) return Task.FromResult(ExclusiveDirectoryResult.AlreadyExists);
+                    Directory.CreateDirectory(directory);
+                    return Task.FromResult(ExclusiveDirectoryResult.Created);
+                }
+            }
             public Task<bool> ExistsAsync(string path, CancellationToken ct = default) => inner.ExistsAsync(path, ct);
             public Task<NasStorageItem?> GetItemAsync(string path, CancellationToken ct = default) => inner.GetItemAsync(path, ct);
             public async Task<StorageOperationResult> UploadFileAsync(string path, Stream stream, long size, DateTime modified, bool overwrite = true, IProgress<long>? progress = null, CancellationToken ct = default)
@@ -581,12 +911,26 @@ namespace FNSyncPlus.Tests
                     await inner.UploadFileAsync(path, partial, partial.Length, modified, overwrite, progress, ct);
                     return StorageOperationResult.Fail("模拟上传中断");
                 }
-                return await inner.UploadFileAsync(path, stream, size, modified, overwrite, progress, ct);
+                var result = await inner.UploadFileAsync(path, stream, size, modified, overwrite, progress, ct);
+                if (result.Success && path.Contains("/.fnsync/objects/obj-", StringComparison.Ordinal) && AfterObjectUpload != null)
+                {
+                    var callback = AfterObjectUpload;
+                    AfterObjectUpload = null;
+                    callback();
+                }
+                if (result.Success && path.Contains("/.fnsync/objects/obj-", StringComparison.Ordinal)) OnObjectUploaded?.Invoke();
+                return result;
             }
             public Task<Stream> OpenReadAsync(string path, CancellationToken ct = default)
             {
                 if (FailReadContains != null && path.Contains(FailReadContains, StringComparison.Ordinal))
                     throw new IOException("模拟网络读取失败");
+                if (path.Contains("/.fnsync/objects/obj-", StringComparison.Ordinal) && AfterObjectOpen != null)
+                {
+                    var callback = AfterObjectOpen;
+                    AfterObjectOpen = null;
+                    callback();
+                }
                 return inner.OpenReadAsync(path, ct);
             }
             public Task<bool> VerifyFileIntegrityAsync(string path, string hash, long size, CancellationToken ct = default) => inner.VerifyFileIntegrityAsync(path, hash, size, ct);

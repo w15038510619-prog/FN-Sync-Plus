@@ -562,8 +562,39 @@ namespace FNSyncPlus.Core.Services
                 return await RunRestoreAsync(nasBackupFolderRel, localDestinationFolder, conflictResolution, cancellationToken).ConfigureAwait(false);
             }
 
-            var report = new RestoreProgressReport();
             var manifest = await _manifestManager.LoadManifestAsync(storageProvider, nasBackupFolderRel, cancellationToken).ConfigureAwait(false);
+            return await RunRestoreManifestAsync(storageProvider, nasBackupFolderRel, localDestinationFolder,
+                manifest, conflictResolution, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>Explicit experimental restore for an already versioned backup; not used by the UI.</summary>
+        public async Task<RestoreProgressReport> RunRestoreVersionedAsync(
+            INasStorageProvider storageProvider,
+            string nasBackupFolderRel,
+            string localDestinationFolder,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(storageProvider);
+            var snapshot = await new VersionedManifestStore().LoadAsync(storageProvider, nasBackupFolderRel, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidDataException("未找到有效的版本化清单");
+            return await RunRestoreManifestAsync(storageProvider, nasBackupFolderRel, localDestinationFolder,
+                snapshot.Manifest, conflictResolution, cancellationToken).ConfigureAwait(false);
+        }
+
+        private async Task<RestoreProgressReport> RunRestoreManifestAsync(
+            INasStorageProvider storageProvider,
+            string nasBackupFolderRel,
+            string localDestinationFolder,
+            Manifest manifest,
+            ConflictResolution conflictResolution,
+            CancellationToken cancellationToken)
+        {
+            var report = new RestoreProgressReport();
+
+            if (manifest.Files == null || manifest.Directories == null ||
+                manifest.Directories.Any(dir => dir == null || !PathHelper.IsSafeRelativePath(dir.OriginalRel)))
+                throw new InvalidDataException("清单包含无效或不安全的目录记录，拒绝恢复");
 
             report.TotalFiles = manifest.Files.Count;
             Log("INFO", $"开始从 NAS 恢复任务: 备份源【{nasBackupFolderRel}】 -> 本地【{localDestinationFolder}】，共 {report.TotalFiles} 个文件");
@@ -692,6 +723,7 @@ namespace FNSyncPlus.Core.Services
                         File.SetLastWriteTimeUtc(tempRestorePath, new DateTime(fileEntry.ModTimeUtcTicks, DateTimeKind.Utc));
                     }
 
+                    cancellationToken.ThrowIfCancellationRequested();
                     File.Move(tempRestorePath, targetLocalFull, overwrite: conflictResolution == ConflictResolution.Overwrite);
                     report.RestoredFiles++;
                     if (fileEntry.IsLongName) report.LongNameRestoredFiles++;
@@ -703,6 +735,11 @@ namespace FNSyncPlus.Core.Services
                         Success = true,
                         HashVerified = true
                     });
+                }
+                catch (OperationCanceledException)
+                {
+                    if (File.Exists(tempRestorePath)) try { File.Delete(tempRestorePath); } catch { }
+                    throw;
                 }
                 catch (Exception ex)
                 {
@@ -845,12 +882,17 @@ namespace FNSyncPlus.Core.Services
                         continue;
                     }
 
+                    cancellationToken.ThrowIfCancellationRequested();
                     File.Move(tempRestorePath, targetLocalFull, overwrite: conflictResolution == ConflictResolution.Overwrite);
                     report.RestoredFiles++;
                     report.IntegrityVerifiedFiles++;
                     report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, Success = true, HashVerified = true });
                 }
-                catch (OperationCanceledException) { throw; }
+                catch (OperationCanceledException)
+                {
+                    if (File.Exists(tempRestorePath)) try { File.Delete(tempRestorePath); } catch { }
+                    throw;
+                }
                 catch (Exception ex)
                 {
                     if (File.Exists(tempRestorePath)) try { File.Delete(tempRestorePath); } catch { }

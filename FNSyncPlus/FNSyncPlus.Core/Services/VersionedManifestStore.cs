@@ -141,6 +141,15 @@ public sealed class VersionedManifestStore
         return snapshot;
     }
 
+    /// <summary>A readable fallback is not sufficient for writing when any commit record is invalid.</summary>
+    public async Task<Snapshot?> LoadForWritingAsync(INasStorageProvider provider, string target, CancellationToken token = default)
+    {
+        var (snapshot, _, hasReceipts, hasInvalidReceipts) = await ScanAsync(provider, target, token).ConfigureAwait(false);
+        if (hasInvalidReceipts || (snapshot == null && hasReceipts))
+            throw new InvalidDataException("存在无效的清单提交，拒绝继续写入");
+        return snapshot;
+    }
+
     public async Task<Snapshot> SaveAsync(INasStorageProvider provider, string target, Manifest manifest,
         string? expectedPreviousId, CancellationToken token = default)
     {

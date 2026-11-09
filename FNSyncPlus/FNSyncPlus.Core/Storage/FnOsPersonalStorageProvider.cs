@@ -14,7 +14,7 @@ namespace FNSyncPlus.Core.Storage
     /// 飞牛 fnOS 账号原生个人空间存储提供程序 (「我的文件」)
     /// 严格遵循官方 API 权限模型，直接对接个人空间，杜绝团队共享混用与伪造用户名路径
     /// </summary>
-    public class FnOsPersonalStorageProvider : INasStorageProvider
+    public class FnOsPersonalStorageProvider : INasStorageProvider, IExclusiveDirectoryProvider
     {
         private readonly FnOsApiClient _apiClient;
         private string? _personalRootPath; // 例如 vol1/1006
@@ -214,6 +214,24 @@ namespace FNSyncPlus.Core.Storage
             return results;
         }
 
+        public async Task<ExclusiveDirectoryResult> TryCreateDirectoryExclusiveAsync(string relativePath, CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (string.IsNullOrWhiteSpace(relativePath) || string.IsNullOrEmpty(NormalizeRelativePath(relativePath)))
+                throw new ArgumentException("独占目录路径不能为空或根目录", nameof(relativePath));
+            string fullPath = CombineWithPersonalRoot(relativePath);
+            var response = await _apiClient.CreateDirectoryAsync(fullPath, ct).ConfigureAwait(false);
+            if (response.Result == "succ" && (response.ErrNo == null || response.ErrNo == 0))
+                return ExclusiveDirectoryResult.Created;
+            // 4102 was observed for an existing directory, but verify the target before treating it as a collision.
+            if (response.ErrNo == 4102)
+            {
+                var existing = await GetItemAsync(relativePath, ct).ConfigureAwait(false);
+                if (existing?.IsDirectory == true) return ExclusiveDirectoryResult.AlreadyExists;
+            }
+            throw new IOException($"独占创建目录失败 (errno: {response.ErrNo})");
+        }
+
         public async Task<StorageOperationResult> CreateDirectoryAsync(string relativePath, CancellationToken ct = default)
         {
             EnsureAuthenticated();
@@ -385,6 +403,12 @@ namespace FNSyncPlus.Core.Storage
 
             try
             {
+                // fnOS has been observed overwriting even when Trim-Overwrite is false.
+                // This check prevents an already-existing file from being replaced, but is not
+                // an atomic create and must not be used as a cross-device lock.
+                if (!overwrite && await GetItemAsync(relativePath, ct).ConfigureAwait(false) != null)
+                    return StorageOperationResult.Fail("目标已存在，拒绝覆盖；飞牛不支持已验证的原子独占上传", 17, fullPath);
+
                 // 1. 真正的分块流式上传并校验业务响应
                 var uploadRes = await _apiClient.UploadStreamDetailedAsync(
                     fullPath,
@@ -434,6 +458,7 @@ namespace FNSyncPlus.Core.Storage
 
                 return StorageOperationResult.Ok(fullPath);
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 return StorageOperationResult.Fail($"上传异常: {ex.Message}", path: fullPath);

@@ -19,6 +19,17 @@ namespace FNSyncPlus.Core.Storage
         LocalFileSystem
     }
 
+    public enum ExclusiveDirectoryResult { Created, AlreadyExists }
+
+    /// <summary>
+    /// Experimental capability. A provider must distinguish creating a new directory from an existing one.
+    /// Callers must still evaluate the server's concurrency and durability guarantees.
+    /// </summary>
+    public interface IExclusiveDirectoryProvider
+    {
+        Task<ExclusiveDirectoryResult> TryCreateDirectoryExclusiveAsync(string relativePath, CancellationToken ct = default);
+    }
+
     /// <summary>
     /// NAS 存储项目元数据模型
     /// </summary>
@@ -108,7 +119,7 @@ namespace FNSyncPlus.Core.Storage
         Task<NasStorageItem?> GetItemAsync(string relativePath, CancellationToken ct = default);
 
         /// <summary>
-        /// 流式上传文件（支持 SHA-256 完整性校验、修改时间保留与进度回调）
+        /// 流式上传文件（支持修改时间保留与进度回调）。overwrite=false 不保证跨客户端原子独占，不能用作锁。
         /// </summary>
         Task<StorageOperationResult> UploadFileAsync(
             string relativePath,
