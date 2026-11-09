@@ -14,6 +14,53 @@ public sealed class ExperimentalFirstProjection
 {
     public sealed record Published(string VersionId, string CurrentRoot, string JournalDirectory);
 
+    /// <summary>Verifies an existing isolated publication under the writer lease without creating another tree.</summary>
+    public async Task VerifyPublishedAsync(INasStorageProvider provider, string backupRoot,
+        ExperimentalPhysicalSnapshot.Result plan, Published publication, CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        ArgumentNullException.ThrowIfNull(plan);
+        ArgumentNullException.ThrowIfNull(publication);
+        if (!PathHelper.IsSafeRelativePath(backupRoot) || !PathHelper.IsSafeRelativePath(plan.CandidateRoot) ||
+            !PathHelper.IsSafeRelativePath(publication.CurrentRoot) || !PathHelper.IsSafeRelativePath(publication.JournalDirectory))
+            throw new ArgumentException("已发布目录或记录路径无效");
+        string Canonical(string path) => provider is FnOsPersonalStorageProvider fn ? fn.NormalizeRelativePath(path) : PathHelper.NormalizeRelPath(path);
+        string root = Canonical(backupRoot), tree = Canonical(plan.CandidateRoot), journal = Canonical(publication.JournalDirectory);
+        string prefix = $"{root}/.fnsync/projections/candidate-";
+        if (!PathHelper.IsSafeRelativePath(root) || !tree.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+            !tree.EndsWith("/current", StringComparison.OrdinalIgnoreCase) ||
+            !Guid.TryParseExact(tree[prefix.Length..^"/current".Length], "N", out _)) throw new ArgumentException("候选目录不属于该备份");
+        string candidate = tree[..^"/current".Length];
+        string journalPrefix = $"{candidate}/publish-";
+        if (publication.VersionId != plan.VersionId || !Canonical(publication.CurrentRoot).Equals($"{root}/current", StringComparison.OrdinalIgnoreCase) ||
+            !journal.StartsWith(journalPrefix, StringComparison.OrdinalIgnoreCase) || !Guid.TryParseExact(journal[journalPrefix.Length..], "N", out _))
+            throw new ArgumentException("已发布记录与候选目录不匹配");
+        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(plan);
+        if (bytes.Length > 16 * 1024 * 1024) throw new InvalidDataException("候选记录过大");
+        var stable = JsonSerializer.Deserialize<ExperimentalPhysicalSnapshot.Result>(bytes) ?? throw new InvalidDataException("候选记录无效");
+        var lease = await ExperimentalRemoteLease.TryAcquireAsync(provider, root, token).ConfigureAwait(false)
+            ?? throw new IOException("备份被其他写入者占用或存在未释放的锁");
+        Exception? failure = null;
+        try
+        {
+            var latest = await new VersionedManifestStore().LoadForWritingAsync(provider, root, token).ConfigureAwait(false)
+                ?? throw new InvalidDataException("备份没有已提交版本");
+            ValidatePlan(stable, latest, provider.ProviderType);
+            await ExperimentalNextProjection.VerifyRecordAsync(provider, $"{candidate}/receipt.json", bytes, token).ConfigureAwait(false);
+            await ExperimentalNextProjection.VerifyRecordAsync(provider, $"{journal}/committed.json", bytes, token).ConfigureAwait(false);
+            if (await provider.GetItemAsync($"{journal}/intent.json", token).ConfigureAwait(false) == null)
+                throw new InvalidDataException("发布意图记录不存在");
+            await VerifyTreeAsync(provider, $"{root}/current", stable, token).ConfigureAwait(false);
+        }
+        catch (Exception ex) { failure = ex; throw; }
+        finally
+        {
+            using var releaseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            try { await lease.ReleaseAsync(releaseTimeout.Token).ConfigureAwait(false); }
+            catch (Exception ex) { throw new IOException("已发布目录检查结束，但释放锁失败", failure == null ? ex : new AggregateException(failure, ex)); }
+        }
+    }
+
     public async Task<Published> PublishAsync(INasStorageProvider provider, string backupRoot,
         ExperimentalPhysicalSnapshot.Result prepared, CancellationToken token = default)
     {
@@ -61,7 +108,8 @@ public sealed class ExperimentalFirstProjection
             string journal = $"{candidate}/publish-{Guid.NewGuid():N}";
             if (await exclusive.TryCreateDirectoryExclusiveAsync(journal, token).ConfigureAwait(false) != ExclusiveDirectoryResult.Created)
                 throw new IOException("发布记录目录冲突");
-            await WriteRecordAsync(provider, $"{journal}/intent.json", receipt, token).ConfigureAwait(false);
+            byte[] intent = JsonSerializer.SerializeToUtf8Bytes(new ProjectionIntent(1, "first", lease.DirectoryPath, lease.OwnerSha256, stable));
+            await WriteRecordAsync(provider, $"{journal}/intent.json", intent, token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             moveStarted = true;
             var moved = await mover.MoveCandidateDirectoryAsync(root, candidate, token).ConfigureAwait(false);

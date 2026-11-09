@@ -32,6 +32,8 @@ namespace FNSyncPlus.Core.Services
         private readonly ConcurrentDictionary<string, Timer> _watcherDebounceTimers = new();
         private readonly ConcurrentDictionary<string, Timer> _intervalTimers = new();
         private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, string>> _pendingRenames = new();
+        private sealed record IsolatedProjectionState(ExperimentalPhysicalSnapshot.Result Plan, ExperimentalFirstProjection.Published Publication);
+        private readonly ConcurrentDictionary<string, IsolatedProjectionState> _isolatedProjections = new();
         private readonly ConcurrentDictionary<string, List<string>> _taskLogBuffers = new();
         private readonly object _logLock = new();
 
@@ -211,6 +213,7 @@ namespace FNSyncPlus.Core.Services
                     }
                 }
                 ClearTaskLogs(taskId);
+                _isolatedProjections.TryRemove(taskId, out _);
                 TaskListChanged?.Invoke();
                 return true;
             }
@@ -516,7 +519,7 @@ namespace FNSyncPlus.Core.Services
                 {
                     if (!UseExperimentalVersionedBackup || provider == null)
                         throw new InvalidOperationException("实验性备份必须使用隔离会话和已连接的飞牛存储");
-                    AppendTaskLog(task, "INFO", "隔离试验：正在准备版本化内容；NAS 活动目录尚不反映文件树。");
+                    AppendTaskLog(task, "INFO", "隔离试验：正在准备版本化内容及物理候选目录。");
                     var experimental = new ExperimentalVersionedBackup();
                     experimental.ProgressChanged += message =>
                     {
@@ -530,6 +533,36 @@ namespace FNSyncPlus.Core.Services
                         : await experimental.RunAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy).ConfigureAwait(false);
                     task.RequiresNewExperimentalBackup = false;
                     reusedFiles = result.ReusedFiles;
+                    bool hasPrevious = _isolatedProjections.TryGetValue(task.TaskId, out var previousProjection);
+                    if (!result.HasNewVersion && hasPrevious)
+                    {
+                        task.CurrentFile = "文件无变化，正在核验现有隔离物理目录";
+                        TaskStateChanged?.Invoke(task);
+                        await new ExperimentalFirstProjection().VerifyPublishedAsync(provider, task.DestinationFolder,
+                            previousProjection!.Plan, previousProjection.Publication, taskToken).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        task.CurrentFile = "正在准备并核验隔离候选目录";
+                        TaskStateChanged?.Invoke(task);
+                        var plan = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false);
+                        if (plan.VersionId != result.Snapshot.Id)
+                            throw new IOException("准备物理目录期间备份版本已变化，拒绝发布");
+                        task.CurrentFile = "正在核验并发布隔离物理目录";
+                        TaskStateChanged?.Invoke(task);
+                        ExperimentalFirstProjection.Published publication;
+                        if (hasPrevious)
+                        {
+                            var next = await new ExperimentalNextProjection().PublishAsync(provider, task.DestinationFolder,
+                                previousProjection!.Plan, previousProjection.Publication, plan, taskToken).ConfigureAwait(false);
+                            publication = next.Current;
+                        }
+                        else
+                        {
+                            publication = await new ExperimentalFirstProjection().PublishAsync(provider, task.DestinationFolder, plan, taskToken).ConfigureAwait(false);
+                        }
+                        _isolatedProjections[task.TaskId] = new IsolatedProjectionState(plan, publication);
+                    }
                     if (reusedFiles > 0) AppendTaskLog(task, "INFO", $"隔离试验：已复用 {reusedFiles} 个 NAS 文件，上传 {result.UploadedFiles} 个文件。");
                     report = new SyncProgressReport {
                         State = SyncState.Completed, TotalFiles = result.Snapshot.Manifest.Files.Count,
@@ -603,9 +636,9 @@ namespace FNSyncPlus.Core.Services
                         task.NextScheduledTime = DateTime.Now.AddMinutes(task.IntervalMinutes);
                     }
                     task.CurrentProgress = 100.0;
-                    task.CurrentFile = task.IsExperimentalBackup ? $"隔离试验已提交：复用 {reusedFiles}，上传 {report.UploadedFiles}；物理活动目录尚未实现" : "所有文件均已同步更新至最新状态";
+                    task.CurrentFile = task.IsExperimentalBackup ? $"隔离试验已提交：复用 {reusedFiles}，上传 {report.UploadedFiles}；物理目录已发布" : "所有文件均已同步更新至最新状态";
                     task.LastSyncStatus = task.IsExperimentalBackup
-                        ? $"隔离试验版本已提交（复用 {reusedFiles}，上传 {report.UploadedFiles}）"
+                        ? $"隔离试验物理目录已发布（复用 {reusedFiles}，上传 {report.UploadedFiles}）"
                         : "同步成功完成 (已最新)";
                 }
 

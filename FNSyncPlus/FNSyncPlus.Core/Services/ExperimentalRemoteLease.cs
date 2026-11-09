@@ -1,4 +1,5 @@
 using System.Text;
+using System.Security.Cryptography;
 using FNSyncPlus.Core.Storage;
 using FNSyncPlus.Core.Utils;
 
@@ -15,6 +16,10 @@ public sealed class ExperimentalRemoteLease
     private readonly string _directory;
     private readonly byte[] _owner;
     private bool _released;
+    internal string DirectoryPath => _directory;
+    internal string OwnerSha256 => Convert.ToHexString(SHA256.HashData(_owner)).ToLowerInvariant();
+
+    public sealed record Inspection(string DirectoryPath, string OwnerSha256);
 
     private ExperimentalRemoteLease(INasStorageProvider provider, string directory, byte[] owner)
     {
@@ -44,10 +49,13 @@ public sealed class ExperimentalRemoteLease
         for (long sequence = 1; sequence < long.MaxValue; sequence++)
         {
             token.ThrowIfCancellationRequested();
-            string directory = $"{lockRoot}/{sequence:D8}";
+            string directory = $"{lockRoot}/{sequence.ToString("D8", System.Globalization.CultureInfo.InvariantCulture)}";
             var result = await exclusive.TryCreateDirectoryExclusiveAsync(directory, token).ConfigureAwait(false);
             if (result == ExclusiveDirectoryResult.Created)
             {
+                // A missing generation must not hide a later, possibly live writer.
+                // If the check fails, leave this new directory without an owner: fail closed.
+                await RejectLaterGenerationsAsync(provider, lockRoot, sequence, token).ConfigureAwait(false);
                 byte[] owner = Encoding.UTF8.GetBytes($"v1:{Guid.NewGuid():N}");
                 await WriteAndVerifyMarkerAsync(provider, $"{directory}/owner", owner, token).ConfigureAwait(false);
                 return new ExperimentalRemoteLease(provider, directory, owner);
@@ -55,7 +63,11 @@ public sealed class ExperimentalRemoteLease
 
             byte[]? previousOwner = await ReadMarkerAsync(provider, $"{directory}/owner", token).ConfigureAwait(false);
             byte[]? released = await ReadMarkerAsync(provider, $"{directory}/released", token).ConfigureAwait(false);
-            if (previousOwner == null || released == null) return null;
+            if (previousOwner == null || released == null)
+            {
+                await RejectLaterGenerationsAsync(provider, lockRoot, sequence, token).ConfigureAwait(false);
+                return null;
+            }
             if (!IsValidOwner(previousOwner) || !previousOwner.AsSpan().SequenceEqual(released))
                 throw new InvalidDataException("锁的持有者或释放记录无效，拒绝继续");
         }
@@ -78,6 +90,75 @@ public sealed class ExperimentalRemoteLease
             await WriteAndVerifyMarkerAsync(_provider, $"{_directory}/released", _owner, token).ConfigureAwait(false);
         }
         _released = true;
+    }
+
+    /// <summary>Inspects the first unreleased generation without creating or releasing any lock.</summary>
+    public static async Task<Inspection?> InspectAsync(INasStorageProvider provider, string target, CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("锁目标必须是安全的相对路径", nameof(target));
+        string current = "";
+        foreach (string part in $"{PathHelper.NormalizeRelPath(target)}/.fnsync/lock-generations".Split('/'))
+        {
+            current = current.Length == 0 ? part : $"{current}/{part}";
+            var item = await provider.GetItemAsync(current, token).ConfigureAwait(false);
+            if (item == null) return null;
+            if (!item.IsDirectory) throw new InvalidDataException("锁目录路径不是文件夹");
+        }
+        for (long sequence = 1; sequence < long.MaxValue; sequence++)
+        {
+            token.ThrowIfCancellationRequested();
+            string directory = $"{current}/{sequence.ToString("D8", System.Globalization.CultureInfo.InvariantCulture)}";
+            var item = await provider.GetItemAsync(directory, token).ConfigureAwait(false);
+            if (item == null)
+            {
+                await RejectLaterGenerationsAsync(provider, current, sequence, token).ConfigureAwait(false);
+                return null;
+            }
+            if (!item.IsDirectory) throw new InvalidDataException("锁代次不是文件夹");
+            byte[]? owner = await ReadMarkerAsync(provider, $"{directory}/owner", token).ConfigureAwait(false);
+            if (owner == null || !IsValidOwner(owner)) throw new InvalidDataException("锁持有者记录缺失或无效");
+            byte[]? released = await ReadMarkerAsync(provider, $"{directory}/released", token).ConfigureAwait(false);
+            if (released == null)
+            {
+                await RejectLaterGenerationsAsync(provider, current, sequence, token).ConfigureAwait(false);
+                return new Inspection(directory, Convert.ToHexString(SHA256.HashData(owner)).ToLowerInvariant());
+            }
+            if (!owner.AsSpan().SequenceEqual(released)) throw new InvalidDataException("锁释放记录不匹配");
+        }
+        throw new IOException("锁记录序号耗尽");
+    }
+
+    private static async Task RejectLaterGenerationsAsync(INasStorageProvider provider, string lockRoot,
+        long expectedSequence, CancellationToken token)
+    {
+        var seen = new HashSet<long>();
+        foreach (var item in await provider.ListEntriesAsync(lockRoot, token).ConfigureAwait(false))
+        {
+            if (!item.IsDirectory || !long.TryParse(item.Name, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out long sequence) || sequence < 1 ||
+                item.Name != sequence.ToString("D8", System.Globalization.CultureInfo.InvariantCulture) || !seen.Add(sequence))
+                throw new InvalidDataException("锁目录包含无效或重复的代次记录");
+            if (sequence > expectedSequence)
+                throw new InvalidDataException("锁记录存在缺口或较晚代次，拒绝继续");
+        }
+    }
+
+    // Only a recovery workflow with explicit confirmation that the owner has stopped may call this.
+    // No fnOS fencing primitive is known: a live owner could otherwise still write concurrently.
+    internal static async Task ReleaseStoppedOwnerAsync(INasStorageProvider provider, string target,
+        Inspection expected, CancellationToken token = default)
+    {
+        var held = await InspectAsync(provider, target, token).ConfigureAwait(false);
+        if (held == null || held.DirectoryPath != expected.DirectoryPath || held.OwnerSha256 != expected.OwnerSha256)
+            throw new InvalidDataException("未释放锁已变化，拒绝恢复释放");
+        byte[]? owner = await ReadMarkerAsync(provider, $"{held.DirectoryPath}/owner", token).ConfigureAwait(false);
+        if (owner == null || !IsValidOwner(owner) ||
+            !Convert.ToHexString(SHA256.HashData(owner)).Equals(held.OwnerSha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("锁持有者记录已变化，拒绝恢复释放");
+        byte[]? released = await ReadMarkerAsync(provider, $"{held.DirectoryPath}/released", token).ConfigureAwait(false);
+        if (released != null) throw new InvalidDataException("锁释放状态发生变化");
+        await WriteAndVerifyMarkerAsync(provider, $"{held.DirectoryPath}/released", owner, token).ConfigureAwait(false);
     }
 
     private static bool IsValidOwner(byte[] bytes)

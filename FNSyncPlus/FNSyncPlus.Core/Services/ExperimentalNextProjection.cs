@@ -84,7 +84,8 @@ public sealed class ExperimentalNextProjection
             string journal = $"{nextCandidate}/publish-{Guid.NewGuid():N}";
             if (await exclusive.TryCreateDirectoryExclusiveAsync(journal, token).ConfigureAwait(false) != ExclusiveDirectoryResult.Created)
                 throw new IOException("发布记录目录冲突");
-            byte[] intent = JsonSerializer.SerializeToUtf8Bytes(new { Previous = oldPlan, Next = nextPlan, PreviousJournal = previousJournal, Archive = archive });
+            byte[] intent = JsonSerializer.SerializeToUtf8Bytes(new ProjectionIntent(1, "next", lease.DirectoryPath,
+                lease.OwnerSha256, nextPlan, oldPlan, previousJournal, archive));
             await ExperimentalFirstProjection.WriteRecordAsync(provider, $"{journal}/intent.json", intent, token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             moveStarted = true;
@@ -118,7 +119,7 @@ public sealed class ExperimentalNextProjection
         }
     }
 
-    private static async Task VerifyRecordAsync(INasStorageProvider provider, string path, byte[] expected, CancellationToken token)
+    internal static async Task VerifyRecordAsync(INasStorageProvider provider, string path, byte[] expected, CancellationToken token)
     {
         string hash = Convert.ToHexString(SHA256.HashData(expected)).ToLowerInvariant();
         bool valid = await provider.VerifyFileIntegrityAsync(path, hash, expected.Length, token).ConfigureAwait(false);

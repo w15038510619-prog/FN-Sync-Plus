@@ -1257,8 +1257,16 @@ namespace FNSyncPlus.Tests
                 var lease = await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderOne, "lease-normal");
                 var busyLease = await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderTwo, "lease-normal");
                 Assert(lease != null && busyLease == null, "独占目录锁持有期间拒绝第二个写入者");
+                var inspectedLease = await ExperimentalRemoteLease.InspectAsync(leaseProviderTwo, "lease-normal");
+                string ownerPath = Path.Combine(root, "lease-normal", ".fnsync", "lock-generations", "00000001", "owner");
+                string ownerHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(ownerPath))).ToLowerInvariant();
+                Assert(inspectedLease?.OwnerSha256 == ownerHash && inspectedLease.DirectoryPath.EndsWith("/00000001", StringComparison.Ordinal) &&
+                    !File.Exists(Path.Combine(Path.GetDirectoryName(ownerPath)!, "released")),
+                    "只读检查能识别持锁代次和持有者指纹且不释放锁");
                 await lease!.ReleaseAsync();
                 await lease.ReleaseAsync();
+                Assert(await ExperimentalRemoteLease.InspectAsync(leaseProviderTwo, "lease-normal") == null,
+                    "释放后的锁检查不报告未释放持有者");
                 var nextLease = await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderTwo, "lease-normal");
                 Assert(nextLease != null && Directory.Exists(Path.Combine(root, "lease-normal", ".fnsync", "lock-generations", "00000001")) &&
                     Directory.Exists(Path.Combine(root, "lease-normal", ".fnsync", "lock-generations", "00000002")), "锁释放后下一代可获得且保留旧记录");
@@ -1282,6 +1290,31 @@ namespace FNSyncPlus.Tests
                 catch (InvalidDataException) { oldLockCorruptionRejected = true; }
                 Assert(oldLockCorruptionRejected && !Directory.Exists(Path.Combine(manyLockRoot, "00000258")),
                     "大量旧锁中间的损坏记录仍会阻止获取下一代");
+                string gapRoot = Path.Combine(root, "lease-gap", ".fnsync", "lock-generations");
+                Directory.CreateDirectory(Path.Combine(gapRoot, "00000001"));
+                Directory.CreateDirectory(Path.Combine(gapRoot, "00000003"));
+                string gapOwnerOne = $"v1:{Guid.NewGuid():N}", gapOwnerThree = $"v1:{Guid.NewGuid():N}";
+                File.WriteAllText(Path.Combine(gapRoot, "00000001", "owner"), gapOwnerOne);
+                File.WriteAllText(Path.Combine(gapRoot, "00000001", "released"), gapOwnerOne);
+                File.WriteAllText(Path.Combine(gapRoot, "00000003", "owner"), gapOwnerThree);
+                bool gapInspectionRejected = false, gapAcquisitionRejected = false;
+                try { await ExperimentalRemoteLease.InspectAsync(leaseProviderOne, "lease-gap"); }
+                catch (InvalidDataException) { gapInspectionRejected = true; }
+                try { await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderOne, "lease-gap"); }
+                catch (InvalidDataException) { gapAcquisitionRejected = true; }
+                Assert(gapInspectionRejected && gapAcquisitionRejected &&
+                    !File.Exists(Path.Combine(gapRoot, "00000002", "owner")) &&
+                    File.ReadAllText(Path.Combine(gapRoot, "00000003", "owner")) == gapOwnerThree,
+                    "锁代次缺失但存在后续持有者时拒绝检查和获取，不抢占后续锁");
+                string activeLaterRoot = Path.Combine(root, "lease-active-later", ".fnsync", "lock-generations");
+                Directory.CreateDirectory(Path.Combine(activeLaterRoot, "00000001"));
+                Directory.CreateDirectory(Path.Combine(activeLaterRoot, "00000002"));
+                File.WriteAllText(Path.Combine(activeLaterRoot, "00000001", "owner"), $"v1:{Guid.NewGuid():N}");
+                File.WriteAllText(Path.Combine(activeLaterRoot, "00000002", "owner"), $"v1:{Guid.NewGuid():N}");
+                bool laterOwnerRejected = false;
+                try { await ExperimentalRemoteLease.InspectAsync(leaseProviderOne, "lease-active-later"); }
+                catch (InvalidDataException) { laterOwnerRejected = true; }
+                Assert(laterOwnerRejected, "未释放锁之后仍存在其他代次时拒绝恢复检查");
                 string abandonedDir = Path.Combine(root, "lease-abandoned", ".fnsync", "lock-generations", "00000001");
                 Directory.CreateDirectory(abandonedDir);
                 Assert(await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderOne, "lease-abandoned") == null,
@@ -1521,6 +1554,7 @@ namespace FNSyncPlus.Tests
                 await TestTestLabIsolationAsync(root);
                 await TestFirstPhysicalProjectionAsync(root);
                 await TestNextPhysicalProjectionAsync(root);
+                await TestProjectionInspectionStatesAsync(root);
             }
             finally
             {
@@ -1659,6 +1693,35 @@ namespace FNSyncPlus.Tests
                 Assert(task.State == TaskSyncState.Completed && task.DisplayStatus.Contains("隔离试验", StringComparison.Ordinal) &&
                     first?.Manifest.Files.Count == 1 && first.Manifest.Files[0].Sha256 == HashHelper.ComputeFileSha256(Path.Combine(source, "sample.txt")),
                     "内存隔离任务首次同步提交版本化清单并明确显示试验状态");
+                Assert(File.ReadAllText(Path.Combine(root, task.DestinationFolder, "current", "sample.txt")) == "version one",
+                    "隔离任务完成时首次物理目录已发布并可读取");
+                string initialProjectionRoot = Path.Combine(root, task.DestinationFolder, ".fnsync", "projections");
+                int candidatesBefore = Directory.GetDirectories(initialProjectionRoot, "candidate-*").Length;
+                completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                for (int attempt = 0; attempt < 150 && !completed.Task.IsCompleted; attempt++)
+                {
+                    manager.TriggerSync(task.TaskId);
+                    await Task.WhenAny(completed.Task, Task.Delay(100));
+                }
+                if (!completed.Task.IsCompleted) throw new TimeoutException("隔离任务无变化检查超时");
+                var unchangedVersion = await versions.LoadAsync(provider, task.DestinationFolder);
+                Assert(task.State == TaskSyncState.Completed && unchangedVersion?.Id == first?.Id && task.LastUploadedFiles == 0 &&
+                    Directory.GetDirectories(initialProjectionRoot, "candidate-*").Length == candidatesBefore &&
+                    Directory.GetDirectories(initialProjectionRoot, "archive-*").Length == 0,
+                    "无变化检查保留原版本，不上传或重复生成物理树");
+                string currentFile = Path.Combine(root, task.DestinationFolder, "current", "sample.txt");
+                File.WriteAllText(currentFile, "external modification");
+                completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                for (int attempt = 0; attempt < 150 && !completed.Task.IsCompleted; attempt++)
+                {
+                    manager.TriggerSync(task.TaskId);
+                    await Task.WhenAny(completed.Task, Task.Delay(100));
+                }
+                if (!completed.Task.IsCompleted) throw new TimeoutException("隔离任务物理校验未结束");
+                Assert(task.State == TaskSyncState.Error && File.ReadAllText(currentFile) == "external modification" &&
+                    (await versions.LoadAsync(provider, task.DestinationFolder))?.Id == first?.Id,
+                    "无变化检查发现物理文件被修改时报告失败并保留现场");
+                File.WriteAllText(currentFile, "version one");
                 File.WriteAllText(Path.Combine(source, "sample.txt"), "version two");
                 completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 for (int attempt = 0; attempt < 150 && !completed.Task.IsCompleted; attempt++)
@@ -1674,6 +1737,11 @@ namespace FNSyncPlus.Tests
                 bool restored = historical != null && await new RestoreEngine(new ManifestManager()).RunRestoreHistoryFileAsync(provider, task.DestinationFolder, oldDestination, historical);
                 Assert(task.State == TaskSyncState.Completed && second?.Id != first?.Id && restored && File.ReadAllText(Path.Combine(oldDestination, "sample.txt")) == "version one",
                     "隔离任务增量同步保留可恢复的旧内容");
+                string projectionRoot = Path.Combine(root, task.DestinationFolder, ".fnsync", "projections");
+                string firstArchive = Directory.GetDirectories(projectionRoot, "archive-*").Single();
+                Assert(File.ReadAllText(Path.Combine(root, task.DestinationFolder, "current", "sample.txt")) == "version two" &&
+                    File.ReadAllText(Path.Combine(firstArchive, "current", "sample.txt")) == "version one",
+                    "隔离任务增量完成时新文件已发布且旧物理树已归档");
 
                 await Task.Delay(300);
                 task.ScheduleMode = TaskSyncScheduleMode.RealtimeOnly;
@@ -1746,6 +1814,25 @@ namespace FNSyncPlus.Tests
                     reuseTask.LastUploadedFiles == 1 && reuseTaskSnapshot?.Manifest.Files.Count == 2 &&
                     File.ReadAllText(Path.Combine(reuseTaskExisting, "same.txt")) == "existing matches local",
                     "隔离任务首次同步复用匹配的已有文件并报告上传数量");
+                string failedProjectionSource = Path.Combine(root, "isolated-projection-failure-source");
+                Directory.CreateDirectory(failedProjectionSource);
+                File.WriteAllText(Path.Combine(failedProjectionSource, "sample.txt"), "preserve source");
+                var failedProjectionTask = new SyncTask { TaskName = "候选失败", SourceFolder = failedProjectionSource,
+                    DestinationFolder = "isolated-projection-failure-target", ProviderType = StorageProviderType.FnOsPersonal,
+                    ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+                manager.AddTask(failedProjectionTask);
+                provider.FailUploadSuffix = "/receipt.json";
+                var failedProjectionDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                manager.TaskStateChanged += t => { if (t.TaskId == failedProjectionTask.TaskId && t.State == TaskSyncState.Error) failedProjectionDone.TrySetResult(); };
+                manager.TriggerSync(failedProjectionTask.TaskId);
+                if (await Task.WhenAny(failedProjectionDone.Task, Task.Delay(15000)) != failedProjectionDone.Task)
+                    throw new TimeoutException("隔离候选故障未结束");
+                provider.FailUploadSuffix = null;
+                Assert(failedProjectionTask.State == TaskSyncState.Error &&
+                    (await versions.LoadAsync(provider, failedProjectionTask.DestinationFolder))?.Manifest.Files.Count == 1 &&
+                    !Directory.Exists(Path.Combine(root, failedProjectionTask.DestinationFolder, "current")) &&
+                    File.ReadAllText(Path.Combine(failedProjectionSource, "sample.txt")) == "preserve source",
+                    "物理候选准备失败时任务报错，已提交版本和源文件保留");
                 await Task.Delay(200);
             }
             finally { Environment.CurrentDirectory = oldDirectory; }
@@ -1803,6 +1890,13 @@ namespace FNSyncPlus.Tests
                     "重复连接状态不重复同步，也不触发手动或本地任务");
                 automatic.ScheduleMode = TaskSyncScheduleMode.PeriodicOnly;
                 manager.UpdateTask(automatic);
+                int reconnectCompletions = 0;
+                var compensationFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                manager.TaskStateChanged += t =>
+                {
+                    if (t.TaskId == automatic.TaskId && t.State == TaskSyncState.Completed &&
+                        Interlocked.Increment(ref reconnectCompletions) >= 2) compensationFinished.TrySetResult();
+                };
                 File.WriteAllText(Path.Combine(source, "sample.txt"), "second");
                 provider.BlockUploadContains = "/.fnsync/objects/obj-";
                 manager.TriggerSync(automatic.TaskId);
@@ -1812,14 +1906,11 @@ namespace FNSyncPlus.Tests
                 manager.SetNasOnlineState(true);
                 provider.BlockUploadContains = null;
                 provider.ContinueUpload.TrySetResult();
-                VersionedManifestStore.Snapshot? afterReconnect = null;
-                for (int attempt = 0; attempt < 150; attempt++)
-                {
-                    await Task.Delay(100);
-                    afterReconnect = await versions.LoadAsync(provider, automatic.DestinationFolder);
-                    if (afterReconnect?.Sequence >= 3) break;
-                }
-                Assert(afterReconnect?.Sequence >= 3, "运行中重连会在当前任务结束后安排补偿扫描");
+                bool compensationObserved = await Task.WhenAny(compensationFinished.Task, Task.Delay(20000)) == compensationFinished.Task;
+                var afterReconnect = await versions.LoadAsync(provider, automatic.DestinationFolder);
+                Assert(compensationObserved && afterReconnect?.Sequence == 2 &&
+                    File.ReadAllText(Path.Combine(root, automatic.DestinationFolder, "current", "sample.txt")) == "second",
+                    "运行中重连会在当前任务结束后安排无变更补偿扫描");
                 await Task.Delay(300);
                 manager.PauseTask(manual.TaskId);
                 manager.ResumeTask(manual.TaskId);
@@ -1981,6 +2072,135 @@ namespace FNSyncPlus.Tests
                 "首次连接时网络不可用会安排重试，主动断开可取消");
         }
 
+        static async Task TestProjectionInspectionStatesAsync(string root)
+        {
+            string source = Path.Combine(root, "projection-inspection-source");
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "file.txt"), "initial");
+            string JournalFor(ExperimentalPhysicalSnapshot.Result plan)
+            {
+                string candidate = plan.CandidateRoot[..^"/current".Length];
+                string local = Path.Combine(root, candidate.Replace('/', Path.DirectorySeparatorChar));
+                return $"{candidate}/{Path.GetFileName(Directory.GetDirectories(local, "publish-*").Single())}";
+            }
+            var beforeFirst = new FaultInjectingProvider(root);
+            await new ExperimentalVersionedBackup().CreateNewAsync(beforeFirst, source, "inspect-first-prepared");
+            var firstPlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(beforeFirst, "inspect-first-prepared");
+            beforeFirst.FailBeforeCandidateMove = true;
+            try { await new ExperimentalFirstProjection().PublishAsync(beforeFirst, "inspect-first-prepared", firstPlan); }
+            catch (IOException) { }
+            var firstInspection = await new ExperimentalProjectionRecoveryInspector().InspectAsync(beforeFirst, "inspect-first-prepared", JournalFor(firstPlan));
+            Assert(firstInspection.Stage == ExperimentalProjectionRecoveryInspector.Stage.FirstPrepared,
+                "只读检查识别首次发布尚未移动候选目录");
+            beforeFirst.FailBeforeCandidateMove = false;
+            await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(beforeFirst, "inspect-first-prepared", firstInspection,
+                ExperimentalProjectionRecovery.RequiredAcknowledgement);
+            var firstRecoveredLease = await ExperimentalRemoteLease.TryAcquireAsync(beforeFirst, "inspect-first-prepared");
+            Assert(firstRecoveredLease != null && File.ReadAllText(Path.Combine(root, "inspect-first-prepared", "current", "file.txt")) == "initial",
+                "确认写入者停止后恢复尚未移动的首次发布");
+            if (firstRecoveredLease != null) await firstRecoveredLease.ReleaseAsync();
+
+            var committedProvider = new FaultInjectingProvider(root);
+            await new ExperimentalVersionedBackup().CreateNewAsync(committedProvider, source, "inspect-committed");
+            var committedPlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(committedProvider, "inspect-committed");
+            committedProvider.ErrorAfterCompleteContains = "/committed.json";
+            try { await new ExperimentalFirstProjection().PublishAsync(committedProvider, "inspect-committed", committedPlan); }
+            catch (IOException) { }
+            var committedInspection = await new ExperimentalProjectionRecoveryInspector().InspectAsync(committedProvider, "inspect-committed", JournalFor(committedPlan));
+            Assert(committedInspection.Stage == ExperimentalProjectionRecoveryInspector.Stage.Committed &&
+                await ExperimentalRemoteLease.TryAcquireAsync(committedProvider, "inspect-committed") == null,
+                "完成记录写入后响应丢失时只读识别完成但不解除锁");
+            committedProvider.ErrorAfterCompleteContains = null;
+            await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(committedProvider, "inspect-committed", committedInspection,
+                ExperimentalProjectionRecovery.RequiredAcknowledgement);
+            var committedRecoveredLease = await ExperimentalRemoteLease.TryAcquireAsync(committedProvider, "inspect-committed");
+            Assert(committedRecoveredLease != null && File.ReadAllText(Path.Combine(root, "inspect-committed", "current", "file.txt")) == "initial",
+                "确认写入者停止后可释放已完成发布的遗留锁");
+            if (committedRecoveredLease != null) await committedRecoveredLease.ReleaseAsync();
+
+            var beforeArchive = new FaultInjectingProvider(root);
+            var engine = new ExperimentalVersionedBackup();
+            await engine.CreateNewAsync(beforeArchive, source, "inspect-before-archive");
+            var old = await new ExperimentalPhysicalSnapshot().PrepareAsync(beforeArchive, "inspect-before-archive");
+            var publication = await new ExperimentalFirstProjection().PublishAsync(beforeArchive, "inspect-before-archive", old);
+            File.WriteAllText(Path.Combine(source, "file.txt"), "modified");
+            await engine.RunAsync(beforeArchive, source, "inspect-before-archive");
+            var next = await new ExperimentalPhysicalSnapshot().PrepareAsync(beforeArchive, "inspect-before-archive");
+            beforeArchive.FailBeforeArchiveMove = true;
+            try { await new ExperimentalNextProjection().PublishAsync(beforeArchive, "inspect-before-archive", old, publication, next); }
+            catch (IOException) { }
+            var beforeInspection = await new ExperimentalProjectionRecoveryInspector().InspectAsync(beforeArchive, "inspect-before-archive", JournalFor(next));
+            Assert(beforeInspection.Stage == ExperimentalProjectionRecoveryInspector.Stage.BeforeArchive &&
+                File.ReadAllText(Path.Combine(root, "inspect-before-archive", "current", "file.txt")) == "initial",
+                "只读检查识别旧目录尚未归档且不改变当前内容");
+            beforeArchive.FailBeforeArchiveMove = false;
+            await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(beforeArchive, "inspect-before-archive", beforeInspection,
+                ExperimentalProjectionRecovery.RequiredAcknowledgement);
+            var beforeRecoveredLease = await ExperimentalRemoteLease.TryAcquireAsync(beforeArchive, "inspect-before-archive");
+            string beforeArchiveRoot = Path.Combine(root, beforeInspection.ArchiveDirectory!.Replace('/', Path.DirectorySeparatorChar));
+            Assert(beforeRecoveredLease != null && File.ReadAllText(Path.Combine(root, "inspect-before-archive", "current", "file.txt")) == "modified" &&
+                File.ReadAllText(Path.Combine(beforeArchiveRoot, "current", "file.txt")) == "initial",
+                "确认写入者停止后恢复尚未归档的增量发布");
+            if (beforeRecoveredLease != null) await beforeRecoveredLease.ReleaseAsync();
+
+            var recoveryFailing = new FaultInjectingProvider(root);
+            await engine.CreateNewAsync(recoveryFailing, source, "inspect-recovery-interrupted");
+            var recoveryOld = await new ExperimentalPhysicalSnapshot().PrepareAsync(recoveryFailing, "inspect-recovery-interrupted");
+            var recoveryPublication = await new ExperimentalFirstProjection().PublishAsync(recoveryFailing, "inspect-recovery-interrupted", recoveryOld);
+            File.WriteAllText(Path.Combine(source, "file.txt"), "after interruption");
+            await engine.RunAsync(recoveryFailing, source, "inspect-recovery-interrupted");
+            var recoveryNext = await new ExperimentalPhysicalSnapshot().PrepareAsync(recoveryFailing, "inspect-recovery-interrupted");
+            recoveryFailing.FailAfterArchiveMove = true;
+            try { await new ExperimentalNextProjection().PublishAsync(recoveryFailing, "inspect-recovery-interrupted", recoveryOld, recoveryPublication, recoveryNext); }
+            catch (IOException) { }
+            string recoveryJournal = JournalFor(recoveryNext);
+            var beforeRecovery = await new ExperimentalProjectionRecoveryInspector().InspectAsync(recoveryFailing, "inspect-recovery-interrupted", recoveryJournal);
+            recoveryFailing.FailAfterArchiveMove = false;
+            recoveryFailing.FailAfterCandidateMove = true;
+            bool recoveryInterrupted = false;
+            try { await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(recoveryFailing, "inspect-recovery-interrupted", beforeRecovery,
+                ExperimentalProjectionRecovery.RequiredAcknowledgement); }
+            catch (IOException) { recoveryInterrupted = true; }
+            var afterInterruption = await new ExperimentalProjectionRecoveryInspector().InspectAsync(recoveryFailing, "inspect-recovery-interrupted", recoveryJournal);
+            bool retryRejected = false;
+            try { await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(recoveryFailing, "inspect-recovery-interrupted", afterInterruption,
+                ExperimentalProjectionRecovery.RequiredAcknowledgement); }
+            catch (IOException) { retryRejected = true; }
+            Assert(recoveryInterrupted && retryRejected && afterInterruption.Stage == ExperimentalProjectionRecoveryInspector.Stage.NewMoved &&
+                await ExperimentalRemoteLease.TryAcquireAsync(recoveryFailing, "inspect-recovery-interrupted") == null &&
+                File.ReadAllText(Path.Combine(root, "inspect-recovery-interrupted", "current", "file.txt")) == "after interruption",
+                "恢复过程再次中断时保留锁和记录并拒绝自动重复恢复");
+
+            var concurrentRecovery = new FaultInjectingProvider(root);
+            await engine.CreateNewAsync(concurrentRecovery, source, "inspect-recovery-race");
+            var racePlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(concurrentRecovery, "inspect-recovery-race");
+            concurrentRecovery.FailBeforeCandidateMove = true;
+            try { await new ExperimentalFirstProjection().PublishAsync(concurrentRecovery, "inspect-recovery-race", racePlan); }
+            catch (IOException) { }
+            var raceInspection = await new ExperimentalProjectionRecoveryInspector().InspectAsync(concurrentRecovery, "inspect-recovery-race", JournalFor(racePlan));
+            concurrentRecovery.FailBeforeCandidateMove = false;
+            var raceStart = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            async Task<bool> TryRecoverAsync()
+            {
+                await raceStart.Task;
+                try
+                {
+                    await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(concurrentRecovery, "inspect-recovery-race", raceInspection,
+                        ExperimentalProjectionRecovery.RequiredAcknowledgement);
+                    return true;
+                }
+                catch (Exception ex) when (ex is IOException or InvalidOperationException) { return false; }
+            }
+            var raceA = Task.Run(TryRecoverAsync);
+            var raceB = Task.Run(TryRecoverAsync);
+            raceStart.SetResult();
+            var raceResults = await Task.WhenAll(raceA, raceB);
+            Assert(raceResults.Count(x => x) == 1 &&
+                File.ReadAllText(Path.Combine(root, "inspect-recovery-race", "current", "file.txt")) == "after interruption" &&
+                await ExperimentalRemoteLease.InspectAsync(concurrentRecovery, "inspect-recovery-race") == null,
+                "并发恢复只有一个执行者，其余请求安全停止");
+        }
+
         static async Task TestNextPhysicalProjectionAsync(string root)
         {
             string source = Path.Combine(root, "projection-next-source");
@@ -2042,6 +2262,33 @@ namespace FNSyncPlus.Tests
                 (await new VersionedManifestStore().LoadForWritingAsync(failing, "projection-archive-uncertain"))?.Id == uncertainNext.Snapshot.Id &&
                 uncertainFirst.Snapshot.Id != uncertainNext.Snapshot.Id,
                 "归档后响应丢失保留锁、旧目录、新候选和已提交备份");
+            string uncertainCandidate = uncertainPlan.CandidateRoot[..^"/current".Length];
+            string uncertainCandidateLocal = Path.Combine(root, uncertainCandidate.Replace('/', Path.DirectorySeparatorChar));
+            string uncertainJournal = $"{uncertainCandidate}/{Path.GetFileName(Directory.GetDirectories(uncertainCandidateLocal, "publish-*").Single())}";
+            var inspectedArchive = await new ExperimentalProjectionRecoveryInspector().InspectAsync(failing, "projection-archive-uncertain", uncertainJournal);
+            Assert(inspectedArchive.Stage == ExperimentalProjectionRecoveryInspector.Stage.OldArchived && inspectedArchive.VersionId == uncertainNext.Snapshot.Id &&
+                !Directory.Exists(Path.Combine(root, "projection-archive-uncertain", "current")),
+                "只读检查识别旧目录已归档、新目录待发布且不改变现状");
+            string intentPath = Path.Combine(root, uncertainJournal.Replace('/', Path.DirectorySeparatorChar), "intent.json");
+            byte[] validIntent = await File.ReadAllBytesAsync(intentPath);
+            var tamperedIntent = System.Text.Json.Nodes.JsonNode.Parse(validIntent)!.AsObject();
+            tamperedIntent["OwnerSha256"] = new string('0', 64);
+            await File.WriteAllTextAsync(intentPath, tamperedIntent.ToJsonString());
+            bool ownerMismatchRejected = false;
+            try { await new ExperimentalProjectionRecoveryInspector().InspectAsync(failing, "projection-archive-uncertain", uncertainJournal); }
+            catch (InvalidDataException) { ownerMismatchRejected = true; }
+            await File.WriteAllBytesAsync(intentPath, validIntent);
+            Assert(ownerMismatchRejected && !Directory.Exists(Path.Combine(root, "projection-archive-uncertain", "current")),
+                "恢复检查拒绝与未释放锁持有者不匹配的意图");
+            failing.FailAfterArchiveMove = false;
+            var recoveredArchive = await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(failing,
+                "projection-archive-uncertain", inspectedArchive, ExperimentalProjectionRecovery.RequiredAcknowledgement);
+            var releasedArchiveLease = await ExperimentalRemoteLease.TryAcquireAsync(failing, "projection-archive-uncertain");
+            Assert(recoveredArchive.VersionId == uncertainNext.Snapshot.Id && releasedArchiveLease != null &&
+                File.ReadAllText(Path.Combine(root, "projection-archive-uncertain", "current", "new.txt")) == "later content" &&
+                File.ReadAllText(Path.Combine(uncertainArchive, "current", "new.txt")) == "third content",
+                "确认写入者停止后恢复归档中断并保留新旧内容");
+            if (releasedArchiveLease != null) await releasedArchiveLease.ReleaseAsync();
             var moveFailing = new FaultInjectingProvider(root);
             await backup.CreateNewAsync(moveFailing, source, "projection-move-uncertain");
             var moveOld = await new ExperimentalPhysicalSnapshot().PrepareAsync(moveFailing, "projection-move-uncertain");
@@ -2061,6 +2308,20 @@ namespace FNSyncPlus.Tests
                 File.ReadAllText(Path.Combine(movedArchive, "current", "new.txt")) == "later content" &&
                 (await new VersionedManifestStore().LoadForWritingAsync(moveFailing, "projection-move-uncertain"))?.Id == moveVersion.Snapshot.Id,
                 "新目录移动后响应丢失保留锁及新旧内容");
+            string moveCandidate = movePlan.CandidateRoot[..^"/current".Length];
+            string moveCandidateLocal = Path.Combine(root, moveCandidate.Replace('/', Path.DirectorySeparatorChar));
+            string moveJournal = $"{moveCandidate}/{Path.GetFileName(Directory.GetDirectories(moveCandidateLocal, "publish-*").Single())}";
+            var inspectedMove = await new ExperimentalProjectionRecoveryInspector().InspectAsync(moveFailing, "projection-move-uncertain", moveJournal);
+            Assert(inspectedMove.Stage == ExperimentalProjectionRecoveryInspector.Stage.NewMoved && inspectedMove.VersionId == moveVersion.Snapshot.Id,
+                "只读检查识别新目录已移动但未提交完成记录");
+            var recoveredMove = await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(moveFailing,
+                "projection-move-uncertain", inspectedMove, ExperimentalProjectionRecovery.RequiredAcknowledgement);
+            var releasedMoveLease = await ExperimentalRemoteLease.TryAcquireAsync(moveFailing, "projection-move-uncertain");
+            Assert(recoveredMove.VersionId == moveVersion.Snapshot.Id && releasedMoveLease != null &&
+                File.ReadAllText(Path.Combine(root, "projection-move-uncertain", "current", "new.txt")) == "last content" &&
+                File.ReadAllText(Path.Combine(movedArchive, "current", "new.txt")) == "later content",
+                "确认写入者停止后补全发布记录并保留新旧内容");
+            if (releasedMoveLease != null) await releasedMoveLease.ReleaseAsync();
         }
 
         static async Task TestFirstPhysicalProjectionAsync(string root)
@@ -2072,6 +2333,7 @@ namespace FNSyncPlus.Tests
             var created = await new ExperimentalVersionedBackup().CreateNewAsync(provider, source, "projection-publish");
             var candidate = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, "projection-publish");
             var stale = candidate;
+            File.SetLastWriteTimeUtc(Path.Combine(source, "file.txt"), File.GetLastWriteTimeUtc(Path.Combine(source, "file.txt")).AddSeconds(-5));
             created = await new ExperimentalVersionedBackup().RunAsync(provider, source, "projection-publish");
             bool staleRejected = false;
             try { await new ExperimentalFirstProjection().PublishAsync(provider, "projection-publish", stale); }
@@ -2118,6 +2380,29 @@ namespace FNSyncPlus.Tests
             Assert(uncertain && competing == null && (await new VersionedManifestStore().LoadForWritingAsync(uncertainProvider, "projection-uncertain"))?.Id == old.Snapshot.Id &&
                 File.ReadAllText(Path.Combine(root, "projection-uncertain", "current", "file.txt")) == "first version",
                 "目录移动后响应丢失时保留锁，已提交备份仍可读取");
+            string uncertainCandidateDir = uncertainCandidate.CandidateRoot[..^"/current".Length];
+            string uncertainLocal = Path.Combine(root, uncertainCandidateDir.Replace('/', Path.DirectorySeparatorChar));
+            string uncertainJournal = $"{uncertainCandidateDir}/{Path.GetFileName(Directory.GetDirectories(uncertainLocal, "publish-*").Single())}";
+            var inspection = await new ExperimentalProjectionRecoveryInspector().InspectAsync(uncertainProvider, "projection-uncertain", uncertainJournal);
+            Assert(inspection.Stage == ExperimentalProjectionRecoveryInspector.Stage.FirstMoved && inspection.VersionId == old.Snapshot.Id &&
+                await ExperimentalRemoteLease.TryAcquireAsync(uncertainProvider, "projection-uncertain") == null,
+                "只读检查识别首次发布已移动且不抢占遗留锁");
+            bool acknowledgementRequired = false;
+            try { await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(uncertainProvider, "projection-uncertain", inspection, ""); }
+            catch (InvalidOperationException) { acknowledgementRequired = true; }
+            bool alteredOwnerRejected = false;
+            try { await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(uncertainProvider, "projection-uncertain",
+                inspection with { OwnerSha256 = new string('0', 64) }, ExperimentalProjectionRecovery.RequiredAcknowledgement); }
+            catch (InvalidDataException) { alteredOwnerRejected = true; }
+            Assert(acknowledgementRequired && alteredOwnerRejected && await ExperimentalRemoteLease.TryAcquireAsync(uncertainProvider, "projection-uncertain") == null,
+                "恢复要求停止写入者的明确确认并拒绝变化的锁身份");
+            var recovered = await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(uncertainProvider, "projection-uncertain", inspection,
+                ExperimentalProjectionRecovery.RequiredAcknowledgement);
+            var freshLease = await ExperimentalRemoteLease.TryAcquireAsync(uncertainProvider, "projection-uncertain");
+            Assert(recovered.VersionId == old.Snapshot.Id && freshLease != null &&
+                File.ReadAllText(Path.Combine(root, "projection-uncertain", "current", "file.txt")) == "first version",
+                "确认写入者停止后补写首次发布完成记录并释放遗留锁");
+            if (freshLease != null) await freshLease.ReleaseAsync();
         }
 
         sealed class ImmediateProgress<T> : IProgress<T>
@@ -2192,6 +2477,8 @@ namespace FNSyncPlus.Tests
             public bool CorruptProjectionUpload { get; set; }
             public bool FailAfterCandidateMove { get; set; }
             public bool FailAfterArchiveMove { get; set; }
+            public bool FailBeforeCandidateMove { get; set; }
+            public bool FailBeforeArchiveMove { get; set; }
             public bool FailReuseCopy { get; set; }
             public bool FailReuseCopyAfter { get; set; }
             public Action? AfterObjectUpload { get; set; }
@@ -2242,6 +2529,7 @@ namespace FNSyncPlus.Tests
                 string source = Path.Combine(rootPath, candidate.Replace('/', Path.DirectorySeparatorChar), "current");
                 string destination = Path.Combine(rootPath, root.Replace('/', Path.DirectorySeparatorChar), "current");
                 if (Directory.Exists(destination) || File.Exists(destination)) return Task.FromResult(VerifiedMoveOutcome.DestinationExists);
+                if (FailBeforeCandidateMove) return Task.FromResult(VerifiedMoveOutcome.NotMoved);
                 Directory.Move(source, destination);
                 if (FailAfterCandidateMove) throw new IOException("模拟移动后响应丢失");
                 return Task.FromResult(VerifiedMoveOutcome.Moved);
@@ -2258,6 +2546,7 @@ namespace FNSyncPlus.Tests
                 string source = Path.Combine(rootPath, root.Replace('/', Path.DirectorySeparatorChar), "current");
                 string destination = Path.Combine(rootPath, archive.Replace('/', Path.DirectorySeparatorChar), "current");
                 if (Directory.Exists(destination) || File.Exists(destination)) return Task.FromResult(VerifiedMoveOutcome.DestinationExists);
+                if (FailBeforeArchiveMove) return Task.FromResult(VerifiedMoveOutcome.NotMoved);
                 Directory.Move(source, destination);
                 if (FailAfterArchiveMove) throw new IOException("模拟归档后响应丢失");
                 return Task.FromResult(VerifiedMoveOutcome.Moved);

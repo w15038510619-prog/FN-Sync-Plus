@@ -12,7 +12,7 @@ namespace FNSyncPlus.Core.Services;
 /// </summary>
 public sealed class ExperimentalVersionedBackup
 {
-    public sealed record Result(VersionedManifestStore.Snapshot Snapshot, int UploadedFiles, int UnchangedFiles, int RenamedFiles, int DeletedFiles, int ReusedFiles = 0);
+    public sealed record Result(VersionedManifestStore.Snapshot Snapshot, int UploadedFiles, int UnchangedFiles, int RenamedFiles, int DeletedFiles, int ReusedFiles = 0, bool HasNewVersion = true);
     private sealed record SourceFile(string RelativePath, string FullPath, long Size, long ModifiedTicks, string Sha256);
     private sealed record SourceTree(List<string> Directories, List<(string RelativePath, string FullPath)> Files);
     private readonly VersionedManifestStore _versions = new();
@@ -335,6 +335,9 @@ public sealed class ExperimentalVersionedBackup
             manifest.SourceRoot = PathHelper.RemoveLongPathPrefix(sourceDirectory);
             manifest.TargetRoot = PathHelper.NormalizeRelPath(target);
             manifest.BackupPolicy = strategy.ToString();
+            token.ThrowIfCancellationRequested();
+            if (oldSnapshot != null && ComparableManifest(manifest).AsSpan().SequenceEqual(ComparableManifest(oldSnapshot.Manifest)))
+                return new Result(oldSnapshot, uploaded, unchanged, renamed, strategy == BackupStrategy.Smart ? deleted.Count : 0, reused, HasNewVersion: false);
             manifest.UpdatedAt = DateTimeOffset.UtcNow;
             token.ThrowIfCancellationRequested();
             commitMayHaveStarted = true;
@@ -362,6 +365,16 @@ public sealed class ExperimentalVersionedBackup
                 }
             }
         }
+    }
+
+    private static byte[] ComparableManifest(Manifest manifest)
+    {
+        var copy = JsonSerializer.Deserialize<Manifest>(JsonSerializer.SerializeToUtf8Bytes(manifest))
+            ?? throw new InvalidDataException("无法比较版本清单");
+        copy.Files = copy.Files.OrderBy(f => f.OriginalRel, StringComparer.Ordinal).ToList();
+        copy.Directories = copy.Directories.OrderBy(d => d.OriginalRel, StringComparer.Ordinal).ToList();
+        copy.UpdatedAt = DateTimeOffset.UnixEpoch;
+        return JsonSerializer.SerializeToUtf8Bytes(copy);
     }
 
     private static bool IsHash(string? value) => value != null && value.Length == 64 && value.All(Uri.IsHexDigit);
