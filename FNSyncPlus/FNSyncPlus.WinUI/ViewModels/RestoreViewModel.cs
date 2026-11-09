@@ -282,15 +282,14 @@ namespace FNSyncPlus.WinUI.ViewModels
                         FailedFilesList.Add(item);
                     }
 
-                    if (report.FailedFiles > 0)
-                    {
-                        RestoreStatusText = $"还原完成（存在失败项）：成功 {report.RestoredFiles} 个，失败 {report.FailedFiles} 个，校验通过 {report.IntegrityVerifiedFiles} 个。请查看失败列表并可点击重试。";
-                    }
-                    else
-                    {
-                        RestoreStatusText = $"还原成功完成！共恢复 {report.RestoredFiles} 个文件，跳过 {report.SkippedFiles} 个，SHA-256 校验通过 {report.IntegrityVerifiedFiles} 个。";
-                    }
+                    RestoreStatusText = report.FailedFiles > 0
+                        ? $"{report.StatusMessage}。请查看失败列表并可点击重试。"
+                        : report.StatusMessage;
                 });
+            }
+            catch (OperationCanceledException)
+            {
+                UIThreadHelper.RunOnUIThread(() => RestoreStatusText = "还原已取消。");
             }
             catch (Exception ex)
             {
@@ -353,15 +352,12 @@ namespace FNSyncPlus.WinUI.ViewModels
                         FailedFilesList.Add(item);
                     }
 
-                    if (report.FailedFiles == 0)
-                    {
-                        RestoreStatusText = $"重试完成！所有先前失败的文件均已成功恢复并通过 SHA-256 校验。";
-                    }
-                    else
-                    {
-                        RestoreStatusText = $"重试完成，仍有 {report.FailedFiles} 个文件未成功。";
-                    }
+                    RestoreStatusText = $"重试结果：{report.StatusMessage}";
                 });
+            }
+            catch (OperationCanceledException)
+            {
+                UIThreadHelper.RunOnUIThread(() => RestoreStatusText = "重试已取消。");
             }
             catch (Exception ex)
             {

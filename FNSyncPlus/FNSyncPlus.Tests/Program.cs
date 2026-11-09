@@ -215,6 +215,9 @@ namespace FNSyncPlus.Tests
                 var entry = new ManifestHistoryEntry { OriginalRel = "file.txt", StoredRel = "history.txt", Sha256 = HashHelper.ComputeFileSha256(Path.Combine(backup, "history.txt")) };
                 bool skipped = await engine.RunRestoreHistoryFileAsync(provider, "backup", target, entry);
                 Assert(!skipped && File.ReadAllText(Path.Combine(target, "file.txt")) == "user content", "历史恢复默认不覆盖现有文件");
+                var skippedDetail = await engine.RunRestoreHistoryFileDetailedAsync(provider, "backup", target, entry);
+                Assert(skippedDetail.SkippedFiles == 1 && skippedDetail.FailedFiles == 0 && skippedDetail.StatusMessage.Contains("跳过", StringComparison.Ordinal),
+                    "历史恢复详细结果区分已跳过和失败");
                 bool renamed = await engine.RunRestoreHistoryFileAsync(provider, "backup", target, entry, conflictResolution: ConflictResolution.RenameWithTimestamp);
                 Assert(renamed && File.ReadAllText(Path.Combine(target, "file.txt")) == "user content" && Directory.GetFiles(target).Length == 2, "历史恢复可选择重命名并保留现有文件");
                 entry.OriginalRel = "../escape.txt";
@@ -224,6 +227,43 @@ namespace FNSyncPlus.Tests
                 entry.Sha256 = new string('0', 64);
                 bool badHash = await engine.RunRestoreHistoryFileAsync(provider, "backup", target, entry);
                 Assert(!badHash && !File.Exists(Path.Combine(target, "bad.txt")), "哈希不匹配时不生成最终文件");
+                var badDetail = await engine.RunRestoreHistoryFileDetailedAsync(provider, "backup", target, entry);
+                Assert(badDetail.FailedFiles == 1 && badDetail.SkippedFiles == 0 && badDetail.StatusMessage.Contains("失败", StringComparison.Ordinal),
+                    "历史恢复详细结果报告哈希失败");
+
+                string localRestoreBackup = Path.Combine(root, "local-restore-backup");
+                string localRestoreOutput = Path.Combine(root, "local-restore-output");
+                Directory.CreateDirectory(localRestoreBackup);
+                File.WriteAllText(Path.Combine(localRestoreBackup, "a.txt"), "good file");
+                File.WriteAllText(Path.Combine(localRestoreBackup, "b.txt"), "damaged file");
+                var localRestoreManifest = new Manifest { Files = new() {
+                    new ManifestFileEntry { OriginalRel = "a.txt", StoredRel = "a.txt", Sha256 = HashHelper.ComputeFileSha256(Path.Combine(localRestoreBackup, "a.txt")) },
+                    new ManifestFileEntry { OriginalRel = "b.txt", StoredRel = "b.txt", Sha256 = new string('0', 64) }
+                } };
+                await new ManifestManager().SaveManifestAtomicAsync(localRestoreBackup, localRestoreManifest);
+                var localRestoreReport = await new RestoreEngine(new ManifestManager()).RunRestoreAsync(localRestoreBackup, localRestoreOutput);
+                Assert(localRestoreReport.RestoredFiles == 1 && localRestoreReport.FailedFiles == 1 &&
+                    localRestoreReport.StatusMessage.Contains("部分失败", StringComparison.Ordinal) &&
+                    localRestoreReport.FailedItems.Any(f => f.OriginalRel == "b.txt") && !File.Exists(Path.Combine(localRestoreOutput, "b.txt")),
+                    "本地恢复逐项报告哈希失败而不显示全部成功");
+                string cancelLocalBackup = Path.Combine(root, "local-cancel-backup");
+                string cancelLocalOutput = Path.Combine(root, "local-cancel-output");
+                Directory.CreateDirectory(cancelLocalBackup);
+                File.WriteAllText(Path.Combine(cancelLocalBackup, "a.txt"), "first");
+                File.WriteAllText(Path.Combine(cancelLocalBackup, "b.txt"), "second");
+                await new ManifestManager().SaveManifestAtomicAsync(cancelLocalBackup, new Manifest { Files = new() {
+                    new ManifestFileEntry { OriginalRel = "a.txt", StoredRel = "a.txt", Sha256 = HashHelper.ComputeFileSha256(Path.Combine(cancelLocalBackup, "a.txt")) },
+                    new ManifestFileEntry { OriginalRel = "b.txt", StoredRel = "b.txt", Sha256 = HashHelper.ComputeFileSha256(Path.Combine(cancelLocalBackup, "b.txt")) }
+                } });
+                using var localRestoreCancellation = new CancellationTokenSource();
+                var cancelLocalEngine = new RestoreEngine(new ManifestManager());
+                cancelLocalEngine.ProgressChanged += r => { if (r.RestoredFiles == 1) localRestoreCancellation.Cancel(); };
+                bool localCanceled = false;
+                try { await cancelLocalEngine.RunRestoreAsync(cancelLocalBackup, cancelLocalOutput, cancellationToken: localRestoreCancellation.Token); }
+                catch (OperationCanceledException) { localCanceled = true; }
+                Assert(localCanceled && File.Exists(Path.Combine(cancelLocalOutput, "a.txt")) && !File.Exists(Path.Combine(cancelLocalOutput, "b.txt")) &&
+                    Directory.GetFiles(cancelLocalOutput, ".fnsync_rst_*", SearchOption.AllDirectories).Length == 0,
+                    "本地恢复取消时传播取消并清理临时文件");
 
                 var faultProvider = new FaultInjectingProvider(root);
                 var manifestManager = new ManifestManager();
@@ -411,7 +451,8 @@ namespace FNSyncPlus.Tests
                         $"v{legacyVersion} 迁移后恢复当前文件和空目录");
                     File.WriteAllText(Path.Combine(currentRestore, longOriginal), "user existing");
                     var skipReport = await historyEngine.RunRestoreVersionedAsync(versionProvider, fixture.folder, currentRestore);
-                    Assert(skipReport.SkippedFiles == 1 && File.ReadAllText(Path.Combine(currentRestore, longOriginal)) == "user existing",
+                    Assert(skipReport.SkippedFiles == 1 && skipReport.StatusMessage.Contains("跳过", StringComparison.Ordinal) &&
+                        File.ReadAllText(Path.Combine(currentRestore, longOriginal)) == "user existing",
                         $"v{legacyVersion} 版本化恢复默认不覆盖用户文件");
                     var renameReport = await historyEngine.RunRestoreVersionedAsync(versionProvider, fixture.folder, currentRestore, ConflictResolution.RenameWithTimestamp);
                     var restoredVariants = Directory.GetFiles(currentRestore, "*", SearchOption.TopDirectoryOnly);
@@ -793,7 +834,7 @@ namespace FNSyncPlus.Tests
                 File.WriteAllText(Path.Combine(root, corruptRestoreFixture.folder, corruptEntry.StoredRel.Replace('/', Path.DirectorySeparatorChar)), "damaged test data");
                 string partialRestorePath = Path.Combine(root, "versioned-corrupt-restore-output");
                 var partialRestore = await historyEngine.RunRestoreVersionedAsync(versionProvider, corruptRestoreFixture.folder, partialRestorePath);
-                Assert(partialRestore.FailedFiles == 1 && partialRestore.RestoredFiles == 1 &&
+                Assert(partialRestore.FailedFiles == 1 && partialRestore.RestoredFiles == 1 && partialRestore.StatusMessage.Contains("部分失败", StringComparison.Ordinal) &&
                     !File.Exists(Path.Combine(partialRestorePath, longOriginal)) && File.ReadAllText(Path.Combine(partialRestorePath, "good.txt")) == "good data" &&
                     partialRestore.FileResults.Any(r => r.OriginalRel == longOriginal && !r.Success),
                     "版本化恢复逐项报告哈希损坏并恢复未损坏文件");

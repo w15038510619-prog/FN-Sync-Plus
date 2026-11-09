@@ -335,6 +335,10 @@ namespace FNSyncPlus.Core.Services
             Log("INFO", "正在读取 NAS 备份元数据清单 (.fnsync/manifest.json)...");
             var manifest = await _manifestManager.LoadManifestAsync(nasBackupFolder, cancellationToken).ConfigureAwait(false);
 
+            if (manifest.Files == null || manifest.Directories == null ||
+                manifest.Directories.Any(d => d == null || !PathHelper.IsSafeRelativePath(d.OriginalRel)))
+                throw new InvalidDataException("清单包含无效或不安全的目录记录，拒绝恢复");
+
             if (manifest.Files.Count == 0) Log("WARN", "活动清单为空，没有文件需要恢复。");
 
             // 2. 先行恢复目录结构（包含空目录）
@@ -344,26 +348,15 @@ namespace FNSyncPlus.Core.Services
                 Log("INFO", $"正在恢复 {manifest.Directories.Count} 个原始目录结构（包含空目录）...");
                 foreach (var d in manifest.Directories)
                 {
-                    if (string.IsNullOrWhiteSpace(d.OriginalRel)) continue;
-                    if (!PathHelper.IsSafeRelativePath(d.OriginalRel))
-                    {
-                        Log("WARN", $"[安全拦截] 忽略潜在目录遍历风险的清单目录: {d.OriginalRel}");
-                        continue;
-                    }
-
+                    cancellationToken.ThrowIfCancellationRequested();
                     string dirTarget = Path.Combine(longLocal, d.OriginalRel.Replace('/', '\\'));
-                    if (!Directory.Exists(dirTarget))
+                    bool existed = Directory.Exists(dirTarget);
+                    try
                     {
-                        try
-                        {
-                            EnsureSafeRestoreDirectory(longLocal, dirTarget);
-                            restoredDirsCount++;
-                        }
-                        catch (Exception ex)
-                        {
-                            Log("WARN", $"创建目录失败: {d.OriginalRel} ({ex.Message})");
-                        }
+                        EnsureSafeRestoreDirectory(longLocal, dirTarget);
+                        if (!existed) restoredDirsCount++;
                     }
+                    catch (Exception ex) { throw new IOException($"恢复目录失败: {d.OriginalRel}", ex); }
                 }
                 report.RestoredDirectories = restoredDirsCount;
             }
@@ -395,11 +388,7 @@ namespace FNSyncPlus.Core.Services
 
             for (int i = 0; i < nasFiles.Count; i++)
             {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    Log("WARN", "恢复任务已被取消。");
-                    break;
-                }
+                cancellationToken.ThrowIfCancellationRequested();
 
                 var nasFi = nasFiles[i];
                 string storedRel = PathHelper.NormalizeRelPath(Path.GetRelativePath(longNas, nasFi.FullName));
@@ -424,14 +413,9 @@ namespace FNSyncPlus.Core.Services
                 {
                     failedCount++;
                     report.FailedFiles = failedCount;
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = storedRel, Success = false, ErrorMessage = "不安全的清单路径" });
                     Log("ERROR", $"[安全拦截] 文件相对路径不安全（含路径遍历字符）: {targetRel}");
                     continue;
-                }
-
-                if (isLong)
-                {
-                    longNameRestoredCount++;
-                    Log("INFO", $"[还原长文件名] 存储名: {storedRel} -> 还原为原始长文件名: {targetRel}");
                 }
 
                 string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
@@ -444,6 +428,7 @@ namespace FNSyncPlus.Core.Services
                     {
                         skippedCount++;
                         report.SkippedFiles = skippedCount;
+                        report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = storedRel, Skipped = true, Success = true });
                         ProgressChanged?.Invoke(report);
                         continue;
                     }
@@ -489,20 +474,14 @@ namespace FNSyncPlus.Core.Services
                         if (!string.Equals(expectedSha256, computedHash, StringComparison.OrdinalIgnoreCase))
                         {
                             // 校验失败：坚决删除损坏的临时文件，绝不计入成功！
-                            if (File.Exists(tempRestorePath))
-                            {
-                                try { File.Delete(tempRestorePath); } catch { }
-                            }
+                            var mismatch = CleanupFailedRestoreTemp(tempRestorePath, new InvalidDataException("SHA-256 校验失败"));
 
                             failedCount++;
                             report.FailedFiles = failedCount;
-                            Log("ERROR", $"[SHA-256 校验失败] 恢复文件与原始数据哈希不一致！文件: {targetRel}\n  预期: {expectedSha256}\n  实际: {computedHash}。已自动删除损坏文件！");
+                            report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = storedRel, Success = false, ErrorMessage = mismatch.Message, DetailedException = mismatch.ToString() });
+                            Log("ERROR", $"[恢复失败] {targetRel}: {mismatch.Message}");
                             ProgressChanged?.Invoke(report);
                             continue;
-                        }
-                        else
-                        {
-                            integrityOkCount++;
                         }
                     }
 
@@ -517,31 +496,36 @@ namespace FNSyncPlus.Core.Services
                     }
 
                     // 4. 原子移动到最终目标位置
+                    cancellationToken.ThrowIfCancellationRequested();
                     File.Move(tempRestorePath, targetLocalFull, overwrite: conflictResolution == ConflictResolution.Overwrite);
 
                     restoredCount++;
+                    integrityOkCount++;
+                    if (isLong) longNameRestoredCount++;
                     report.RestoredFiles = restoredCount;
                     report.LongNameRestoredFiles = longNameRestoredCount;
                     report.IntegrityVerifiedFiles = integrityOkCount;
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = storedRel, Success = true, HashVerified = true });
+                }
+                catch (OperationCanceledException canceled)
+                {
+                    DeleteCanceledTemporaryFile(tempRestorePath, canceled);
+                    throw;
                 }
                 catch (Exception ex)
                 {
-                    // 发生异常时清理残留的临时文件
-                    if (File.Exists(tempRestorePath))
-                    {
-                        try { File.Delete(tempRestorePath); } catch { }
-                    }
-
+                    var reported = CleanupFailedRestoreTemp(tempRestorePath, ex);
                     failedCount++;
                     report.FailedFiles = failedCount;
-                    Log("ERROR", $"[恢复失败] {targetRel} : {ex.Message}");
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = storedRel, Success = false, ErrorMessage = reported.Message, DetailedException = reported.ToString() });
+                    Log("ERROR", $"[恢复失败] {targetRel} : {reported.Message}");
                 }
 
                 ProgressChanged?.Invoke(report);
             }
 
-            report.StatusMessage = $"恢复操作完成！已成功恢复: {restoredCount}, 长文件名还原: {longNameRestoredCount}, 完整性校验通过: {integrityOkCount}, 空目录恢复: {restoredDirsCount}, 跳过已存在: {skippedCount}, 失败: {failedCount}";
-            Log("INFO", report.StatusMessage);
+            report.StatusMessage = BuildRestoreStatus(report);
+            Log(failedCount > 0 ? "WARN" : "INFO", report.StatusMessage);
             return report;
         }
 
@@ -697,17 +681,15 @@ namespace FNSyncPlus.Core.Services
                     // 强比对 SHA-256
                     if (!string.IsNullOrEmpty(fileEntry.Sha256) && !string.Equals(fileEntry.Sha256, computedHash, StringComparison.OrdinalIgnoreCase))
                     {
-                        if (File.Exists(tempRestorePath))
-                        {
-                            try { File.Delete(tempRestorePath); } catch { }
-                        }
+                        var mismatch = CleanupFailedRestoreTemp(tempRestorePath, new InvalidDataException("SHA-256 校验失败"));
                         report.FailedFiles++;
                         report.FileResults.Add(new RestoreFileResult
                         {
                             OriginalRel = targetRel,
                             StoredRel = fileEntry.StoredRel,
                             Success = false,
-                            ErrorMessage = $"[SHA-256 校验失败] 预期 {fileEntry.Sha256}, 实收 {computedHash}"
+                            ErrorMessage = mismatch.Message,
+                            DetailedException = mismatch.ToString()
                         });
                         Log("ERROR", $"[SHA-256 校验失败] 恢复文件与原始数据哈希不一致！文件: {targetRel}");
                         ProgressChanged?.Invoke(report);
@@ -743,35 +725,24 @@ namespace FNSyncPlus.Core.Services
                 }
                 catch (Exception ex)
                 {
-                    if (File.Exists(tempRestorePath))
-                    {
-                        try { File.Delete(tempRestorePath); } catch { }
-                    }
+                    var reported = CleanupFailedRestoreTemp(tempRestorePath, ex);
                     report.FailedFiles++;
                     report.FileResults.Add(new RestoreFileResult
                     {
                         OriginalRel = targetRel,
                         StoredRel = fileEntry.StoredRel,
                         Success = false,
-                        ErrorMessage = ex.Message,
-                        DetailedException = ex.ToString()
+                        ErrorMessage = reported.Message,
+                        DetailedException = reported.ToString()
                     });
-                    Log("ERROR", $"[恢复失败] {targetRel} : {ex.Message}");
+                    Log("ERROR", $"[恢复失败] {targetRel} : {reported.Message}");
                 }
 
                 ProgressChanged?.Invoke(report);
             }
 
-            if (report.FailedFiles > 0)
-            {
-                report.StatusMessage = $"恢复操作完成（存在失败项）: 成功 {report.RestoredFiles}, 失败 {report.FailedFiles}, 校验通过 {report.IntegrityVerifiedFiles}";
-                Log("WARN", report.StatusMessage);
-            }
-            else
-            {
-                report.StatusMessage = $"恢复操作圆满完成！已成功恢复: {report.RestoredFiles}, 校验通过: {report.IntegrityVerifiedFiles}, 失败: 0";
-                Log("INFO", report.StatusMessage);
-            }
+            report.StatusMessage = BuildRestoreStatus(report);
+            Log(report.FailedFiles > 0 ? "WARN" : "INFO", report.StatusMessage);
             return report;
         }
 
@@ -805,13 +776,27 @@ namespace FNSyncPlus.Core.Services
             ConflictResolution conflictResolution = ConflictResolution.SkipExisting)
         {
             if (historyEntry == null) return false;
+            var result = await RunRestoreHistoryFileDetailedAsync(storageProvider, nasBackupFolderRel, localDestinationFolder,
+                historyEntry, cancellationToken, conflictResolution).ConfigureAwait(false);
+            return result.RestoredFiles == 1;
+        }
+
+        /// <summary>Returns the complete result so a skipped history file is distinct from a failure.</summary>
+        public async Task<RestoreProgressReport> RunRestoreHistoryFileDetailedAsync(
+            INasStorageProvider storageProvider,
+            string nasBackupFolderRel,
+            string localDestinationFolder,
+            ManifestHistoryEntry historyEntry,
+            CancellationToken cancellationToken = default,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting)
+        {
+            ArgumentNullException.ThrowIfNull(historyEntry);
             var manifest = new Manifest { Files = new() { new ManifestFileEntry {
                 OriginalRel = historyEntry.OriginalRel, StoredRel = historyEntry.StoredRel,
                 Sha256 = historyEntry.Sha256, Size = historyEntry.Size
             } } };
-            var result = await RunRestoreFilteredAsync(storageProvider, nasBackupFolderRel, localDestinationFolder,
+            return await RunRestoreFilteredAsync(storageProvider, nasBackupFolderRel, localDestinationFolder,
                 manifest, conflictResolution, cancellationToken).ConfigureAwait(false);
-            return result.RestoredFiles == 1;
         }
 
         private async Task<RestoreProgressReport> RunRestoreFilteredAsync(
@@ -876,9 +861,9 @@ namespace FNSyncPlus.Core.Services
 
                     if (!string.IsNullOrEmpty(fileEntry.Sha256) && !string.Equals(fileEntry.Sha256, computedHash, StringComparison.OrdinalIgnoreCase))
                     {
-                        if (File.Exists(tempRestorePath)) File.Delete(tempRestorePath);
+                        var mismatch = CleanupFailedRestoreTemp(tempRestorePath, new InvalidDataException("SHA-256 校验失败"));
                         report.FailedFiles++;
-                        report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = fileEntry.StoredRel, Success = false, ErrorMessage = "SHA-256 校验失败" });
+                        report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = fileEntry.StoredRel, Success = false, ErrorMessage = mismatch.Message, DetailedException = mismatch.ToString() });
                         continue;
                     }
 
@@ -886,7 +871,7 @@ namespace FNSyncPlus.Core.Services
                     File.Move(tempRestorePath, targetLocalFull, overwrite: conflictResolution == ConflictResolution.Overwrite);
                     report.RestoredFiles++;
                     report.IntegrityVerifiedFiles++;
-                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, Success = true, HashVerified = true });
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = fileEntry.StoredRel, Success = true, HashVerified = true });
                 }
                 catch (OperationCanceledException canceled)
                 {
@@ -895,15 +880,36 @@ namespace FNSyncPlus.Core.Services
                 }
                 catch (Exception ex)
                 {
-                    if (File.Exists(tempRestorePath)) try { File.Delete(tempRestorePath); } catch { }
+                    var reported = CleanupFailedRestoreTemp(tempRestorePath, ex);
                     report.FailedFiles++;
-                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, Success = false, ErrorMessage = ex.Message, DetailedException = ex.ToString() });
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = fileEntry.StoredRel, Success = false, ErrorMessage = reported.Message, DetailedException = reported.ToString() });
                 }
 
                 ProgressChanged?.Invoke(report);
             }
 
+            report.StatusMessage = BuildRestoreStatus(report);
             return report;
+        }
+
+        private static string BuildRestoreStatus(RestoreProgressReport report)
+        {
+            if (report.FailedFiles > 0)
+                return $"{(report.RestoredFiles > 0 ? "恢复部分失败" : "恢复失败")}: 成功 {report.RestoredFiles}，跳过 {report.SkippedFiles}，失败 {report.FailedFiles}";
+            if (report.SkippedFiles > 0)
+                return $"{(report.RestoredFiles > 0 ? "恢复完成" : "已跳过现有文件")}: 成功 {report.RestoredFiles}，跳过 {report.SkippedFiles}";
+            if (report.TotalFiles == 0 && report.RestoredDirectories == 0) return "没有需要恢复的文件或目录";
+            return $"恢复完成: 文件 {report.RestoredFiles}，目录 {report.RestoredDirectories}，校验通过 {report.IntegrityVerifiedFiles}";
+        }
+
+        private static Exception CleanupFailedRestoreTemp(string path, Exception failure)
+        {
+            try { File.Delete(path); return failure; }
+            catch (DirectoryNotFoundException) { return failure; }
+            catch (Exception cleanupError)
+            {
+                return new AggregateException("恢复失败且无法清理临时文件", failure, cleanupError);
+            }
         }
 
         private static void DeleteCanceledTemporaryFile(string path, OperationCanceledException canceled)
