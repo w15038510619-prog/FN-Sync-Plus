@@ -1280,6 +1280,7 @@ namespace FNSyncPlus.Tests
                 await TestIsolatedVersionedTaskAsync(root);
                 await TestReconnectSchedulingAsync(root);
                 await TestShutdownAsync(root);
+                await TestPausePersistsAsync(root);
             }
             finally
             {
@@ -1608,6 +1609,50 @@ namespace FNSyncPlus.Tests
                     "实际停止后退出完成，未提交中断版本且不再接受新任务");
             }
             finally { provider.ContinueUpload.TrySetResult(); Environment.CurrentDirectory = oldDirectory; }
+        }
+
+        static async Task TestPausePersistsAsync(string root)
+        {
+            string source = Path.Combine(root, "pause-restart-source");
+            string target = Path.Combine(root, "pause-restart-target");
+            string settingsPath = Path.Combine(root, "pause-restart-settings.json");
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "sample.txt"), "local synthetic content");
+            var settings = AppSettings.CreateForTest(settingsPath);
+            var task = new SyncTask { TaskName = "暂停重启", SourceFolder = source, DestinationFolder = target, ProviderType = StorageProviderType.LocalFileSystem, ScheduleMode = TaskSyncScheduleMode.SmartAuto };
+            settings.Tasks.Add(task);
+            settings.Save();
+            using (var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "pause-restart-logs"))))
+            {
+                manager.PauseTask(task.TaskId);
+                if (!await manager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("暂停测试无法停止调度器");
+            }
+            var loaded = AppSettings.LoadFromPath(settingsPath);
+            var restoredTask = loaded.Tasks.Single();
+            using var restarted = new TaskManager(loaded, new SmbAuthService(), new LogService(Path.Combine(root, "pause-restart-logs2")));
+            restarted.SetNasOnlineState(false);
+            restarted.SetNasOnlineState(true);
+            restarted.TriggerSync(restoredTask.TaskId);
+            await Task.Delay(5500);
+            Assert(restoredTask.IsUserPaused && restoredTask.State == TaskSyncState.Paused && !restoredTask.IsWatching &&
+                !restoredTask.NextScheduledTime.HasValue && !Directory.Exists(target),
+                "用户暂停状态持久化，重启及连接恢复均不会启动任务");
+            loaded.CustomConfigPath = Path.Combine(root, "missing-pause-settings-dir", "settings.json");
+            bool failedSave = false;
+            try { restarted.ResumeTask(restoredTask.TaskId); }
+            catch (IOException) { failedSave = true; }
+            loaded.CustomConfigPath = settingsPath;
+            Assert(failedSave && restoredTask.IsUserPaused && restoredTask.State == TaskSyncState.Paused && !restoredTask.IsWatching &&
+                AppSettings.LoadFromPath(settingsPath).Tasks.Single().IsUserPaused,
+                "恢复状态保存失败时保持暂停，不启动监听或同步");
+            var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            restarted.TaskStateChanged += t => { if (t.TaskId == restoredTask.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) completed.TrySetResult(); };
+            restarted.ResumeTask(restoredTask.TaskId);
+            if (await Task.WhenAny(completed.Task, Task.Delay(15000)) != completed.Task) throw new TimeoutException("恢复暂停任务超时");
+            Assert(restoredTask.State == TaskSyncState.Completed && !AppSettings.LoadFromPath(settingsPath).Tasks.Single().IsUserPaused &&
+                File.ReadAllText(Path.Combine(target, "sample.txt")) == "local synthetic content",
+                "显式恢复成功后保存状态并正常同步");
+            await restarted.ShutdownAsync(TimeSpan.FromSeconds(5));
         }
 
         sealed class FaultInjectingProvider : INasStorageProvider, IExclusiveDirectoryProvider

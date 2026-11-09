@@ -36,6 +36,8 @@ namespace FNSyncPlus.WinUI.Pages
 
             ViewModel.RequestConfirmDelete -= ConfirmDeleteTask;
             ViewModel.RequestConfirmDelete += ConfirmDeleteTask;
+            ViewModel.RequestOperationError -= ShowOperationError;
+            ViewModel.RequestOperationError += ShowOperationError;
         }
 
         private void OnPageUnloaded(object sender, RoutedEventArgs e)
@@ -44,6 +46,19 @@ namespace FNSyncPlus.WinUI.Pages
             ViewModel.RequestTaskDetails -= OpenTaskDetailsDialog;
             ViewModel.RequestEditSettings -= OpenTaskSettingsDialog;
             ViewModel.RequestConfirmDelete -= ConfirmDeleteTask;
+            ViewModel.RequestOperationError -= ShowOperationError;
+        }
+
+        private async void ShowOperationError(string message)
+        {
+            var dialog = new ContentDialog
+            {
+                Title = "任务操作未完成",
+                Content = message,
+                CloseButtonText = "知道了",
+                XamlRoot = this.XamlRoot ?? App.MainWindowInstance?.Content?.XamlRoot
+            };
+            await dialog.ShowAsync();
         }
 
         private async void OpenAddFolderWizardDialog()

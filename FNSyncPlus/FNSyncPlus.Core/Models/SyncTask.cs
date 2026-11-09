@@ -80,6 +80,10 @@ namespace FNSyncPlus.Core.Models
         [JsonPropertyName("enabled")]
         public bool Enabled { get; set; } = true;
 
+        // Explicit user pause is persistent; transient runtime states are not.
+        [JsonPropertyName("is_paused")]
+        public bool IsUserPaused { get; set; }
+
         [JsonPropertyName("auto_sync_enabled")]
         public bool AutoSyncEnabled { get; set; } = true;
 

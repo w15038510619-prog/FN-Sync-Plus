@@ -327,6 +327,7 @@ namespace FNSyncPlus.Core.Services
 
                 CancelTaskSync(taskId);
                 StopTaskAutomation(taskId); // 彻底注销并停止文件变动监听与定时轮询
+                task.IsUserPaused = true;
                 task.State = TaskSyncState.Paused;
                 task.LastSyncStatus = "已暂停";
                 _settings.Save();
@@ -343,10 +344,15 @@ namespace FNSyncPlus.Core.Services
                 var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
                 if (task == null) return;
 
+                bool wasUserPaused = task.IsUserPaused;
+                var oldState = task.State;
+                string oldStatus = task.LastSyncStatus;
+                task.IsUserPaused = false;
                 task.State = TaskSyncState.Idle;
                 task.LastSyncStatus = "已恢复就绪";
-                ApplyTaskAutomation(task); // 重新挂载监听与定时轮询
-                _settings.Save();
+                try { _settings.Save(); }
+                catch { task.IsUserPaused = wasUserPaused; task.State = oldState; task.LastSyncStatus = oldStatus; throw; }
+                ApplyTaskAutomation(task); // 恢复状态保存成功后才重新挂载监听与定时轮询
                 TaskStateChanged?.Invoke(task);
                 AppendTaskLog(task, "INFO", "任务已恢复，自动化设置已重新生效。");
                 if (task.ScheduleMode != TaskSyncScheduleMode.ManualOnly) TriggerSync(taskId);
@@ -628,6 +634,12 @@ namespace FNSyncPlus.Core.Services
         {
             foreach (var task in _settings.Tasks)
             {
+                if (task.IsUserPaused)
+                {
+                    task.State = TaskSyncState.Paused;
+                    task.LastSyncStatus = "已暂停";
+                    continue;
+                }
                 // 首先校验任务配置是否合法
                 if (!task.ValidateConfiguration(out string configError))
                 {
@@ -664,7 +676,7 @@ namespace FNSyncPlus.Core.Services
             StopTaskAutomation(task.TaskId);
 
             // 暂停状态或禁用状态绝对不启动变动监听与定时轮询
-            if (!task.Enabled || task.State == TaskSyncState.Paused) return;
+            if (!task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused) return;
 
             // 根据 ScheduleMode 统一配置调度标记
             switch (task.ScheduleMode)

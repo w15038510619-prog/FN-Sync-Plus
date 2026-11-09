@@ -70,6 +70,7 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         public event Action<SyncTaskItemViewModel>? RequestViewDetails;
         public event Action<SyncTaskItemViewModel>? RequestEditSettings;
+        public event Action<string>? RequestOperationError;
         public event Action<SyncTaskItemViewModel>? RequestDelete;
 
         public SyncTaskItemViewModel(SyncTask task, TaskManager taskManager)
@@ -148,13 +149,18 @@ namespace FNSyncPlus.WinUI.ViewModels
         [RelayCommand]
         private void TogglePause()
         {
-            if (IsPaused)
+            bool resuming = IsPaused;
+            try
             {
-                _taskManager.ResumeTask(TaskId);
+                if (resuming) _taskManager.ResumeTask(TaskId);
+                else _taskManager.PauseTask(TaskId);
             }
-            else
+            catch (Exception ex)
             {
-                _taskManager.PauseTask(TaskId);
+                string message = Model.State != TaskSyncState.Paused ? "无法完成操作，请检查任务状态。" : resuming
+                    ? "恢复状态未能保存，任务仍保持暂停。"
+                    : "当前会话已暂停，但暂停状态未能保存；重启后可能重新开始，请检查配置文件权限。";
+                RequestOperationError?.Invoke($"{message}\n{ex.Message}");
             }
             UpdateVisualState();
         }
