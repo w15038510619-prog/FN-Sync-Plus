@@ -518,6 +518,11 @@ namespace FNSyncPlus.Core.Services
                         throw new InvalidOperationException("实验性备份必须使用隔离会话和已连接的飞牛存储");
                     AppendTaskLog(task, "INFO", "隔离试验：正在准备版本化内容；NAS 活动目录尚不反映文件树。");
                     var experimental = new ExperimentalVersionedBackup();
+                    experimental.ProgressChanged += message =>
+                    {
+                        task.CurrentFile = message;
+                        TaskStateChanged?.Invoke(task);
+                    };
                     var result = task.RequiresNewExperimentalBackup
                         ? string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot)
                             ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy).ConfigureAwait(false)

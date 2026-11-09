@@ -880,7 +880,7 @@ namespace FNSyncPlus.Core.Services
 
             // 2. 确保远端目标根目录存在 (幂等检查与创建)
             var mkdirRes = await storageProvider.CreateDirectoryAsync(targetNasFolder, token).ConfigureAwait(false);
-            if (!mkdirRes.Success && mkdirRes.ErrorCode != 17)
+            if (!mkdirRes.Success)
             {
                 CurrentState = SyncState.Failed;
                 report.State = SyncState.Failed;
@@ -987,7 +987,7 @@ namespace FNSyncPlus.Core.Services
                     try
                     {
                         var dirRes = await storageProvider.CreateDirectoryAsync(remoteDir, token).ConfigureAwait(false);
-                        if (!dirRes.Success && dirRes.ErrorCode != 17)
+                        if (!dirRes.Success)
                         {
                             throw new IOException($"创建远端子目录失败: {dirRes.ErrorMessage}");
                         }

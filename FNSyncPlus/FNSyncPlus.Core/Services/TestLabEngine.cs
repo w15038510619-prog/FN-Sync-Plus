@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -58,6 +60,14 @@ namespace FNSyncPlus.Core.Services
     /// </summary>
     public class TestLabEngine
     {
+        [DllImport("kernel32.dll", EntryPoint = "CreateDirectoryW", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CreateDirectoryExclusive(string path, IntPtr securityAttributes);
+
+        private static void CreateNewDirectory(string path)
+        {
+            if (!CreateDirectoryExclusive(PathHelper.EnsureLongPathPrefix(path), IntPtr.Zero))
+                throw new IOException("无法独占创建新的测试目录，未修改已有目录。", new Win32Exception(Marshal.GetLastWin32Error()));
+        }
         private readonly LongNameEngine _longNameEngine;
         private readonly ManifestManager _manifestManager;
         private readonly SmbAuthService _smbService;
@@ -79,75 +89,73 @@ namespace FNSyncPlus.Core.Services
         }
 
         /// <summary>
-        /// 生成标准测试文件集于 %LOCALAPPDATA%\FNSyncPlus\TestLab\Source，杜绝污染用户个人目录
+        /// Generate a fresh sample set in a unique temporary directory; never remove an existing directory.
         /// </summary>
         public async Task<List<TestFileItem>> GenerateTestSamplesAsync(IProgress<string>? progress = null)
+            => (await CreateSamplesAsync(progress).ConfigureAwait(false)).Items;
+
+        private async Task<(string SourceDir, List<TestFileItem> Items)> CreateSamplesAsync(IProgress<string>? progress)
         {
             return await Task.Run(() =>
             {
-                progress?.Report("正在准备隔离测试目录环境: " + TestSourceDir);
-
-                if (Directory.Exists(TestSourceDir))
-                {
-                    try { Directory.Delete(TestSourceDir, true); } catch { }
-                }
-                Directory.CreateDirectory(TestSourceDir);
+                string sourceDir = Directory.CreateTempSubdirectory("FNSyncPlus_TestLab_Source_").FullName;
+                progress?.Report("正在准备隔离测试目录环境: " + sourceDir);
 
                 var items = new List<TestFileItem>();
 
                 // 1. 常规中英文多格式文件
-                CreateTestFile(items, "01_普通文件/README_文档.txt", "这是一份标准的普通测试文本说明文档，编码采用UTF-8。", "常规文本");
-                CreateTestFile(items, "01_普通文件/2026年度业务合作协议.docx", "DOCX_MOCK_DATA_2026_AGREEMENT_BINARY_CONTENT_SAMPLE_FOR_TESTING", "Office文档");
-                CreateTestFile(items, "01_普通文件/财务明细预算表_Q1.xlsx", "XLSX_MOCK_SHEET_FINANCIAL_EXPENSES_DATA_2026", "Office表格");
-                CreateTestFile(items, "01_普通文件/技术架构规范图谱.pdf", "%PDF-1.7 mock header stream test content 2026", "PDF文档");
-                CreateBinaryTestFile(items, "01_普通文件/备份测试数据块.bin", 64 * 1024, "二进制块");
+                CreateTestFile(sourceDir, items, "01_普通文件/README_文档.txt", "这是一份标准的普通测试文本说明文档，编码采用UTF-8。", "常规文本");
+                CreateTestFile(sourceDir, items, "01_普通文件/2026年度业务合作协议.docx", "DOCX_MOCK_DATA_2026_AGREEMENT_BINARY_CONTENT_SAMPLE_FOR_TESTING", "Office文档");
+                CreateTestFile(sourceDir, items, "01_普通文件/财务明细预算表_Q1.xlsx", "XLSX_MOCK_SHEET_FINANCIAL_EXPENSES_DATA_2026", "Office表格");
+                CreateTestFile(sourceDir, items, "01_普通文件/技术架构规范图谱.pdf", "%PDF-1.7 mock header stream test content 2026", "PDF文档");
+                CreateBinaryTestFile(sourceDir, items, "01_普通文件/备份测试数据块.bin", 64 * 1024, "二进制块");
 
                 // 2. 含有空格、特殊符号与 Unicode 字符的文件
-                CreateTestFile(items, "02_特殊符号/财务 2026 年（第一季度）· 报告 & 审计 [终稿] 🚀.xlsx", "包含Emoji和全角半角标点的测试报表内容", "特殊字符/Emoji");
-                CreateTestFile(items, "02_特殊符号/System~Config #1 @Office(Cenco)+Sub.txt", "含井号、波浪号与括号的文件名测试", "特殊符号");
+                CreateTestFile(sourceDir, items, "02_特殊符号/财务 2026 年（第一季度）· 报告 & 审计 [终稿] 🚀.xlsx", "包含Emoji和全角半角标点的测试报表内容", "特殊字符/Emoji");
+                CreateTestFile(sourceDir, items, "02_特殊符号/System~Config #1 @Office(Cenco)+Sub.txt", "含井号、波浪号与括号的文件名测试", "特殊符号");
 
                 // 3. 254 / 255 / 256 / 300 字节 UTF-8 边界极限文件名
                 // 254 字节: 83 汉字 (249) + 'a' (1) + '.txt' (4) = 254
                 string name254 = new string('汉', 83) + "a.txt";
-                CreateTestFile(items, $"03_极限边界/{name254}", "这是 254 字节边界文件内容，NAS 允许直接原生存储无需映射。", "254字节边界(原名)");
+                CreateTestFile(sourceDir, items, $"03_极限边界/{name254}", "这是 254 字节边界文件内容，NAS 允许直接原生存储无需映射。", "254字节边界(原名)");
 
                 // 255 字节: 83 汉字 (249) + 'ab' (2) + '.txt' (4) = 255
                 string name255 = new string('汉', 83) + "ab.txt";
-                CreateTestFile(items, $"03_极限边界/{name255}", "这是 255 字节临界文件内容，恰好位于 Linux NAS 单名上限。", "255字节极限(原名)");
+                CreateTestFile(sourceDir, items, $"03_极限边界/{name255}", "这是 255 字节临界文件内容，恰好位于 Linux NAS 单名上限。", "255字节极限(原名)");
 
                 // 256 字节: 84 汉字 (252) + '.txt' (4) = 256 (必须触发短名映射)
                 string name256 = new string('汉', 84) + ".txt";
-                CreateTestFile(items, $"03_极限边界/{name256}", "这是 256 字节超长文件内容，超过 NAS 255 上限，必须被映射为 _FN_LONG_*。", "256字节超长(映射)");
+                CreateTestFile(sourceDir, items, $"03_极限边界/{name256}", "这是 256 字节超长文件内容，超过 NAS 255 上限，必须被映射为 _FN_LONG_*。", "256字节超长(映射)");
 
                 // 300 字节: 98 汉字 (294) + 'ab' (2) + '.txt' (4) = 300 (必须触发短名映射)
                 string name300 = new string('汉', 98) + "ab.txt";
-                CreateTestFile(items, $"03_极限边界/{name300}", "这是 300 字节深度超长中文文件，必须安全无损映射并可100%还原。", "300字节超长(映射)");
+                CreateTestFile(sourceDir, items, $"03_极限边界/{name300}", "这是 300 字节深度超长中文文件，必须安全无损映射并可100%还原。", "300字节超长(映射)");
 
                 // 4. 超长多层嵌套目录 (每一层 85 汉字 = 255 字节，共三层嵌套)
                 string dirLevel1 = "04_超长目录_层级一_" + new string('级', 70);
                 string dirLevel2 = "层级二_" + new string('深', 75);
                 string relNestedDir = Path.Combine("04_超长目录", dirLevel1, dirLevel2);
-                CreateTestFile(items, Path.Combine(relNestedDir, "嵌套超长目录内重要文件.pdf"), "三层嵌套长目录下的重要文件内容", "多层嵌套超长目录");
+                CreateTestFile(sourceDir, items, Path.Combine(relNestedDir, "嵌套超长目录内重要文件.pdf"), "三层嵌套长目录下的重要文件内容", "多层嵌套超长目录");
 
                 // 5. 空目录与嵌套空目录
-                string emptyDir1 = Path.Combine(TestSourceDir, "05_空目录", "独立空文件夹A");
-                string emptyDir2 = Path.Combine(TestSourceDir, "05_空目录", "父目录", "嵌套空子文件夹B");
+                string emptyDir1 = Path.Combine(sourceDir, "05_空目录", "独立空文件夹A");
+                string emptyDir2 = Path.Combine(sourceDir, "05_空目录", "父目录", "嵌套空子文件夹B");
                 Directory.CreateDirectory(emptyDir1);
                 Directory.CreateDirectory(emptyDir2);
 
                 // 6. 跨目录同名文件（验证清单防覆盖能力）
-                CreateTestFile(items, "06_同名跨目录/目录A/合同文件.docx", "目录A的合同文件数据", "同名文件A");
-                CreateTestFile(items, "06_同名跨目录/目录B/合同文件.docx", "目录B的合同文件数据 (独立不混淆)", "同名文件B");
+                CreateTestFile(sourceDir, items, "06_同名跨目录/目录A/合同文件.docx", "目录A的合同文件数据", "同名文件A");
+                CreateTestFile(sourceDir, items, "06_同名跨目录/目录B/合同文件.docx", "目录B的合同文件数据 (独立不混淆)", "同名文件B");
 
                 progress?.Report($"成功生成 {items.Count} 个测试文件及空目录结构。");
-                return items;
+                return (sourceDir, items);
             });
         }
 
-        private void CreateTestFile(List<TestFileItem> list, string relPath, string textContent, string category)
+        private void CreateTestFile(string sourceDir, List<TestFileItem> list, string relPath, string textContent, string category)
         {
             relPath = relPath.Replace('/', '\\');
-            string localFullPath = Path.GetFullPath(Path.Combine(TestSourceDir, relPath));
+            string localFullPath = Path.GetFullPath(Path.Combine(sourceDir, relPath));
             string longPath = PathHelper.EnsureLongPathPrefix(localFullPath);
             string? dir = Path.GetDirectoryName(longPath);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
@@ -155,7 +163,8 @@ namespace FNSyncPlus.Core.Services
                 Directory.CreateDirectory(dir);
             }
 
-            File.WriteAllText(longPath, textContent, Encoding.UTF8);
+            using (var file = new FileStream(longPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var writer = new StreamWriter(file, Encoding.UTF8)) writer.Write(textContent);
 
             string fileName = Path.GetFileName(relPath);
             int byteLen = PathHelper.GetUtf8ByteCount(fileName);
@@ -173,10 +182,10 @@ namespace FNSyncPlus.Core.Services
             });
         }
 
-        private void CreateBinaryTestFile(List<TestFileItem> list, string relPath, int sizeBytes, string category)
+        private void CreateBinaryTestFile(string sourceDir, List<TestFileItem> list, string relPath, int sizeBytes, string category)
         {
             relPath = relPath.Replace('/', '\\');
-            string localFullPath = Path.GetFullPath(Path.Combine(TestSourceDir, relPath));
+            string localFullPath = Path.GetFullPath(Path.Combine(sourceDir, relPath));
             string longPath = PathHelper.EnsureLongPathPrefix(localFullPath);
             string? dir = Path.GetDirectoryName(longPath);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
@@ -186,7 +195,7 @@ namespace FNSyncPlus.Core.Services
 
             byte[] data = new byte[sizeBytes];
             new Random(2026).NextBytes(data);
-            File.WriteAllBytes(longPath, data);
+            using (var file = new FileStream(longPath, FileMode.CreateNew, FileAccess.Write, FileShare.None)) file.Write(data);
 
             string fileName = Path.GetFileName(relPath);
             int byteLen = PathHelper.GetUtf8ByteCount(fileName);
@@ -211,8 +220,7 @@ namespace FNSyncPlus.Core.Services
             var sw = System.Diagnostics.Stopwatch.StartNew();
             var report = new TestLabReport
             {
-                Mode = "LocalSimulation",
-                TargetPath = MockNasDir
+                Mode = "LocalSimulation"
             };
 
             void Log(string msg)
@@ -223,26 +231,14 @@ namespace FNSyncPlus.Core.Services
 
             Log(">>> 开始执行本地隔离备份还原全流程验证测试...");
 
-            // 1. 确保源样本已准备
-            if (!Directory.Exists(TestSourceDir) || Directory.GetFiles(TestSourceDir, "*.*", SearchOption.AllDirectories).Length == 0)
-            {
-                Log("检测到源样本尚未生成，自动生成标准测试样本集...");
-                await GenerateTestSamplesAsync(progress);
-            }
-
-            // 清理旧的模拟目标和恢复目录
-            if (Directory.Exists(MockNasDir))
-            {
-                try { Directory.Delete(MockNasDir, true); } catch { }
-            }
-            Directory.CreateDirectory(MockNasDir);
-
-            string runRestoreDir = Path.Combine(RestoredBaseDir, $"Run_{report.RunId}");
-            if (Directory.Exists(runRestoreDir))
-            {
-                try { Directory.Delete(runRestoreDir, true); } catch { }
-            }
+            var samples = await CreateSamplesAsync(progress).ConfigureAwait(false);
+            string sourceDir = samples.SourceDir;
+            string runDir = Directory.CreateTempSubdirectory("FNSyncPlus_TestLab_Run_").FullName;
+            string mockNasDir = Path.Combine(runDir, "MockNas");
+            string runRestoreDir = Path.Combine(runDir, "Restored");
+            Directory.CreateDirectory(mockNasDir);
             Directory.CreateDirectory(runRestoreDir);
+            report.TargetPath = mockNasDir;
 
             try
             {
@@ -250,7 +246,7 @@ namespace FNSyncPlus.Core.Services
 
                 // 2. 执行第 1 次全量同步
                 Log("【第 1 阶段】正在执行初次全量同步到 MockNas 隔离存储...");
-                var syncRep1 = await syncEngine.RunSyncAsync(TestSourceDir, MockNasDir);
+                var syncRep1 = await syncEngine.RunSyncAsync(sourceDir, mockNasDir);
                 report.TotalSourceFiles = syncRep1.TotalFiles;
                 report.InitialUploadedFiles = syncRep1.UploadedFiles;
                 report.LongNameFilesMapped = syncRep1.LongNameFiles;
@@ -263,17 +259,18 @@ namespace FNSyncPlus.Core.Services
 
                 // 3. 执行第 2 次增量测试 (无修改时 0 传输)
                 Log("【第 2 阶段】正在执行无变更增量同步测试...");
-                var syncRep2 = await syncEngine.RunSyncAsync(TestSourceDir, MockNasDir);
+                var syncRep2 = await syncEngine.RunSyncAsync(sourceDir, mockNasDir);
                 report.IncrementalSkippedFiles = syncRep2.UnchangedFiles;
                 Log($"增量测试 1：未修改文件跳过数: {syncRep2.UnchangedFiles}，实际上传: {syncRep2.UploadedFiles}");
 
                 // 4. 修改单个文件并再次增量
-                string modifyTarget = PathHelper.EnsureLongPathPrefix(Path.Combine(TestSourceDir, "01_普通文件", "README_文档.txt"));
+                string modifyTarget = PathHelper.EnsureLongPathPrefix(Path.Combine(sourceDir, "01_普通文件", "README_文档.txt"));
+                SyncProgressReport? syncRep3 = null;
                 if (File.Exists(modifyTarget))
                 {
                     File.AppendAllText(modifyTarget, "\n【测试追加修改内容-触发精确增量】", Encoding.UTF8);
                     Log("已对 01_普通文件/README_文档.txt 追加数据，验证精准单文件增量...");
-                    var syncRep3 = await syncEngine.RunSyncAsync(TestSourceDir, MockNasDir);
+                    syncRep3 = await syncEngine.RunSyncAsync(sourceDir, mockNasDir);
                     report.IncrementalUploadedFiles = syncRep3.UploadedFiles;
                     Log($"增量测试 2：仅上传变更文件数: {syncRep3.UploadedFiles}，未变更跳过: {syncRep3.UnchangedFiles}");
                 }
@@ -281,7 +278,7 @@ namespace FNSyncPlus.Core.Services
                 // 5. 执行异机完整还原测试
                 Log($"【第 3 阶段】正在执行异机原名恢复测试，还原至: {runRestoreDir}");
                 var restoreEngine = new RestoreEngine(_manifestManager);
-                var restoreRep = await restoreEngine.RunRestoreAsync(MockNasDir, runRestoreDir, ConflictResolution.Overwrite);
+                var restoreRep = await restoreEngine.RunRestoreAsync(mockNasDir, runRestoreDir, ConflictResolution.Overwrite);
                 report.RestoredFiles = restoreRep.RestoredFiles;
                 Log($"恢复完成：还原文件 {restoreRep.RestoredFiles} 个，还原长文件名 {restoreRep.LongNameRestoredFiles} 个，还原空目录 {restoreRep.RestoredDirectories} 个");
 
@@ -290,10 +287,10 @@ namespace FNSyncPlus.Core.Services
                 int verifiedCount = 0;
                 bool allMatch = true;
 
-                var sourceFiles = Directory.GetFiles(TestSourceDir, "*.*", SearchOption.AllDirectories);
+                var sourceFiles = Directory.GetFiles(sourceDir, "*.*", SearchOption.AllDirectories);
                 foreach (var sFile in sourceFiles)
                 {
-                    string relPath = Path.GetRelativePath(TestSourceDir, sFile);
+                    string relPath = Path.GetRelativePath(sourceDir, sFile);
                     string rFile = Path.Combine(runRestoreDir, relPath);
 
                     var itemRes = new TestFileVerificationResult
@@ -336,7 +333,14 @@ namespace FNSyncPlus.Core.Services
                 }
 
                 report.Sha256VerifiedFiles = verifiedCount;
-                report.IsAllPassed = allMatch && verifiedCount == sourceFiles.Length && syncRep1.FailedFiles == 0;
+                bool emptyDirectoriesRestored = Directory.Exists(Path.Combine(runRestoreDir, "05_空目录", "独立空文件夹A")) &&
+                    Directory.Exists(Path.Combine(runRestoreDir, "05_空目录", "父目录", "嵌套空子文件夹B"));
+                report.IsAllPassed = sourceFiles.Length > 0 && allMatch && verifiedCount == sourceFiles.Length &&
+                    syncRep1.State == SyncState.Completed && syncRep1.FailedFiles == 0 &&
+                    syncRep2.State == SyncState.Completed && syncRep2.FailedFiles == 0 && syncRep2.UploadedFiles == 0 &&
+                    syncRep2.UnchangedFiles == sourceFiles.Length && syncRep3?.State == SyncState.Completed &&
+                    syncRep3.FailedFiles == 0 && syncRep3.UploadedFiles == 1 &&
+                    restoreRep.FailedFiles == 0 && restoreRep.RestoredFiles == sourceFiles.Length && emptyDirectoriesRestored;
 
                 Log(report.IsAllPassed
                     ? $"🎉 本地模拟测试全部通过！共校验 {verifiedCount}/{sourceFiles.Length} 个文件，SHA-256 100% 一致！"
@@ -384,26 +388,22 @@ namespace FNSyncPlus.Core.Services
             }
 
             string isolatedNasTestDir = Path.Combine(targetShareRoot, $"FN_TEST_{report.RunId}");
-            string runRestoreDir = Path.Combine(RestoredBaseDir, $"Run_NAS_{report.RunId}");
+            string runRestoreDir = Directory.CreateTempSubdirectory("FNSyncPlus_TestLab_NasRestore_").FullName;
 
             try
             {
-                Directory.CreateDirectory(isolatedNasTestDir);
-                Directory.CreateDirectory(runRestoreDir);
+                CreateNewDirectory(isolatedNasTestDir);
+                report.TargetPath = isolatedNasTestDir;
                 Log($"已在 NAS 端建立专用测试沙箱目录: {isolatedNasTestDir}");
 
-                // 1. 确保源样本已生成
-                if (!Directory.Exists(TestSourceDir) || Directory.GetFiles(TestSourceDir, "*.*", SearchOption.AllDirectories).Length == 0)
-                {
-                    Log("检测到源样本尚未生成，自动生成标准测试样本集...");
-                    await GenerateTestSamplesAsync(progress);
-                }
+                var samples = await CreateSamplesAsync(progress).ConfigureAwait(false);
+                string sourceDir = samples.SourceDir;
 
                 var syncEngine = new SyncEngine(_longNameEngine, _manifestManager, _smbService);
 
                 // 2. 执行第 1 次全量同步到真实 NAS
                 Log("【第 1 阶段】正在执行初次同步到真实飞牛 NAS 存储...");
-                var syncRep1 = await syncEngine.RunSyncAsync(TestSourceDir, isolatedNasTestDir);
+                var syncRep1 = await syncEngine.RunSyncAsync(sourceDir, isolatedNasTestDir);
                 report.TotalSourceFiles = syncRep1.TotalFiles;
                 report.InitialUploadedFiles = syncRep1.UploadedFiles;
                 report.LongNameFilesMapped = syncRep1.LongNameFiles;
@@ -411,7 +411,7 @@ namespace FNSyncPlus.Core.Services
 
                 // 3. 执行无变更增量同步
                 Log("【第 2 阶段】正在执行真实 NAS 增量同步测试...");
-                var syncRep2 = await syncEngine.RunSyncAsync(TestSourceDir, isolatedNasTestDir);
+                var syncRep2 = await syncEngine.RunSyncAsync(sourceDir, isolatedNasTestDir);
                 report.IncrementalSkippedFiles = syncRep2.UnchangedFiles;
                 Log($"NAS 增量测试 1：未变更跳过数: {syncRep2.UnchangedFiles}，上传数: {syncRep2.UploadedFiles}");
 
@@ -427,10 +427,10 @@ namespace FNSyncPlus.Core.Services
                 int verifiedCount = 0;
                 bool allMatch = true;
 
-                var sourceFiles = Directory.GetFiles(TestSourceDir, "*.*", SearchOption.AllDirectories);
+                var sourceFiles = Directory.GetFiles(sourceDir, "*.*", SearchOption.AllDirectories);
                 foreach (var sFile in sourceFiles)
                 {
-                    string relPath = Path.GetRelativePath(TestSourceDir, sFile);
+                    string relPath = Path.GetRelativePath(sourceDir, sFile);
                     string rFile = Path.Combine(runRestoreDir, relPath);
 
                     var itemRes = new TestFileVerificationResult
@@ -471,7 +471,13 @@ namespace FNSyncPlus.Core.Services
                 }
 
                 report.Sha256VerifiedFiles = verifiedCount;
-                report.IsAllPassed = allMatch && verifiedCount == sourceFiles.Length && syncRep1.FailedFiles == 0;
+                bool emptyDirectoriesRestored = Directory.Exists(Path.Combine(runRestoreDir, "05_空目录", "独立空文件夹A")) &&
+                    Directory.Exists(Path.Combine(runRestoreDir, "05_空目录", "父目录", "嵌套空子文件夹B"));
+                report.IsAllPassed = sourceFiles.Length > 0 && allMatch && verifiedCount == sourceFiles.Length &&
+                    syncRep1.State == SyncState.Completed && syncRep1.FailedFiles == 0 &&
+                    syncRep2.State == SyncState.Completed && syncRep2.FailedFiles == 0 && syncRep2.UploadedFiles == 0 &&
+                    syncRep2.UnchangedFiles == sourceFiles.Length && restoreRep.FailedFiles == 0 &&
+                    restoreRep.RestoredFiles == sourceFiles.Length && emptyDirectoriesRestored;
 
                 Log(report.IsAllPassed
                     ? $"🎉 真实 NAS 端到端测试 100% 成功！共校验 {verifiedCount}/{sourceFiles.Length} 个文件，全部哈希一致！"
@@ -484,17 +490,7 @@ namespace FNSyncPlus.Core.Services
             }
             finally
             {
-                // 清理 NAS 上的隔离测试目录
-                try
-                {
-                    if (Directory.Exists(isolatedNasTestDir))
-                    {
-                        Directory.Delete(isolatedNasTestDir, true);
-                        Log($"已安全清理 NAS 端隔离测试目录: {isolatedNasTestDir}");
-                    }
-                }
-                catch { }
-
+                Log($"测试目录和恢复文件已保留供检查: {isolatedNasTestDir}；{runRestoreDir}");
                 sw.Stop();
                 report.ElapsedSeconds = sw.Elapsed.TotalSeconds;
             }
@@ -509,13 +505,14 @@ namespace FNSyncPlus.Core.Services
         public async Task<TestLabReport> RunNasFnOsPersonalTestAsync(
             INasStorageProvider storageProvider, 
             IProgress<string>? progress = null,
-            bool includeLargeFile = false)
+            bool includeLargeFile = false,
+            string? authorizedTestParent = null)
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
             var report = new TestLabReport
             {
                 Mode = "RealFnOsPersonal",
-                TargetPath = storageProvider.RootDisplayPath
+                TargetPath = storageProvider?.RootDisplayPath ?? string.Empty
             };
 
             void Log(string msg)
@@ -533,30 +530,41 @@ namespace FNSyncPlus.Core.Services
                 return report;
             }
 
-            string isolatedSubPath = $"FN_TEST_{report.RunId}";
-            string runRestoreDir = Path.Combine(RestoredBaseDir, $"Run_FnOs_{report.RunId}");
+            string parent = (authorizedTestParent ?? string.Empty).Trim();
+            if (!PathHelper.IsSafeRelativePath(parent)) parent = string.Empty;
+            else if (storageProvider is FnOsPersonalStorageProvider fnOs) parent = fnOs.NormalizeRelativePath(parent);
+            else if (parent.StartsWith("我的文件/", StringComparison.OrdinalIgnoreCase)) parent = parent["我的文件/".Length..];
+            if (!PathHelper.IsSafeRelativePath(parent) || parent.Equals("我的文件", StringComparison.OrdinalIgnoreCase) ||
+                storageProvider is not IExclusiveDirectoryProvider exclusive)
+            {
+                Log("▲ 请明确指定已授权的个人空间测试父目录；不允许使用根目录或不支持独占创建的存储。");
+                report.IsAllPassed = false;
+                return report;
+            }
+            string isolatedSubPath = $"{parent}/FN_TEST_{report.RunId}";
+            string runRestoreDir = Directory.CreateTempSubdirectory("FNSyncPlus_TestLab_FnOsRestore_").FullName;
 
             try
             {
-                Directory.CreateDirectory(runRestoreDir);
                 Log($"已就绪本地还原沙箱: {runRestoreDir}");
 
-                // 1. 确保源样本已生成
-                if (!Directory.Exists(TestSourceDir) || Directory.GetFiles(TestSourceDir, "*.*", SearchOption.AllDirectories).Length == 0)
-                {
-                    Log("检测到源样本尚未生成，自动生成标准测试样本集 (含 254/255/256/300 字节边界与特殊字符)...");
-                    await GenerateTestSamplesAsync(progress);
-                }
+                var parentItem = await storageProvider.GetItemAsync(parent).ConfigureAwait(false);
+                if (parentItem == null || !parentItem.IsDirectory) throw new DirectoryNotFoundException("指定的测试父目录不存在");
+                if (await exclusive.TryCreateDirectoryExclusiveAsync(isolatedSubPath).ConfigureAwait(false) != ExclusiveDirectoryResult.Created)
+                    throw new IOException("测试目录已存在，拒绝复用");
+                report.TargetPath = $"我的文件/{isolatedSubPath}";
+                var samples = await CreateSamplesAsync(progress).ConfigureAwait(false);
+                string sourceDir = samples.SourceDir;
 
                 // 2. 若启用大文件验证，生成一个 100MB 大文件测试分块流式上传
-                string largeFilePath = Path.Combine(TestSourceDir, "07_大文件流式", "100MB_Streaming_Test.bin");
+                string largeFilePath = Path.Combine(sourceDir, "07_大文件流式", "100MB_Streaming_Test.bin");
                 if (includeLargeFile && !File.Exists(largeFilePath))
                 {
                     Log("正在生成 100MB 流式传输验证测试文件...");
                     string? dir = Path.GetDirectoryName(largeFilePath);
                     if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
-                    using (var fs = new FileStream(largeFilePath, FileMode.Create, FileAccess.Write, FileShare.None))
+                    using (var fs = new FileStream(largeFilePath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                     {
                         byte[] chunk = new byte[1024 * 1024]; // 1MB 块
                         for (int i = 0; i < 100; i++)
@@ -573,15 +581,21 @@ namespace FNSyncPlus.Core.Services
 
                 // 3. 执行第 1 次初次同步
                 Log($"【第 1 阶段】正在执行初次同步到飞牛个人空间: 我的文件/{isolatedSubPath} ...");
-                var syncRep1 = await syncEngine.RunSyncAsync(TestSourceDir, isolatedSubPath, storageProvider, default);
+                var syncRep1 = await syncEngine.RunSyncAsync(sourceDir, isolatedSubPath, storageProvider, default);
                 report.TotalSourceFiles = syncRep1.TotalFiles;
                 report.InitialUploadedFiles = syncRep1.UploadedFiles;
                 report.LongNameFilesMapped = syncRep1.LongNameFiles;
                 Log($"初次同步完成：总扫描 {syncRep1.TotalFiles}，上传 {syncRep1.UploadedFiles}，长文件名映射 {syncRep1.LongNameFiles}，失败 {syncRep1.FailedFiles}");
 
                 // 4. 执行第 2 次增量测试（零变更跳过验证）
+                if (syncRep1.State != SyncState.Completed || syncRep1.FailedFiles != 0)
+                {
+                    foreach (var failed in syncEngine.FailedItems)
+                        Log($"▲ 首次同步失败: {failed.RelativePath}: {failed.ErrorMessage}");
+                    throw new IOException("首次同步未完成，停止后续增量和恢复测试");
+                }
                 Log("【第 2 阶段】正在执行二次增量无变化同步（验证零传输精准跳过）...");
-                var syncRep2 = await syncEngine.RunSyncAsync(TestSourceDir, isolatedSubPath, storageProvider, default);
+                var syncRep2 = await syncEngine.RunSyncAsync(sourceDir, isolatedSubPath, storageProvider, default);
                 report.IncrementalSkippedFiles = syncRep2.UnchangedFiles;
                 report.IncrementalUploadedFiles = syncRep2.UploadedFiles;
                 Log($"二次增量完成：未修改跳过 {syncRep2.UnchangedFiles} 个 (期望: {syncRep1.TotalFiles})，上传: {syncRep2.UploadedFiles} 个");
@@ -598,10 +612,10 @@ namespace FNSyncPlus.Core.Services
                 int verifiedCount = 0;
                 bool allMatch = true;
 
-                var sourceFiles = Directory.GetFiles(TestSourceDir, "*.*", SearchOption.AllDirectories);
+                var sourceFiles = Directory.GetFiles(sourceDir, "*.*", SearchOption.AllDirectories);
                 foreach (var sFile in sourceFiles)
                 {
-                    string relPath = Path.GetRelativePath(TestSourceDir, sFile);
+                    string relPath = Path.GetRelativePath(sourceDir, sFile);
                     string rFile = Path.Combine(runRestoreDir, relPath);
 
                     var itemRes = new TestFileVerificationResult
@@ -642,7 +656,13 @@ namespace FNSyncPlus.Core.Services
                 }
 
                 report.Sha256VerifiedFiles = verifiedCount;
-                report.IsAllPassed = allMatch && verifiedCount == sourceFiles.Length && syncRep1.FailedFiles == 0 && syncRep2.UploadedFiles == 0;
+                bool emptyDirectoriesRestored = Directory.Exists(Path.Combine(runRestoreDir, "05_空目录", "独立空文件夹A")) &&
+                    Directory.Exists(Path.Combine(runRestoreDir, "05_空目录", "父目录", "嵌套空子文件夹B"));
+                report.IsAllPassed = sourceFiles.Length > 0 && allMatch && verifiedCount == sourceFiles.Length &&
+                    syncRep1.State == SyncState.Completed && syncRep1.FailedFiles == 0 &&
+                    syncRep2.State == SyncState.Completed && syncRep2.FailedFiles == 0 && syncRep2.UploadedFiles == 0 &&
+                    syncRep2.UnchangedFiles == sourceFiles.Length && restoreRep.FailedFiles == 0 &&
+                    restoreRep.RestoredFiles == sourceFiles.Length && emptyDirectoriesRestored;
 
                 Log(report.IsAllPassed
                     ? $"🎉 飞牛个人空间端到端测试 100% 成功！共校验 {verifiedCount}/{sourceFiles.Length} 个文件，全部 SHA-256 哈希一致，二次同步准确 0 传输跳过！"
@@ -655,27 +675,7 @@ namespace FNSyncPlus.Core.Services
             }
             finally
             {
-                // 7. 受控清理飞牛 NAS 上的隔离测试目录
-                try
-                {
-                    Log($"正在执行受控安全清理 NAS 端隔离测试目录: 我的文件/{isolatedSubPath} ...");
-                    var delRes = await storageProvider.DeleteAsync(isolatedSubPath, moveToTrash: true);
-                    if (delRes.Success)
-                    {
-                        Log($"已安全清理 NAS 端隔离测试目录: 我的文件/{isolatedSubPath}");
-                    }
-                }
-                catch { }
-
-                try
-                {
-                    if (Directory.Exists(runRestoreDir))
-                    {
-                        Directory.Delete(runRestoreDir, true);
-                    }
-                }
-                catch { }
-
+                Log($"测试目录和恢复文件已保留供检查: 我的文件/{isolatedSubPath}；{runRestoreDir}");
                 sw.Stop();
                 report.ElapsedSeconds = sw.Elapsed.TotalSeconds;
             }

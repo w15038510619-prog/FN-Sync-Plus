@@ -17,6 +17,7 @@ public sealed class ExperimentalVersionedBackup
     private sealed record SourceTree(List<string> Directories, List<(string RelativePath, string FullPath)> Files);
     private readonly VersionedManifestStore _versions = new();
     private readonly ImmutableContentStore _objects = new();
+    public event Action<string>? ProgressChanged;
 
     public Task<Result> RunAsync(INasStorageProvider provider, string sourceDirectory, string target,
         CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart)
@@ -68,7 +69,10 @@ public sealed class ExperimentalVersionedBackup
         }
         var preflight = Scan(PathHelper.EnsureLongPathPrefix(sourceDirectory), token);
         foreach (var file in preflight.Files)
+        {
+            ProgressChanged?.Invoke($"正在预检本地文件：{file.RelativePath}");
             await HashSourceAsync(file.RelativePath, file.FullPath, token).ConfigureAwait(false);
+        }
         token.ThrowIfCancellationRequested();
         if (await exclusive.TryCreateDirectoryExclusiveAsync(target, token).ConfigureAwait(false) != ExclusiveDirectoryResult.Created)
             throw new IOException("备份目标已存在，拒绝复用或覆盖");
@@ -134,6 +138,7 @@ public sealed class ExperimentalVersionedBackup
                     return;
                 }
                 string path = $"{PathHelper.NormalizeRelPath(target)}/{storedRel}";
+                ProgressChanged?.Invoke("正在校验已有备份对象");
                 var item = await provider.GetItemAsync(path, token).ConfigureAwait(false);
                 if (item == null || item.IsDirectory || item.Size != size)
                     throw new InvalidDataException($"已有备份对象不存在或大小不符: {storedRel}");
@@ -149,7 +154,10 @@ public sealed class ExperimentalVersionedBackup
             var currentNames = new HashSet<string>(tree.Files.Select(f => f.RelativePath), StringComparer.OrdinalIgnoreCase);
             var baselines = new Dictionary<string, SourceFile>(StringComparer.OrdinalIgnoreCase);
             foreach (var source in tree.Files)
+            {
+                ProgressChanged?.Invoke($"正在计算本地文件校验值：{source.RelativePath}");
                 baselines[source.RelativePath] = await HashSourceAsync(source.RelativePath, source.FullPath, token).ConfigureAwait(false);
+            }
 
             var missing = previous.Values.Where(old => !currentNames.Contains(old.OriginalRel)).ToList();
             var additions = baselines.Values.Where(source => !previous.ContainsKey(source.RelativePath)).ToList();
@@ -255,6 +263,7 @@ public sealed class ExperimentalVersionedBackup
 
                 string? existingMatch = await FindExistingCandidateAsync(baseline).ConfigureAwait(false);
                 ImmutableContentStore.PreparedContent content;
+                if (existingMatch != null) ProgressChanged?.Invoke($"正在核对并尝试复用飞牛文件：{source.RelativePath}");
                 string? stored = existingMatch == null ? null : await ((IExperimentalContentReuseProvider)provider).CopyIntoNewObjectAsync(
                     existingMatch, target, baseline.Sha256, baseline.Size, token).ConfigureAwait(false);
                 if (stored != null)
@@ -266,6 +275,7 @@ public sealed class ExperimentalVersionedBackup
                 }
                 else
                 {
+                    ProgressChanged?.Invoke($"正在上传本地文件：{source.RelativePath}");
                     content = await _objects.PrepareAsync(provider, target, source.FullPath, token).ConfigureAwait(false);
                     uploaded++;
                 }
@@ -295,6 +305,7 @@ public sealed class ExperimentalVersionedBackup
                 throw new IOException("备份期间源目录结构发生变化，未提交新清单");
             foreach (var expected in preparedFiles)
             {
+                ProgressChanged?.Invoke($"正在复核本地文件：{expected.RelativePath}");
                 var actual = await HashSourceAsync(expected.RelativePath, expected.FullPath, token).ConfigureAwait(false);
                 if (actual.Size != expected.Size || actual.ModifiedTicks != expected.ModifiedTicks || actual.Sha256 != expected.Sha256)
                     throw new IOException($"备份期间源文件发生变化，未提交新清单: {expected.RelativePath}");

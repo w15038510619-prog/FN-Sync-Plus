@@ -257,23 +257,7 @@ namespace FNSyncPlus.Core.Storage
                 return StorageOperationResult.Ok(CombineWithPersonalRoot(""));
             }
 
-            // 1. 先快速检查目标是否已经存在
-            var existingItem = await GetItemAsync(clean, ct).ConfigureAwait(false);
-            if (existingItem != null)
-            {
-                if (existingItem.IsDirectory)
-                {
-                    // 目录已存在，100% 幂等复用成功，绝不报错
-                    return StorageOperationResult.Ok(validatedFullPath);
-                }
-                else
-                {
-                    // 冲突：已存在同名常规文件
-                    return StorageOperationResult.Fail($"路径冲突：目标 '{clean}' 已存在同名文件，无法创建为目录。", 17, validatedFullPath);
-                }
-            }
-
-            // 2. 逐级创建缺失目录 (mkdir -p 递归语义)
+            // 逐级检查并创建，确保查询每一级时其父目录已经存在。
             string[] segments = clean.Split('/', StringSplitOptions.RemoveEmptyEntries);
             string currentRel = "";
 
@@ -296,7 +280,7 @@ namespace FNSyncPlus.Core.Storage
                 // 调用 RPC 创建当前层级目录
                 var resp = await _apiClient.CreateDirectoryAsync(fullPath, ct).ConfigureAwait(false);
 
-                if (resp.Result == "succ" || resp.ErrNo == 17)
+                if (resp.Result == "succ" && (resp.ErrNo == null || resp.ErrNo == 0))
                 {
                     continue;
                 }
@@ -611,11 +595,14 @@ namespace FNSyncPlus.Core.Storage
             if (await TryCreateDirectoryExclusiveAsync(objectDir, ct).ConfigureAwait(false) != ExclusiveDirectoryResult.Created)
                 throw new IOException("内容对象目录冲突，拒绝复用");
             string copied = $"{objectDir}/{name}";
+            // Server-side copies can legitimately take much longer than small RPCs.
+            // Timeout still means the outcome is unknown; the caller must not retry this object.
+            long copyTimeoutSeconds = Math.Clamp(120L + expectedSize / (4L * 1024 * 1024), 120L, 24L * 60 * 60);
             string json = await _apiClient.SendSignedTaskRpcAsync("file.cp", new Dictionary<string, object?> {
                 ["files"] = new[] { "/" + CombineWithPersonalRoot(source) },
                 ["pathTo"] = "/" + CombineWithPersonalRoot(objectDir),
                 ["overwrite"] = "skip", ["details"] = new { name, count = 1 }
-            }, TimeSpan.FromMinutes(2), ct).ConfigureAwait(false);
+            }, TimeSpan.FromSeconds(copyTimeoutSeconds), ct).ConfigureAwait(false);
             using (var response = JsonDocument.Parse(json))
                 if (!response.RootElement.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.String || result.GetString() != "succ" ||
                     (response.RootElement.TryGetProperty("errno", out var error) && error.ValueKind == JsonValueKind.Number &&

@@ -410,7 +410,11 @@ namespace FNSyncPlus.Tests
                 File.WriteAllText(Path.Combine(reuseSource, newLongName), "long name only on local");
                 File.WriteAllText(Path.Combine(reuseSource, "missing-folder", "sample.txt"), "missing parent on remote");
                 var reuseProvider = new FaultInjectingProvider(root) { ThrowOnMissingParent = true };
+                var reuseProgress = new List<string>();
+                void ObserveReuse(string message) => reuseProgress.Add(message);
+                newBackup.ProgressChanged += ObserveReuse;
                 var reuse = await newBackup.CreateNewFromExistingAsync(reuseProvider, reuseSource, "reuse-target", "reuse-existing");
+                newBackup.ProgressChanged -= ObserveReuse;
                 string reusedRestore = Path.Combine(root, "reuse-restore");
                 File.WriteAllText(Path.Combine(reuseExisting, "match.txt"), "existing file changed later");
                 var reuseReport = await new RestoreEngine(new ManifestManager()).RunRestoreVersionedAsync(reuseProvider, "reuse-target", reusedRestore);
@@ -420,6 +424,9 @@ namespace FNSyncPlus.Tests
                     File.ReadAllText(Path.Combine(reusedRestore, newLongName)) == "long name only on local" &&
                     File.ReadAllText(Path.Combine(reuseExisting, "different.txt")) == "same size remoteB",
                     "新备份复用内容一致的已有文件，缺失或不同文件上传且原目录保留");
+                Assert(reuseProgress.Any(m => m.Contains("核对并尝试复用", StringComparison.Ordinal)) &&
+                    reuseProgress.Any(m => m.Contains("上传本地文件", StringComparison.Ordinal)),
+                    "复用备份报告校验和上传阶段，避免长时间无反馈");
                 File.WriteAllText(Path.Combine(reuseSource, "match.txt"), "new local version");
                 var afterReuse = await newBackup.RunAsync(reuseProvider, reuseSource, "reuse-target");
                 var reusedHistory = afterReuse.Snapshot.Manifest.History.Single(h => h.OriginalRel == "match.txt" && h.Reason == "superseded");
@@ -1368,6 +1375,8 @@ namespace FNSyncPlus.Tests
                 await TestShutdownAsync(root);
                 await TestPausePersistsAsync(root);
                 await TestDisconnectLockAsync(root);
+                await TestInitialOfflineRetryAsync(root);
+                await TestTestLabIsolationAsync(root);
             }
             finally
             {
@@ -1807,6 +1816,74 @@ namespace FNSyncPlus.Tests
             Assert(first && !second, "断开连接只释放自身持有的互斥锁");
         }
 
+        static async Task TestInitialOfflineRetryAsync(string root)
+        {
+            var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            listener.Start();
+            int unusedPort = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+            listener.Stop();
+            string address = $"127.0.0.1:{unusedPort}";
+            var settings = AppSettings.CreateInMemory();
+            settings.IsolatedCredentialPath = Path.Combine(root, "initial-offline-credentials.dat");
+            if (!SmbAuthService.SaveCredentials(address, "test-user", "test-secret", settings.IsolatedCredentialPath))
+                throw new IOException("无法建立离线测试凭据");
+            using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "initial-offline-logs")));
+            var connection = new NasConnectionService(new SmbAuthService(), settings, manager);
+            var attempt = await connection.ConnectAsync(address, "test-user", "test-secret", rememberCredentials: true);
+            var retry = typeof(NasConnectionService).GetField("_reconnectCts", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+            bool waiting = !attempt.Success && connection.State == NasConnectionState.ConnectionLost && retry.GetValue(connection) != null;
+            await connection.DisconnectAsync();
+            Assert(waiting && retry.GetValue(connection) == null && connection.State == NasConnectionState.Disconnected,
+                "首次连接时网络不可用会安排重试，主动断开可取消");
+        }
+
+        sealed class ImmediateProgress<T> : IProgress<T>
+        {
+            private readonly Action<T> callback;
+            public ImmediateProgress(Action<T> callback) => this.callback = callback;
+            public void Report(T value) => callback(value);
+        }
+
+        static async Task TestTestLabIsolationAsync(string root)
+        {
+            var lab = new TestLabEngine(new LongNameEngine(255), new ManifestManager(), new SmbAuthService());
+            var sampleDirs = new List<string>();
+            const string prefix = "正在准备隔离测试目录环境: ";
+            var progress = new ImmediateProgress<string>(message =>
+            {
+                if (message.StartsWith(prefix, StringComparison.Ordinal)) sampleDirs.Add(message[prefix.Length..]);
+            });
+            await lab.GenerateTestSamplesAsync(progress);
+            string marker = Path.Combine(sampleDirs[0], "isolation-marker.txt");
+            File.WriteAllText(marker, "keep");
+            await lab.GenerateTestSamplesAsync(progress);
+            Assert(sampleDirs.Count == 2 && sampleDirs[0] != sampleDirs[1] && File.ReadAllText(marker) == "keep",
+                "测试实验室每次生成独立样本并保留上次数据");
+            var report = await lab.RunLocalSimulationTestAsync();
+            Assert(report.IsAllPassed && File.Exists(marker) && Directory.Exists(report.TargetPath),
+                "隔离实验室备份、增量和恢复均通过且保留测试数据");
+            string remoteRoot = Path.Combine(root, "test-lab-remote");
+            Directory.CreateDirectory(remoteRoot);
+            var provider = new FaultInjectingProvider(remoteRoot) { ClaimFnOs = true };
+            var missing = await lab.RunNasFnOsPersonalTestAsync(provider);
+            var topLevel = await lab.RunNasFnOsPersonalTestAsync(provider, authorizedTestParent: "我的文件");
+            Assert(!missing.IsAllPassed && !topLevel.IsAllPassed && !Directory.EnumerateFileSystemEntries(remoteRoot).Any(),
+                "未指定授权测试父目录或选择个人空间根目录时不写入");
+            string source = Path.Combine(root, "test-lab-conflict-source");
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "sample.txt"), "data");
+            provider.FailDirectoryPath = "conflicting-target";
+            bool conflictStopped = false;
+            try
+            {
+                await new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService())
+                    .RunSyncAsync(source, "conflicting-target", provider, default);
+            }
+            catch (IOException) { conflictStopped = true; }
+            Assert(conflictStopped && !Directory.Exists(Path.Combine(remoteRoot, "conflicting-target")),
+                "目录创建返回冲突码时停止同步，不当成创建成功");
+        }
+
         sealed class FaultInjectingProvider : INasStorageProvider, IExclusiveDirectoryProvider, IExperimentalContentReuseProvider
         {
             private readonly SmbStorageProvider inner;
@@ -1831,6 +1908,7 @@ namespace FNSyncPlus.Tests
             public string? BlockUploadSuffix { get; set; }
             public string? BlockUploadContains { get; set; }
             public bool ThrowOnMissingParent { get; set; }
+            public string? FailDirectoryPath { get; set; }
             public TaskCompletionSource UploadEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
             public TaskCompletionSource ContinueUpload { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
             public FaultInjectingProvider(string root) { rootPath = root; inner = new SmbStorageProvider(rootUncPath: root); }
@@ -1843,7 +1921,8 @@ namespace FNSyncPlus.Tests
                 if (FailListPath != null && string.Equals(path, FailListPath, StringComparison.Ordinal)) throw new IOException("模拟目录列表读取失败");
                 return inner.ListEntriesAsync(path, ct);
             }
-            public Task<StorageOperationResult> CreateDirectoryAsync(string path, CancellationToken ct = default) => inner.CreateDirectoryAsync(path, ct);
+            public Task<StorageOperationResult> CreateDirectoryAsync(string path, CancellationToken ct = default) =>
+                path == FailDirectoryPath ? Task.FromResult(StorageOperationResult.Fail("模拟路径冲突", 17)) : inner.CreateDirectoryAsync(path, ct);
             public Task<ExclusiveDirectoryResult> TryCreateDirectoryExclusiveAsync(string path, CancellationToken ct = default)
             {
                 ct.ThrowIfCancellationRequested();

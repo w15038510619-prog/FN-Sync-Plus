@@ -221,7 +221,7 @@ namespace FNSyncPlus.Core.Services
         /// <summary>
         /// 执行 NAS 连接与身份认证 (默认首选飞牛原生个人空间模式)
         /// </summary>
-        public Task<(bool Success, string Message)> ConnectAsync(
+        public async Task<(bool Success, string Message)> ConnectAsync(
             string server,
             string user,
             string password,
@@ -230,7 +230,12 @@ namespace FNSyncPlus.Core.Services
             string? twoFactorCode = null)
         {
             CancelAutomaticReconnect(disconnectRequested: false);
-            return ConnectCoreAsync(server, user, password, rememberCredentials, providerType, twoFactorCode, CancellationToken.None);
+            long intentVersion;
+            lock (_reconnectLock) intentVersion = _connectionIntentVersion;
+            var result = await ConnectCoreAsync(server, user, password, rememberCredentials, providerType, twoFactorCode, CancellationToken.None).ConfigureAwait(false);
+            if (!result.Success && rememberCredentials && providerType == StorageProviderType.FnOsPersonal && State == NasConnectionState.ConnectionLost)
+                StartAutomaticReconnect(intentVersion);
+            return result;
         }
 
         private async Task<(bool Success, string Message)> ConnectCoreAsync(
@@ -259,6 +264,8 @@ namespace FNSyncPlus.Core.Services
             {
                 State = NasConnectionState.Connecting;
                 LastError = string.Empty;
+                ServerAddress = server.Trim();
+                Username = user.Trim();
                 TwoFactorRequired = false;
                 TwoFactorAccessToken = null;
                 CertificateConfirmationRequired = false;

@@ -13,7 +13,6 @@ namespace FNSyncPlus.WinUI.ViewModels
     {
         private readonly TestLabEngine _engine;
         private readonly NasConnectionService _connectionService;
-        private readonly AppSettings _settings;
 
         public ObservableCollection<TestFileItem> GeneratedSamples { get; } = new();
         public ObservableCollection<string> ExecutionLogs { get; } = new();
@@ -26,7 +25,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _statusText = "备份测试实验室就绪。可先点击【生成测试文件集】准备临界样本。";
 
         [ObservableProperty]
-        private int _selectedModeIndex = 1; // 0 = 本地模拟, 1 = 真实飞牛个人空间 (推荐), 2 = 真实飞牛 SMB
+        private int _selectedModeIndex = 0; // 0 = 本地模拟, 1 = 真实飞牛个人空间, 2 = 真实飞牛 SMB
 
         [ObservableProperty]
         private string _targetNasShare = string.Empty;
@@ -52,20 +51,13 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private TestLabReport? _lastReport;
 
-        public TestLabViewModel(TestLabEngine engine, NasConnectionService connectionService, AppSettings settings)
+        public TestLabViewModel(TestLabEngine engine, NasConnectionService connectionService)
         {
             _engine = engine;
             _connectionService = connectionService;
-            _settings = settings;
 
-            if (!string.IsNullOrEmpty(settings.PreferredBackupRoot))
-            {
-                TargetNasShare = settings.PreferredBackupRoot;
-            }
-            else
-            {
-                TargetNasShare = string.Empty;
-            }
+            // A saved backup location is not authorization to create a test there.
+            TargetNasShare = string.Empty;
         }
 
         [RelayCommand]
@@ -126,12 +118,17 @@ namespace FNSyncPlus.WinUI.ViewModels
                         ExecutionLogs.Add($"[{DateTime.Now:HH:mm:ss}] 错误：未连接飞牛个人空间，无法执行官方「我的文件」端到端测试。");
                         return;
                     }
+                    if (string.IsNullOrWhiteSpace(TargetNasShare))
+                    {
+                        StatusText = "测试失败：请先明确填写已授权的个人空间测试父目录。";
+                        return;
+                    }
                     StatusText = "正在执行真实飞牛 NAS「我的文件」端到端自动化测试 (包含分块流式传输、增量跳过与哈希校验)...";
-                    report = await _engine.RunNasFnOsPersonalTestAsync(fnProvider, progress, includeLargeFile: false);
+                    report = await _engine.RunNasFnOsPersonalTestAsync(fnProvider, progress, includeLargeFile: false, authorizedTestParent: TargetNasShare);
                 }
                 else if (SelectedModeIndex == 2)
                 {
-                    string target = !string.IsNullOrWhiteSpace(TargetNasShare) ? TargetNasShare : _settings.PreferredBackupRoot;
+                    string target = TargetNasShare;
                     if (string.IsNullOrWhiteSpace(target))
                     {
                         StatusText = "测试失败：未配置有效的真实 NAS 共享路径。请先在上方输入或选择有效的 NAS 共享。";
