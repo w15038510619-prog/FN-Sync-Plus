@@ -112,6 +112,8 @@ namespace FNSyncPlus.Core.Services
             if (task == null) throw new ArgumentNullException(nameof(task));
             task.IsExperimentalBackup = UseExperimentalVersionedBackup && task.ProviderType == StorageProviderType.FnOsPersonal;
             task.RequiresNewExperimentalBackup = task.IsExperimentalBackup;
+            if (!string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot) && !task.IsExperimentalBackup)
+                throw new InvalidOperationException("复用已有目录目前只能在隔离试验会话使用");
 
             // 1. 检查本地源是否与已有任务冲突（禁止同源、禁止父子嵌套）
             foreach (var existing in _settings.Tasks)
@@ -509,6 +511,7 @@ namespace FNSyncPlus.Core.Services
                 _pendingRenames.TryRemove(task.TaskId, out var renames);
 
                 SyncProgressReport report;
+                int reusedFiles = 0;
                 if (task.IsExperimentalBackup)
                 {
                     if (!UseExperimentalVersionedBackup || provider == null)
@@ -516,9 +519,13 @@ namespace FNSyncPlus.Core.Services
                     AppendTaskLog(task, "INFO", "隔离试验：正在准备版本化内容；NAS 活动目录尚不反映文件树。");
                     var experimental = new ExperimentalVersionedBackup();
                     var result = task.RequiresNewExperimentalBackup
-                        ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy).ConfigureAwait(false)
+                        ? string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot)
+                            ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy).ConfigureAwait(false)
+                            : await experimental.CreateNewFromExistingAsync(provider, task.SourceFolder, task.DestinationFolder, task.ExperimentalExistingRoot, taskToken, task.Strategy).ConfigureAwait(false)
                         : await experimental.RunAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy).ConfigureAwait(false);
                     task.RequiresNewExperimentalBackup = false;
+                    reusedFiles = result.ReusedFiles;
+                    if (reusedFiles > 0) AppendTaskLog(task, "INFO", $"隔离试验：已复用 {reusedFiles} 个 NAS 文件，上传 {result.UploadedFiles} 个文件。");
                     report = new SyncProgressReport {
                         State = SyncState.Completed, TotalFiles = result.Snapshot.Manifest.Files.Count,
                         ScannedFiles = result.Snapshot.Manifest.Files.Count, UploadedFiles = result.UploadedFiles,
@@ -588,8 +595,10 @@ namespace FNSyncPlus.Core.Services
                         task.NextScheduledTime = DateTime.Now.AddMinutes(task.IntervalMinutes);
                     }
                     task.CurrentProgress = 100.0;
-                    task.CurrentFile = task.IsExperimentalBackup ? "隔离试验清单已提交；物理活动目录尚未实现" : "所有文件均已同步更新至最新状态";
-                    task.LastSyncStatus = task.IsExperimentalBackup ? "隔离试验版本已提交" : "同步成功完成 (已最新)";
+                    task.CurrentFile = task.IsExperimentalBackup ? $"隔离试验已提交：复用 {reusedFiles}，上传 {report.UploadedFiles}；物理活动目录尚未实现" : "所有文件均已同步更新至最新状态";
+                    task.LastSyncStatus = task.IsExperimentalBackup
+                        ? $"隔离试验版本已提交（复用 {reusedFiles}，上传 {report.UploadedFiles}）"
+                        : "同步成功完成 (已最新)";
                 }
 
                 _settings.Save();

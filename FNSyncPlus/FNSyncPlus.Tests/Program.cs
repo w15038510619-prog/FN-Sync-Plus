@@ -349,6 +349,13 @@ namespace FNSyncPlus.Tests
                         deletedByName |= delete.Success || !delete.ErrorMessage.Contains("安全保护拦截", StringComparison.Ordinal);
                     }
                     Assert(!deletedByName, "飞牛删除不能仅凭测试名称前缀绕过保护");
+                    int aliasesRejected = 0;
+                    foreach (var roots in new[] { ("folder/sub", "我的文件/folder"), ("vol1/1/folder", "folder/sub"), ("folder", "我的文件") })
+                    {
+                        try { await new ExperimentalVersionedBackup().CreateNewFromExistingAsync(moveProvider, root, roots.Item1, roots.Item2); }
+                        catch (ArgumentException) { aliasesRejected++; }
+                    }
+                    Assert(aliasesRejected == 3, "复用目录的飞牛路径别名不能绕过根目录和重叠保护");
                 }
                 var versionProvider = new FaultInjectingProvider(root);
                 var versions = new VersionedManifestStore();
@@ -363,6 +370,56 @@ namespace FNSyncPlus.Tests
                 Assert(created.Snapshot.Sequence == 1 && created.UploadedFiles == 1 && newRestoreReport.RestoredFiles == 1 &&
                     File.ReadAllText(Path.Combine(newRestore, newLongName)) == "new initial content" && Directory.Exists(Path.Combine(newRestore, "空目录")),
                     "新目标首批备份只提交完整版本，可恢复长文件名和空目录");
+                string reuseSource = Path.Combine(root, "reuse-source");
+                string reuseExisting = Path.Combine(root, "reuse-existing");
+                Directory.CreateDirectory(Path.Combine(reuseSource, "missing-folder"));
+                Directory.CreateDirectory(reuseExisting);
+                File.WriteAllText(Path.Combine(reuseSource, "match.txt"), "matching original");
+                File.WriteAllText(Path.Combine(reuseExisting, "match.txt"), "matching original");
+                File.WriteAllText(Path.Combine(reuseSource, "different.txt"), "same size local A");
+                File.WriteAllText(Path.Combine(reuseExisting, "different.txt"), "same size remoteB");
+                File.WriteAllText(Path.Combine(reuseSource, newLongName), "long name only on local");
+                File.WriteAllText(Path.Combine(reuseSource, "missing-folder", "sample.txt"), "missing parent on remote");
+                var reuseProvider = new FaultInjectingProvider(root) { ThrowOnMissingParent = true };
+                var reuse = await newBackup.CreateNewFromExistingAsync(reuseProvider, reuseSource, "reuse-target", "reuse-existing");
+                string reusedRestore = Path.Combine(root, "reuse-restore");
+                File.WriteAllText(Path.Combine(reuseExisting, "match.txt"), "existing file changed later");
+                var reuseReport = await new RestoreEngine(new ManifestManager()).RunRestoreVersionedAsync(reuseProvider, "reuse-target", reusedRestore);
+                Assert(reuse.ReusedFiles == 1 && reuse.UploadedFiles == 3 && reuseReport.RestoredFiles == 4 &&
+                    File.ReadAllText(Path.Combine(reusedRestore, "match.txt")) == "matching original" &&
+                    File.ReadAllText(Path.Combine(reusedRestore, "different.txt")) == "same size local A" &&
+                    File.ReadAllText(Path.Combine(reusedRestore, newLongName)) == "long name only on local" &&
+                    File.ReadAllText(Path.Combine(reuseExisting, "different.txt")) == "same size remoteB",
+                    "新备份复用内容一致的已有文件，缺失或不同文件上传且原目录保留");
+                File.WriteAllText(Path.Combine(reuseSource, "match.txt"), "new local version");
+                var afterReuse = await newBackup.RunAsync(reuseProvider, reuseSource, "reuse-target");
+                var reusedHistory = afterReuse.Snapshot.Manifest.History.Single(h => h.OriginalRel == "match.txt" && h.Reason == "superseded");
+                string reusedHistoryDir = Path.Combine(root, "reuse-history");
+                bool reusedHistoryOk = await new RestoreEngine(new ManifestManager()).RunRestoreHistoryFileAsync(reuseProvider, "reuse-target", reusedHistoryDir, reusedHistory);
+                Assert(reusedHistoryOk && File.ReadAllText(Path.Combine(reusedHistoryDir, "match.txt")) == "matching original",
+                    "复用对象支持后续增量及独立历史恢复");
+                bool overlapRejected = false;
+                try { await newBackup.CreateNewFromExistingAsync(reuseProvider, reuseSource, "reuse-existing/nested-target", "reuse-existing"); }
+                catch (ArgumentException) { overlapRejected = true; }
+                Assert(overlapRejected && !Directory.Exists(Path.Combine(reuseExisting, "nested-target")),
+                    "复用时拒绝新目标与已有目录相同或嵌套");
+                File.WriteAllText(Path.Combine(reuseExisting, "match.txt"), "new local version");
+                reuseProvider.FailReuseCopy = true;
+                bool failedReuse = false;
+                try { await newBackup.CreateNewFromExistingAsync(reuseProvider, reuseSource, "reuse-failed-target", "reuse-existing"); }
+                catch (IOException) { failedReuse = true; }
+                Assert(failedReuse && File.ReadAllText(Path.Combine(reuseExisting, "match.txt")) == "new local version" &&
+                    !Directory.Exists(Path.Combine(root, "reuse-failed-target", ".fnsync", "manifest-versions")),
+                    "服务端复制失败不提交版本且保留已有文件");
+                reuseProvider.FailReuseCopy = false;
+                reuseProvider.FailReuseCopyAfter = true;
+                bool copyOutcomeUnknown = false;
+                try { await newBackup.CreateNewFromExistingAsync(reuseProvider, reuseSource, "reuse-unknown-target", "reuse-existing"); }
+                catch (IOException) { copyOutcomeUnknown = true; }
+                Assert(copyOutcomeUnknown && File.ReadAllText(Path.Combine(reuseExisting, "match.txt")) == "new local version" &&
+                    !Directory.Exists(Path.Combine(root, "reuse-unknown-target", ".fnsync", "manifest-versions")),
+                    "复制完成后响应丢失时不提交版本或覆盖已有文件");
+                reuseProvider.FailReuseCopyAfter = false;
                 string occupiedTarget = Path.Combine(root, "version-new-occupied");
                 Directory.CreateDirectory(occupiedTarget);
                 File.WriteAllText(Path.Combine(occupiedTarget, "keep.txt"), "existing target");
@@ -1487,6 +1544,25 @@ namespace FNSyncPlus.Tests
                     throw new TimeoutException("隔离任务目标冲突未结束");
                 Assert(File.ReadAllText(Path.Combine(occupied, "keep.txt")) == "existing data" && !Directory.Exists(Path.Combine(occupied, ".fnsync")),
                     "新隔离任务遇到已有目录时报错且不写入原内容");
+                string reuseTaskSource = Path.Combine(root, "isolated-reuse-task-source");
+                string reuseTaskExisting = Path.Combine(root, "isolated-reuse-task-existing");
+                Directory.CreateDirectory(reuseTaskSource);
+                Directory.CreateDirectory(reuseTaskExisting);
+                File.WriteAllText(Path.Combine(reuseTaskSource, "same.txt"), "existing matches local");
+                File.WriteAllText(Path.Combine(reuseTaskExisting, "same.txt"), "existing matches local");
+                File.WriteAllText(Path.Combine(reuseTaskSource, "new.txt"), "only local");
+                var reuseTask = new SyncTask { TaskName = "隔离复用任务", SourceFolder = reuseTaskSource, DestinationFolder = "isolated-reuse-task-target",
+                    ExperimentalExistingRoot = "isolated-reuse-task-existing", ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+                manager.AddTask(reuseTask);
+                var reuseDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                manager.TaskStateChanged += t => { if (t.TaskId == reuseTask.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) reuseDone.TrySetResult(); };
+                manager.TriggerSync(reuseTask.TaskId);
+                if (await Task.WhenAny(reuseDone.Task, Task.Delay(15000)) != reuseDone.Task) throw new TimeoutException("隔离复用任务超时");
+                var reuseTaskSnapshot = await versions.LoadAsync(provider, reuseTask.DestinationFolder);
+                Assert(reuseTask.State == TaskSyncState.Completed && reuseTask.DisplayStatus.Contains("复用 1", StringComparison.Ordinal) &&
+                    reuseTask.LastUploadedFiles == 1 && reuseTaskSnapshot?.Manifest.Files.Count == 2 &&
+                    File.ReadAllText(Path.Combine(reuseTaskExisting, "same.txt")) == "existing matches local",
+                    "隔离任务首次同步复用匹配的已有文件并报告上传数量");
                 await Task.Delay(200);
             }
             finally { Environment.CurrentDirectory = oldDirectory; }
@@ -1497,6 +1573,10 @@ namespace FNSyncPlus.Tests
             try { nonisolated.UseExperimentalVersionedBackup = true; }
             catch (InvalidOperationException) { refused = true; }
             Assert(refused, "正式配置无法启用隔离试验备份");
+            bool refusedReuse = false;
+            try { nonisolated.AddTask(new SyncTask { SourceFolder = source, DestinationFolder = "not-used", ExperimentalExistingRoot = "existing" }); }
+            catch (InvalidOperationException) { refusedReuse = true; }
+            Assert(refusedReuse, "正式任务不能启用隔离目录复用参数");
         }
 
         static async Task TestReconnectSchedulingAsync(string root)
@@ -1655,7 +1735,7 @@ namespace FNSyncPlus.Tests
             await restarted.ShutdownAsync(TimeSpan.FromSeconds(5));
         }
 
-        sealed class FaultInjectingProvider : INasStorageProvider, IExclusiveDirectoryProvider
+        sealed class FaultInjectingProvider : INasStorageProvider, IExclusiveDirectoryProvider, IExperimentalContentReuseProvider
         {
             private readonly SmbStorageProvider inner;
             private readonly string rootPath;
@@ -1669,6 +1749,8 @@ namespace FNSyncPlus.Tests
             public string? ErrorAfterCompleteContains { get; set; }
             public string? FailReadContains { get; set; }
             public bool CorruptObjectUpload { get; set; }
+            public bool FailReuseCopy { get; set; }
+            public bool FailReuseCopyAfter { get; set; }
             public Action? AfterObjectUpload { get; set; }
             public Action? AfterObjectOpen { get; set; }
             public Action? OnObjectUploaded { get; set; }
@@ -1701,6 +1783,21 @@ namespace FNSyncPlus.Tests
                     Directory.CreateDirectory(directory);
                     return Task.FromResult(ExclusiveDirectoryResult.Created);
                 }
+            }
+            public async Task<string?> CopyIntoNewObjectAsync(string sourcePath, string backupRoot, string expectedSha256, long expectedSize, CancellationToken ct = default)
+            {
+                if (!await inner.VerifyFileIntegrityAsync(sourcePath, expectedSha256, expectedSize, ct)) return null;
+                if (FailReuseCopy) throw new IOException("模拟服务端复制失败");
+                string relative = $".fnsync/objects/obj-{Guid.NewGuid():N}/data";
+                string destination = $"{backupRoot}/{relative}";
+                var created = await inner.CreateDirectoryAsync(Path.GetDirectoryName(destination.Replace('/', Path.DirectorySeparatorChar))!, ct);
+                if (!created.Success) throw new IOException("模拟对象目录创建失败");
+                using var source = await inner.OpenReadAsync(sourcePath, ct);
+                var result = await inner.UploadFileAsync(destination, source, expectedSize, DateTime.UtcNow, false, null, ct);
+                if (!result.Success || !await inner.VerifyFileIntegrityAsync(destination, expectedSha256, expectedSize, ct))
+                    throw new IOException("模拟服务端复制校验失败");
+                if (FailReuseCopyAfter) throw new IOException("模拟复制后响应丢失");
+                return relative;
             }
             public Task<bool> ExistsAsync(string path, CancellationToken ct = default)
             {

@@ -90,6 +90,11 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private string _nasDestinationRoot = string.Empty;
 
+        public bool ShowExperimentalReuse => _taskManager.UseExperimentalVersionedBackup;
+
+        [ObservableProperty]
+        private string _experimentalExistingRoot = string.Empty;
+
         [ObservableProperty]
         private string _securityTitle = "正在评估安全状态...";
 
@@ -189,6 +194,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 DuplicateWarningMessage = null;
                 ExistingConflictTask = null;
                 HasDuplicateConflict = false;
+                ExperimentalExistingRoot = string.Empty;
                 StatusMessage = "请添加需要自动备份至飞牛 NAS 的本地文件夹。";
 
                 bool isConn = _connectionService.IsConnected &&
@@ -218,6 +224,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                     (!string.Equals(_lastConnectedUsername, currentUser, StringComparison.OrdinalIgnoreCase) ||
                      !string.Equals(_lastConnectedServer, currentServer, StringComparison.OrdinalIgnoreCase)))
                 {
+                    ExperimentalExistingRoot = string.Empty;
                     InitializeDefaultNasRoot();
                 }
                 else
@@ -652,6 +659,12 @@ namespace FNSyncPlus.WinUI.ViewModels
         {
             await Task.Yield();
             if (!CanCreate || PlannedTasks.Count == 0) return 0;
+            if (!string.IsNullOrWhiteSpace(ExperimentalExistingRoot) && (!ShowExperimentalReuse || PlannedTasks.Count != 1))
+            {
+                SecurityTitle = "复用已有目录仅支持一个隔离测试任务";
+                SecurityDescription = "请仅选择一个本地文件夹，或清除已有目录后重试。";
+                return 0;
+            }
 
             // 运行时连接底线守卫校验：必须处于 Connected 且存储提供程序为已鉴权的 FnOsPersonalStorageProvider
             if (_connectionService.State != NasConnectionState.Connected)
@@ -731,6 +744,8 @@ namespace FNSyncPlus.WinUI.ViewModels
                         SourceFolder = item.SourcePath,
                         DestinationRoot = NasDestinationRoot,
                         DestinationFolder = item.FullTargetUnc,
+                        ExperimentalExistingRoot = ShowExperimentalReuse && !string.IsNullOrWhiteSpace(ExperimentalExistingRoot)
+                            ? ExperimentalExistingRoot : null,
                         ProviderType = StorageProviderType.FnOsPersonal,
                         NasUsername = _settings.Username,
                         NasDeviceId = _settings.NasServer,

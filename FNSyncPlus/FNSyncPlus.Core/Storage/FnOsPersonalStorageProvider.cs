@@ -16,7 +16,7 @@ namespace FNSyncPlus.Core.Storage
     /// 飞牛 fnOS 账号原生个人空间存储提供程序 (「我的文件」)
     /// 严格遵循官方 API 权限模型，直接对接个人空间，杜绝团队共享混用与伪造用户名路径
     /// </summary>
-    public class FnOsPersonalStorageProvider : INasStorageProvider, IExclusiveDirectoryProvider, IExperimentalFileMoveProvider
+    public class FnOsPersonalStorageProvider : INasStorageProvider, IExclusiveDirectoryProvider, IExperimentalFileMoveProvider, IExperimentalContentReuseProvider
     {
         private readonly FnOsApiClient _apiClient;
         private string? _personalRootPath; // 例如 vol1/1006
@@ -559,6 +559,68 @@ namespace FNSyncPlus.Core.Storage
             }
         }
 
+        /// <summary>
+        /// Experimental: copy an existing file on the NAS into a newly created object directory.
+        /// The source and the copy are independently hashed. Nothing is deleted or overwritten.
+        /// </summary>
+        public async Task<string?> CopyIntoNewObjectAsync(string sourcePath, string backupRoot, string expectedSha256,
+            long expectedSize, CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (!PathHelper.IsSafeRelativePath(sourcePath) || !PathHelper.IsSafeRelativePath(backupRoot))
+                throw new ArgumentException("复制源和备份目录必须是安全的相对路径");
+            if (expectedSize < 0 || expectedSha256 == null || expectedSha256.Length != 64 || !expectedSha256.All(Uri.IsHexDigit))
+                throw new ArgumentException("复制前必须提供有效的文件大小和 SHA-256");
+            string source = NormalizeRelativePath(sourcePath);
+            string root = NormalizeRelativePath(backupRoot);
+            if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(root) ||
+                source.Equals(root, StringComparison.OrdinalIgnoreCase) || source.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("复制源不能位于目标备份内部");
+
+            async Task<bool> MatchesAsync(string path)
+            {
+                var item = await GetItemAsync(path, ct).ConfigureAwait(false);
+                if (item == null || item.IsDirectory || item.Size != expectedSize) return false;
+                using var stream = await OpenReadAsync(path, ct).ConfigureAwait(false);
+                string hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, ct).ConfigureAwait(false));
+                return string.Equals(hash, expectedSha256, StringComparison.OrdinalIgnoreCase);
+            }
+
+            // A mismatch is safe to fall back to a local upload only before any copy is requested.
+            if (!await MatchesAsync(source).ConfigureAwait(false)) return null;
+            var rootItem = await GetItemAsync(root, ct).ConfigureAwait(false);
+            if (rootItem == null || !rootItem.IsDirectory) throw new DirectoryNotFoundException("备份目标目录不存在");
+            string objectParent = $"{root}/.fnsync/objects";
+            foreach (string directory in new[] { $"{root}/.fnsync", objectParent })
+            {
+                var prepared = await CreateDirectoryAsync(directory, ct).ConfigureAwait(false);
+                if (!prepared.Success) throw new IOException($"无法准备内容对象目录: {prepared.ErrorMessage}");
+            }
+            string name = source[(source.LastIndexOf('/') + 1)..];
+            string objectRelativeDir = $".fnsync/objects/obj-{Guid.NewGuid():N}";
+            string relative = $"{objectRelativeDir}/{name}";
+            string objectDir = $"{root}/{objectRelativeDir}";
+            if (await TryCreateDirectoryExclusiveAsync(objectDir, ct).ConfigureAwait(false) != ExclusiveDirectoryResult.Created)
+                throw new IOException("内容对象目录冲突，拒绝复用");
+            string copied = $"{objectDir}/{name}";
+            string json = await _apiClient.SendSignedTaskRpcAsync("file.cp", new Dictionary<string, object?> {
+                ["files"] = new[] { "/" + CombineWithPersonalRoot(source) },
+                ["pathTo"] = "/" + CombineWithPersonalRoot(objectDir),
+                ["overwrite"] = "skip", ["details"] = new { name, count = 1 }
+            }, TimeSpan.FromMinutes(2), ct).ConfigureAwait(false);
+            using (var response = JsonDocument.Parse(json))
+                if (!response.RootElement.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.String || result.GetString() != "succ" ||
+                    (response.RootElement.TryGetProperty("errno", out var error) && error.ValueKind == JsonValueKind.Number &&
+                        error.TryGetInt32(out int errorCode) && errorCode != 0))
+                    throw new IOException("飞牛复制未确认成功，保留对象目录供检查");
+            var sourceAfter = await GetItemAsync(source, ct).ConfigureAwait(false);
+            if (sourceAfter == null || sourceAfter.IsDirectory)
+                throw new InvalidDataException("复制后源文件不可见，未引用该对象");
+            if (!await MatchesAsync(copied).ConfigureAwait(false))
+                throw new InvalidDataException("复制对象最终校验失败，未引用该对象");
+            return relative;
+        }
+
         public Task<StorageOperationResult> DeleteAsync(string relativePath, bool moveToTrash = true, CancellationToken ct = default)
         {
             if (string.IsNullOrWhiteSpace(relativePath) || relativePath.Contains("..") || relativePath.Contains(":"))
@@ -576,7 +638,7 @@ namespace FNSyncPlus.Core.Storage
             return Task.FromResult(StorageOperationResult.Fail("安全保护拦截：飞牛个人空间删除功能尚未启用。"));
         }
 
-        private string NormalizeRelativePath(string? relativePath)
+        internal string NormalizeRelativePath(string? relativePath)
         {
             if (string.IsNullOrWhiteSpace(relativePath))
             {

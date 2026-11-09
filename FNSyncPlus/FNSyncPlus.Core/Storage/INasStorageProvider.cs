@@ -39,6 +39,14 @@ namespace FNSyncPlus.Core.Storage
             string expectedSha256, long expectedSize, CancellationToken ct = default);
     }
 
+    /// <summary>Experimental server-side copy into a new, independently verified object.</summary>
+    public interface IExperimentalContentReuseProvider
+    {
+        // Returns null only when the source was absent or did not match, before any copy was requested.
+        Task<string?> CopyIntoNewObjectAsync(string sourcePath, string backupRoot, string expectedSha256,
+            long expectedSize, CancellationToken ct = default);
+    }
+
     public sealed class RemoteMoveUncertainException : IOException
     {
         public RemoteMoveUncertainException(string message, Exception? inner = null) : base(message, inner) { }

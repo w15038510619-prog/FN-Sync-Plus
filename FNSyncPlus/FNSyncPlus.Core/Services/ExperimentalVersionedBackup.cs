@@ -12,7 +12,7 @@ namespace FNSyncPlus.Core.Services;
 /// </summary>
 public sealed class ExperimentalVersionedBackup
 {
-    public sealed record Result(VersionedManifestStore.Snapshot Snapshot, int UploadedFiles, int UnchangedFiles, int RenamedFiles, int DeletedFiles);
+    public sealed record Result(VersionedManifestStore.Snapshot Snapshot, int UploadedFiles, int UnchangedFiles, int RenamedFiles, int DeletedFiles, int ReusedFiles = 0);
     private sealed record SourceFile(string RelativePath, string FullPath, long Size, long ModifiedTicks, string Sha256);
     private sealed record SourceTree(List<string> Directories, List<(string RelativePath, string FullPath)> Files);
     private readonly VersionedManifestStore _versions = new();
@@ -20,11 +20,20 @@ public sealed class ExperimentalVersionedBackup
 
     public Task<Result> RunAsync(INasStorageProvider provider, string sourceDirectory, string target,
         CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart)
-        => RunCoreAsync(provider, sourceDirectory, target, false, token, strategy);
+        => RunCoreAsync(provider, sourceDirectory, target, false, null, token, strategy);
 
     /// <summary>Creates a brand-new destination and commits its first complete version; never adopts an existing directory.</summary>
     public async Task<Result> CreateNewAsync(INasStorageProvider provider, string sourceDirectory, string target,
         CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart)
+        => await CreateNewCoreAsync(provider, sourceDirectory, target, null, token, strategy).ConfigureAwait(false);
+
+    /// <summary>Experimental import from an existing independent NAS directory; the existing directory is read-only.</summary>
+    public async Task<Result> CreateNewFromExistingAsync(INasStorageProvider provider, string sourceDirectory, string target,
+        string existingRoot, CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart)
+        => await CreateNewCoreAsync(provider, sourceDirectory, target, existingRoot, token, strategy).ConfigureAwait(false);
+
+    private async Task<Result> CreateNewCoreAsync(INasStorageProvider provider, string sourceDirectory, string target,
+        string? existingRoot, CancellationToken token, BackupStrategy strategy)
     {
         ArgumentNullException.ThrowIfNull(provider);
         if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("备份目标必须是安全的相对路径", nameof(target));
@@ -34,17 +43,40 @@ public sealed class ExperimentalVersionedBackup
             throw new NotSupportedException("实验性同步尚不支持镜像删除");
         if (provider is not IExclusiveDirectoryProvider exclusive)
             throw new NotSupportedException("存储不支持独占创建新的备份目录");
+        if (existingRoot != null)
+        {
+            if (provider is not IExperimentalContentReuseProvider) throw new NotSupportedException("存储不支持已验证的服务端复制");
+            if (!PathHelper.IsSafeRelativePath(existingRoot)) throw new ArgumentException("已有文件目录必须是安全的相对路径", nameof(existingRoot));
+            existingRoot = PathHelper.NormalizeRelPath(existingRoot);
+            string targetRoot = PathHelper.NormalizeRelPath(target);
+            // fnOS accepts both personal-root aliases and plain relative paths. Compare canonical
+            // paths so an alias cannot hide an overlap with the directory being preserved.
+            if (provider is FnOsPersonalStorageProvider fnOs)
+            {
+                existingRoot = fnOs.NormalizeRelativePath(existingRoot);
+                targetRoot = fnOs.NormalizeRelativePath(targetRoot);
+                if (string.IsNullOrEmpty(existingRoot) || string.IsNullOrEmpty(targetRoot))
+                    throw new ArgumentException("已有目录和新备份目录不能是个人空间根目录");
+                target = targetRoot;
+            }
+            if (existingRoot.Equals(targetRoot, StringComparison.OrdinalIgnoreCase) ||
+                existingRoot.StartsWith(targetRoot + "/", StringComparison.OrdinalIgnoreCase) ||
+                targetRoot.StartsWith(existingRoot + "/", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("已有文件目录和新备份目录不能相同或嵌套");
+            var existingDirectory = await provider.GetItemAsync(existingRoot, token).ConfigureAwait(false);
+            if (existingDirectory == null || !existingDirectory.IsDirectory) throw new DirectoryNotFoundException("已有文件目录不存在");
+        }
         var preflight = Scan(PathHelper.EnsureLongPathPrefix(sourceDirectory), token);
         foreach (var file in preflight.Files)
             await HashSourceAsync(file.RelativePath, file.FullPath, token).ConfigureAwait(false);
         token.ThrowIfCancellationRequested();
         if (await exclusive.TryCreateDirectoryExclusiveAsync(target, token).ConfigureAwait(false) != ExclusiveDirectoryResult.Created)
             throw new IOException("备份目标已存在，拒绝复用或覆盖");
-        return await RunCoreAsync(provider, sourceDirectory, target, true, token, strategy).ConfigureAwait(false);
+        return await RunCoreAsync(provider, sourceDirectory, target, true, existingRoot, token, strategy).ConfigureAwait(false);
     }
 
     private async Task<Result> RunCoreAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        bool creating, CancellationToken token, BackupStrategy strategy)
+        bool creating, string? existingRoot, CancellationToken token, BackupStrategy strategy)
     {
         ArgumentNullException.ThrowIfNull(provider);
         if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("备份目标必须是安全的相对路径", nameof(target));
@@ -144,7 +176,7 @@ public sealed class ExperimentalVersionedBackup
 
             var preparedFiles = new List<SourceFile>();
             var nextFiles = new List<ManifestFileEntry>();
-            int uploaded = 0, unchanged = 0, renamed = 0;
+            int uploaded = 0, unchanged = 0, renamed = 0, reused = 0;
             void AddHistory(ManifestFileEntry old, string reason, string? renamedTo = null)
             {
                 manifest.History.Add(new ManifestHistoryEntry {
@@ -152,6 +184,24 @@ public sealed class ExperimentalVersionedBackup
                     Reason = reason, RenamedTo = renamedTo, IsLongName = old.IsLongName, Utf8Bytes = old.Utf8Bytes,
                     StoredUtf8Bytes = old.StoredUtf8Bytes
                 });
+            }
+            async Task<string?> FindExistingCandidateAsync(SourceFile expected)
+            {
+                if (existingRoot == null) return null;
+                string current = existingRoot;
+                string[] parts = expected.RelativePath.Split('/');
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    current += "/" + parts[i];
+                    var item = await provider.GetItemAsync(current, token).ConfigureAwait(false);
+                    if (item == null || (i < parts.Length - 1 && !item.IsDirectory)) return null;
+                    if (i == parts.Length - 1)
+                    {
+                        if (item.IsDirectory || item.Size != expected.Size) return null;
+                        return current;
+                    }
+                }
+                return null;
             }
             foreach (var missingEntry in missing)
             {
@@ -203,7 +253,22 @@ public sealed class ExperimentalVersionedBackup
                     continue;
                 }
 
-                var content = await _objects.PrepareAsync(provider, target, source.FullPath, token).ConfigureAwait(false);
+                string? existingMatch = await FindExistingCandidateAsync(baseline).ConfigureAwait(false);
+                ImmutableContentStore.PreparedContent content;
+                string? stored = existingMatch == null ? null : await ((IExperimentalContentReuseProvider)provider).CopyIntoNewObjectAsync(
+                    existingMatch, target, baseline.Sha256, baseline.Size, token).ConfigureAwait(false);
+                if (stored != null)
+                {
+                    if (!IsObject(stored)) throw new InvalidDataException("复用内容对象路径无效");
+                    content = new ImmutableContentStore.PreparedContent(stored, baseline.Size, baseline.Sha256,
+                        new DateTime(baseline.ModifiedTicks, DateTimeKind.Utc));
+                    reused++;
+                }
+                else
+                {
+                    content = await _objects.PrepareAsync(provider, target, source.FullPath, token).ConfigureAwait(false);
+                    uploaded++;
+                }
                 if (content.Size != baseline.Size || !string.Equals(content.Sha256, baseline.Sha256, StringComparison.OrdinalIgnoreCase) ||
                     content.ModifiedUtc.Ticks != baseline.ModifiedTicks)
                     throw new IOException($"文件在扫描和上传之间发生变化: {source.RelativePath}");
@@ -222,7 +287,6 @@ public sealed class ExperimentalVersionedBackup
                     PreviousRel = caseOnlyRename ? old?.OriginalRel : null
                 });
                 preparedFiles.Add(baseline);
-                uploaded++;
             }
 
             var finalTree = Scan(sourceRoot, token);
@@ -265,7 +329,7 @@ public sealed class ExperimentalVersionedBackup
             commitMayHaveStarted = true;
             var snapshot = await _versions.SaveAsync(provider, target, manifest, oldSnapshot?.Id, token).ConfigureAwait(false);
             committed = true;
-            return new Result(snapshot, uploaded, unchanged, renamed, strategy == BackupStrategy.Smart ? deleted.Count : 0);
+            return new Result(snapshot, uploaded, unchanged, renamed, strategy == BackupStrategy.Smart ? deleted.Count : 0, reused);
         }
         catch (Exception ex)
         {
@@ -290,8 +354,16 @@ public sealed class ExperimentalVersionedBackup
     }
 
     private static bool IsHash(string? value) => value != null && value.Length == 64 && value.All(Uri.IsHexDigit);
-    private static bool IsObject(string? value) => value != null && PathHelper.IsSafeRelativePath(value) &&
-        value.StartsWith(".fnsync/objects/obj-", StringComparison.Ordinal) && !value[".fnsync/objects/".Length..].Contains('/');
+    private static bool IsObject(string? value)
+    {
+        const string prefix = ".fnsync/objects/obj-";
+        if (value == null || !PathHelper.IsSafeRelativePath(value) || !value.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        string tail = value[prefix.Length..];
+        if (!tail.Contains('/')) return true; // Existing v1 object paths.
+        int separator = tail.IndexOf('/');
+        return separator == 32 && tail.Length > 33 && !tail[(separator + 1)..].Contains('/') &&
+            Guid.TryParseExact(tail[..32], "N", out _);
+    }
 
     private static SourceTree Scan(string root, CancellationToken token)
     {

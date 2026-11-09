@@ -178,6 +178,10 @@ namespace FNSyncPlus.Core.Models
         [JsonIgnore]
         public bool IsExperimentalBackup { get; internal set; }
 
+        /// <summary>Only for an explicitly selected source in an in-memory isolated experiment.</summary>
+        [JsonIgnore]
+        public string? ExperimentalExistingRoot { get; set; }
+
         [JsonIgnore]
         public bool RequiresNewExperimentalBackup { get; internal set; }
 
@@ -246,7 +250,7 @@ namespace FNSyncPlus.Core.Models
             TaskSyncState.Syncing => $"正在同步备份 ({CurrentProgress:F0}%)...",
             TaskSyncState.Paused => "已暂停",
             TaskSyncState.OfflineWaiting => "NAS离线等待恢复",
-            TaskSyncState.Completed => IsExperimentalBackup ? "隔离试验版本已提交" : "已就绪 (已最新)",
+            TaskSyncState.Completed => IsExperimentalBackup ? LastSyncStatus : "已就绪 (已最新)",
             TaskSyncState.Error => !string.IsNullOrEmpty(LastSyncStatus) && LastSyncStatus.Contains("失败")
                 ? LastSyncStatus
                 : (string.IsNullOrEmpty(LastError) ? (string.IsNullOrEmpty(LastSyncStatus) ? "同步出错" : LastSyncStatus) : $"出错: {LastError}"),

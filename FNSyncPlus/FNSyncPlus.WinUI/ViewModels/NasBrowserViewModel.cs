@@ -109,6 +109,13 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         public string ConfirmedSelectedPath { get; private set; } = string.Empty;
 
+        public void ResetDialogSelection()
+        {
+            SearchText = string.Empty;
+            SelectedFolder = null;
+            ConfirmedSelectedPath = string.Empty;
+        }
+
         public NasBrowserViewModel(
             SmbAuthService smbService, 
             AppSettings settings, 
@@ -326,6 +333,11 @@ namespace FNSyncPlus.WinUI.ViewModels
         public async Task NavigateToFolderAsync(string uncPath, string? baseShare = null)
         {
             if (string.IsNullOrWhiteSpace(uncPath)) return;
+            if (!string.Equals(CurrentUncPath, uncPath, StringComparison.OrdinalIgnoreCase))
+            {
+                SearchText = string.Empty;
+                SelectedFolder = null;
+            }
 
             // 1. 飞牛原生个人空间「我的文件」专用导航通道
             if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider && 
