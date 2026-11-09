@@ -341,6 +341,13 @@ namespace FNSyncPlus.Tests
                         catch (ArgumentException) { rejected++; }
                     }
                     Assert(rejected == 3, "实验性移动在发送请求前拒绝越界、原目录和无效校验值");
+                    bool deletedByName = false;
+                    foreach (string testName in new[] { "FN_TEST_用户文件/file.txt", "FN_SYNC_POC_用户文件/file.txt", "_FNSYNC_SAFETY_PROBE_用户文件/file.txt" })
+                    {
+                        var delete = await moveProvider.DeleteAsync(testName);
+                        deletedByName |= delete.Success || !delete.ErrorMessage.Contains("安全保护拦截", StringComparison.Ordinal);
+                    }
+                    Assert(!deletedByName, "飞牛删除不能仅凭测试名称前缀绕过保护");
                 }
                 var versionProvider = new FaultInjectingProvider(root);
                 var versions = new VersionedManifestStore();
@@ -1058,6 +1065,25 @@ namespace FNSyncPlus.Tests
                 Assert(nextLease != null && Directory.Exists(Path.Combine(root, "lease-normal", ".fnsync", "lock-generations", "00000001")) &&
                     Directory.Exists(Path.Combine(root, "lease-normal", ".fnsync", "lock-generations", "00000002")), "锁释放后下一代可获得且保留旧记录");
                 await nextLease!.ReleaseAsync();
+                string manyLockRoot = Path.Combine(root, "lease-many", ".fnsync", "lock-generations");
+                for (int generation = 1; generation <= 256; generation++)
+                {
+                    string generationPath = Path.Combine(manyLockRoot, generation.ToString("D8"));
+                    Directory.CreateDirectory(generationPath);
+                    string owner = $"v1:{Guid.NewGuid():N}";
+                    File.WriteAllText(Path.Combine(generationPath, "owner"), owner);
+                    File.WriteAllText(Path.Combine(generationPath, "released"), owner);
+                }
+                var after256 = await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderOne, "lease-many");
+                Assert(after256 != null && Directory.Exists(Path.Combine(manyLockRoot, "00000257")),
+                    "保留并校验前 256 代锁后仍可创建第 257 代");
+                await after256!.ReleaseAsync();
+                File.WriteAllText(Path.Combine(manyLockRoot, "00000128", "released"), $"v1:{Guid.NewGuid():N}");
+                bool oldLockCorruptionRejected = false;
+                try { await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderOne, "lease-many"); }
+                catch (InvalidDataException) { oldLockCorruptionRejected = true; }
+                Assert(oldLockCorruptionRejected && !Directory.Exists(Path.Combine(manyLockRoot, "00000258")),
+                    "大量旧锁中间的损坏记录仍会阻止获取下一代");
                 string abandonedDir = Path.Combine(root, "lease-abandoned", ".fnsync", "lock-generations", "00000001");
                 Directory.CreateDirectory(abandonedDir);
                 Assert(await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderOne, "lease-abandoned") == null,

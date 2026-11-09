@@ -11,7 +11,6 @@ namespace FNSyncPlus.Core.Services;
 /// </summary>
 public sealed class ExperimentalRemoteLease
 {
-    private const int MaximumGenerations = 256;
     private readonly INasStorageProvider _provider;
     private readonly string _directory;
     private readonly byte[] _owner;
@@ -40,7 +39,9 @@ public sealed class ExperimentalRemoteLease
             var made = await provider.CreateDirectoryAsync(path, token).ConfigureAwait(false);
             if (!made.Success) throw new IOException($"无法准备锁目录: {made.ErrorMessage}");
         }
-        for (int sequence = 1; sequence <= MaximumGenerations; sequence++)
+        // Preserve and verify every older generation; the format's D8 is a minimum width,
+        // not a maximum. Sequential verification is deliberately conservative but expensive.
+        for (long sequence = 1; sequence < long.MaxValue; sequence++)
         {
             token.ThrowIfCancellationRequested();
             string directory = $"{lockRoot}/{sequence:D8}";
@@ -58,7 +59,7 @@ public sealed class ExperimentalRemoteLease
             if (!IsValidOwner(previousOwner) || !previousOwner.AsSpan().SequenceEqual(released))
                 throw new InvalidDataException("锁的持有者或释放记录无效，拒绝继续");
         }
-        throw new IOException("锁记录已达到上限，需安全维护后才能继续");
+        throw new IOException("锁记录序号耗尽，需安全维护后才能继续");
     }
 
     public async Task ReleaseAsync(CancellationToken token = default)

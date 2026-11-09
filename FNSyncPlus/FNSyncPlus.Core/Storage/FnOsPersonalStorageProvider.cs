@@ -571,27 +571,9 @@ namespace FNSyncPlus.Core.Storage
                 return Task.FromResult(StorageOperationResult.Fail("飞牛个人空间尚未认证，无法执行操作。"));
             }
 
-            // 严格安全保护：正式个人空间暂时禁止物理删除，仅允许在用户明确授权的测试探测目录中清理
-            string clean = NormalizeRelativePath(relativePath);
-            bool isAuthorizedTestFolder = clean.StartsWith("_FNSYNC_SAFETY_PROBE_", StringComparison.OrdinalIgnoreCase) ||
-                                         clean.StartsWith("FN_SYNC_POC_", StringComparison.OrdinalIgnoreCase) ||
-                                         clean.StartsWith("FN_TEST_", StringComparison.OrdinalIgnoreCase);
-
-            if (!isAuthorizedTestFolder)
-            {
-                return Task.FromResult(StorageOperationResult.Fail("安全保护拦截：正式个人空间暂禁止删除操作，确保用户数据绝对安全。"));
-            }
-
-            string fullPath = CombineWithPersonalRoot(relativePath);
-            return Task.Run(async () =>
-            {
-                var resp = await _apiClient.DeleteFileOrDirAsync(fullPath, moveToTrash, ct).ConfigureAwait(false);
-                if (resp.IsSuccess)
-                {
-                    return StorageOperationResult.Ok(fullPath);
-                }
-                return StorageOperationResult.Fail(resp.ErrMsg ?? "删除失败", resp.ErrNo, fullPath);
-            });
+            // A directory name is not proof of ownership or consent. Until a scoped,
+            // explicitly approved deletion workflow exists, all personal-space deletes fail closed.
+            return Task.FromResult(StorageOperationResult.Fail("安全保护拦截：飞牛个人空间删除功能尚未启用。"));
         }
 
         private string NormalizeRelativePath(string? relativePath)
