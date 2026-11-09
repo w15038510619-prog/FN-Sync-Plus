@@ -1546,6 +1546,7 @@ namespace FNSyncPlus.Tests
                 await TestTaskRemovalWhileRunningAsync(root);
                 await TestTaskRemovalFailureAsync(root);
                 await TestIsolatedVersionedTaskAsync(root);
+                await TestIsolatedTaskReattachmentAsync(root);
                 await TestReconnectSchedulingAsync(root);
                 await TestShutdownAsync(root);
                 await TestPausePersistsAsync(root);
@@ -1847,6 +1848,39 @@ namespace FNSyncPlus.Tests
             try { nonisolated.AddTask(new SyncTask { SourceFolder = source, DestinationFolder = "not-used", ExperimentalExistingRoot = "existing" }); }
             catch (InvalidOperationException) { refusedReuse = true; }
             Assert(refusedReuse, "正式任务不能启用隔离目录复用参数");
+        }
+
+        static async Task TestIsolatedTaskReattachmentAsync(string root)
+        {
+            string source = Path.Combine(root, "reattach-source"), target = "reattach-target";
+            Directory.CreateDirectory(source);
+            string file = Path.Combine(source, "sample.txt");
+            File.WriteAllText(file, "original");
+            var provider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+            var backup = new ExperimentalVersionedBackup();
+            await backup.CreateNewAsync(provider, source, target);
+            var previous = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, target);
+            await new ExperimentalFirstProjection().PublishAsync(provider, target, previous);
+            File.WriteAllText(file, "updated before restart");
+            var latest = await backup.RunAsync(provider, source, target); // interrupted before physical publication
+            var settings = AppSettings.CreateInMemory();
+            settings.Tasks.Add(new SyncTask { TaskName = "重新接续", SourceFolder = source, DestinationFolder = target,
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly });
+            var restarted = AppSettings.FromJson(settings.ToJson());
+            restarted.IsInMemoryOnly = true;
+            using var manager = new TaskManager(restarted, new SmbAuthService(), new LogService(Path.Combine(root, "reattach-logs")), experimentalVersionedBackup: true);
+            manager.StorageProviderSupplier = () => provider;
+            var task = restarted.Tasks.Single();
+            var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            manager.TaskStateChanged += t => { if (t.TaskId == task.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) done.TrySetResult(); };
+            manager.TriggerSync(task.TaskId);
+            if (await Task.WhenAny(done.Task, Task.Delay(15000)) != done.Task) throw new TimeoutException("隔离任务接续超时");
+            var found = await new ExperimentalProjectionDiscovery().DiscoverAsync(provider, target);
+            Assert(task.State == TaskSyncState.Completed && task.LastUploadedFiles == 0 && found.Plan.VersionId == latest.Snapshot.Id &&
+                File.ReadAllText(Path.Combine(root, target, "current", "sample.txt")) == "updated before restart" &&
+                File.ReadAllText(Path.Combine(root, target, ".fnsync", "projections", Directory.GetDirectories(Path.Combine(root, target, ".fnsync", "projections"), "archive-*").Select(Path.GetFileName).Single()!, "current", "sample.txt")) == "original",
+                "隔离任务重新接续时补发已提交版本并保留旧物理目录");
+            if (!await manager.ShutdownAsync(TimeSpan.FromSeconds(15))) throw new TimeoutException("隔离任务接续后未停止");
         }
 
         static async Task TestReconnectSchedulingAsync(string root)
@@ -2211,8 +2245,14 @@ namespace FNSyncPlus.Tests
             var first = await backup.CreateNewAsync(provider, source, "projection-next");
             var oldPlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, "projection-next");
             var oldPublication = await new ExperimentalFirstProjection().PublishAsync(provider, "projection-next", oldPlan);
+            var discoveredFirst = await new ExperimentalProjectionDiscovery().DiscoverAsync(provider, "projection-next");
+            Assert(discoveredFirst.Publication == oldPublication && discoveredFirst.Plan.VersionId == first.Snapshot.Id,
+                "重新检查时可确定唯一的首次物理发布");
             File.Move(Path.Combine(source, "old.txt"), Path.Combine(source, "new.txt"));
             var second = await backup.RunAsync(provider, source, "projection-next");
+            var pendingVersion = await new ExperimentalProjectionDiscovery().DiscoverAsync(provider, "projection-next");
+            Assert(pendingVersion.Plan.VersionId == first.Snapshot.Id && pendingVersion.Plan.VersionId != second.Snapshot.Id,
+                "新版本已提交但尚未发布时仍识别旧物理目录");
             var nextPlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, "projection-next");
             string currentFile = Path.Combine(root, "projection-next", "current", "old.txt");
             File.WriteAllText(currentFile, "outside modification");
@@ -2241,6 +2281,23 @@ namespace FNSyncPlus.Tests
                 File.ReadAllText(Path.Combine(root, next.ArchivedRoot.Replace('/', Path.DirectorySeparatorChar), "new.txt")) == "initial content" &&
                 File.ReadAllText(Path.Combine(archive, "old.txt")) == "initial content",
                 "连续物理增量发布保留此前两代内容");
+            var discovered = await new ExperimentalProjectionDiscovery().DiscoverAsync(provider, "projection-next");
+            Assert(discovered.Publication == next.Current && discovered.Plan.VersionId == third.Snapshot.Id,
+                "重新检查时验证完整发布链并找到当前物理版本");
+            File.WriteAllText(Path.Combine(archive, "old.txt"), "damaged archive");
+            bool archiveRejected = false;
+            try { await new ExperimentalProjectionDiscovery().DiscoverAsync(provider, "projection-next"); }
+            catch (InvalidDataException) { archiveRejected = true; }
+            Assert(archiveRejected && File.ReadAllText(Path.Combine(archive, "old.txt")) == "damaged archive",
+                "旧物理归档损坏时停止接续并保留损坏现场");
+            File.WriteAllText(Path.Combine(archive, "old.txt"), "initial content");
+            File.WriteAllText(Path.Combine(current, "new.txt"), "outside modification");
+            bool discoveryRejected = false;
+            try { await new ExperimentalProjectionDiscovery().DiscoverAsync(provider, "projection-next"); }
+            catch (InvalidDataException) { discoveryRejected = true; }
+            Assert(discoveryRejected && File.ReadAllText(Path.Combine(current, "new.txt")) == "outside modification",
+                "当前物理目录被外部修改时拒绝恢复任务状态");
+            File.WriteAllText(Path.Combine(current, "new.txt"), "third content");
 
             var failing = new FaultInjectingProvider(root) { FailAfterArchiveMove = false };
             var uncertainFirst = await backup.CreateNewAsync(failing, source, "projection-archive-uncertain");

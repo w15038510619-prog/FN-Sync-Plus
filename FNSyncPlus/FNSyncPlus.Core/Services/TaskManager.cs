@@ -76,8 +76,9 @@ namespace FNSyncPlus.Core.Services
         public TaskManager(
             AppSettings settings,
             SmbAuthService smbService,
-            LogService? logService = null)
-            : this(settings, new LongNameEngine(), new ManifestManager(), smbService, logService)
+            LogService? logService = null,
+            bool experimentalVersionedBackup = false)
+            : this(settings, new LongNameEngine(), new ManifestManager(), smbService, logService, experimentalVersionedBackup)
         {
         }
 
@@ -86,13 +87,25 @@ namespace FNSyncPlus.Core.Services
             LongNameEngine longNameEngine,
             ManifestManager manifestManager,
             SmbAuthService smbService,
-            LogService? logService = null)
+            LogService? logService = null,
+            bool experimentalVersionedBackup = false)
         {
             _settings = settings;
             _longNameEngine = longNameEngine;
             _manifestManager = manifestManager;
             _smbService = smbService;
             _logService = logService ?? LogService.Default;
+            if (experimentalVersionedBackup && !settings.IsInMemoryOnly)
+                throw new InvalidOperationException("实验性备份只能用于内存隔离测试会话");
+            _useExperimentalVersionedBackup = experimentalVersionedBackup;
+            if (experimentalVersionedBackup)
+            {
+                foreach (var task in settings.Tasks.Where(t => t.ProviderType == StorageProviderType.FnOsPersonal))
+                {
+                    task.IsExperimentalBackup = true;
+                    task.RequiresNewExperimentalBackup = false;
+                }
+            }
 
             int maxConcurrent = Math.Max(1, _settings.MaxConcurrentSyncs);
             _concurrencySemaphore = new SemaphoreSlim(maxConcurrent, maxConcurrent);
@@ -519,6 +532,13 @@ namespace FNSyncPlus.Core.Services
                 {
                     if (!UseExperimentalVersionedBackup || provider == null)
                         throw new InvalidOperationException("实验性备份必须使用隔离会话和已连接的飞牛存储");
+                    if (!task.RequiresNewExperimentalBackup && !_isolatedProjections.ContainsKey(task.TaskId))
+                    {
+                        task.CurrentFile = "正在核验隔离备份的已有物理目录及发布记录";
+                        TaskStateChanged?.Invoke(task);
+                        var found = await new ExperimentalProjectionDiscovery().DiscoverAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false);
+                        _isolatedProjections[task.TaskId] = new IsolatedProjectionState(found.Plan, found.Publication);
+                    }
                     AppendTaskLog(task, "INFO", "隔离试验：正在准备版本化内容及物理候选目录。");
                     var experimental = new ExperimentalVersionedBackup();
                     experimental.ProgressChanged += message =>
@@ -534,7 +554,7 @@ namespace FNSyncPlus.Core.Services
                     task.RequiresNewExperimentalBackup = false;
                     reusedFiles = result.ReusedFiles;
                     bool hasPrevious = _isolatedProjections.TryGetValue(task.TaskId, out var previousProjection);
-                    if (!result.HasNewVersion && hasPrevious)
+                    if (hasPrevious && previousProjection!.Plan.VersionId == result.Snapshot.Id)
                     {
                         task.CurrentFile = "文件无变化，正在核验现有隔离物理目录";
                         TaskStateChanged?.Invoke(task);
