@@ -31,7 +31,15 @@ namespace FNSyncPlus.Tests
     /// </summary>
     public static class FnOsPersonalSpacePoc
     {
-        public static async Task<bool> RunAsync(string[]? args = null)
+        public static Task<bool> RunAsync(string[]? args = null)
+        {
+            Console.WriteLine("[SKIP] 旧版个人空间 PoC 缺少授权父目录及可靠的独占创建保护，已停用；请使用明确授权目录的测试实验室。");
+            return Task.FromResult(false);
+        }
+
+        // Retained for reference only. Do not expose until its entire workflow is redesigned
+        // around an explicitly authorized parent and exclusive directory creation.
+        private static async Task<bool> RunLegacyUnsafeAsync(string[]? args = null)
         {
             Console.WriteLine("\n================================================================================");
             Console.WriteLine("    飞牛 fnOS 账号个人空间 (「我的文件」) 真实 NAS 端到端 C# 验证 PoC");
@@ -415,7 +423,7 @@ namespace FNSyncPlus.Tests
         /// <summary>
         /// 真实 NAS 恢复专项测试：恢复真实已备份包 FN_Sync_Test 并逐一校验文件数量、目录结构、长文件名与 SHA-256
         /// </summary>
-        public static async Task<bool> TestRestoreFnSyncTestAsync(FnOsApiClient client)
+        private static async Task<bool> TestRestoreFnSyncTestAsync(FnOsApiClient client)
         {
             Console.WriteLine("\n================================================================================");
             Console.WriteLine("    [真实恢复专项测试] 恢复真实备份包 FN_Sync_Test 并逐一比对 SHA-256");
@@ -466,7 +474,7 @@ namespace FNSyncPlus.Tests
         /// <summary>
         /// P0-2: 在真实飞牛个人空间执行 Unicode 全场景测试套件 (13 个核心测试用例)
         /// </summary>
-        public static async Task<bool> RunUnicodeCompatibilitySuiteAsync(
+        private static async Task<bool> RunUnicodeCompatibilitySuiteAsync(
             FnOsApiClient client, 
             string pocRemoteDirPath, 
             string pocTag, 
@@ -1074,27 +1082,16 @@ namespace FNSyncPlus.Tests
                 Console.ResetColor();
                 return false;
             }
-            Console.WriteLine("[PASS] 所有权标记核验通过，开始将本次临时测试目录移入回收站...");
+            Console.WriteLine("[PASS] 所有权标记核验通过。");
 
-            var delRes = await client.DeleteFileOrDirAsync(pocRemoteDirPath, moveToTrash: true);
-            if (!delRes.IsSuccess)
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"[FAIL] 清理测试目录失败: {delRes.ErrMsg} (errno: {delRes.ErrNo})");
-                Console.ResetColor();
-                return false;
-            }
-            Console.WriteLine($"[PASS] 成功调用 file.rm (taskId: {delRes.TaskId ?? "done"}, result: {delRes.Result ?? "succ"})");
-            Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"[PASS] 用例 13 成功！本次测试目录【{pocRemoteDirPath}】已安全清理移入飞牛回收站，历史数据零破坏！");
-            Console.ResetColor();
+            Console.WriteLine("[SKIP] 未执行远端删除；测试目录保留。");
 
             // 清理本地临时还原目录
             try { Directory.Delete(restoreTempDir, true); } catch { }
 
             Console.WriteLine("\n================================================================================");
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("    [13/13 全部通过] 飞牛官方「我的文件」Unicode 全场景兼容性测试 100% PASS！");
+            Console.WriteLine("    远端删除测试已跳过，测试目录已保留。");
             Console.ResetColor();
             Console.WriteLine("================================================================================");
             return true;

@@ -60,8 +60,8 @@ namespace FNSyncPlus.Tests
 
             if (args.Any(a => a.Equals("--verify-p0", StringComparison.OrdinalIgnoreCase)))
             {
-                bool p0Success = await VerifyP0RealNasLifecycleAsync();
-                return p0Success ? 0 : 1;
+                Console.WriteLine("[SKIP] 旧版联机 P0 测试会读取正式凭据并自动信任证书，已停用；请使用隔离凭据和授权沙盒测试。");
+                return 2;
             }
 
             Console.WriteLine("================================================================================");
@@ -128,11 +128,11 @@ namespace FNSyncPlus.Tests
 
                 // ==================== 4. 真实 NAS SMB 线上测试 ====================
                 SetCategory(TestCategory.RealNasSmb);
-                await TestRealNasSmbFolderLifecycleAsync();
+                Skip("旧版真实 NAS SMB 线上测试", "缺少明确授权的隔离父目录且会自动清理，已停用");
 
                 // ==================== 5. 真实个人空间备份还原 ====================
                 SetCategory(TestCategory.RealPersonalSpace);
-                await TestRealNasPersonalSpaceBackupAndRestoreAsync();
+                Skip("旧版真实个人空间线上测试", "仅检测共享权限，不能证明官方个人空间备份恢复，已停用");
             }
             catch (Exception ex)
             {
@@ -157,7 +157,7 @@ namespace FNSyncPlus.Tests
             Console.WriteLine(FormatCat(TestCategory.RealPersonalSpace, "5. 真实个人空间备份还原:"));
             Console.WriteLine("--------------------------------------------------------------------------------");
             Console.WriteLine($"  [GitHub CI 环境] 离线自动化测试: 通过 {_passed} 项, 失败 {_failed} 项, 安全跳过 {_skipped} 项");
-            Console.WriteLine("  [真实 NAS 联机 PoC] 需参数 --poc 显式触发: 10/10 核心协议与全流程验证 100% PASS");
+            Console.WriteLine("  [真实 NAS 联机 PoC] 旧入口已停用，本次未执行真实 NAS 验证。");
             Console.WriteLine("--------------------------------------------------------------------------------");
             Console.WriteLine("  飞牛 fnOS 账号个人空间接口验证状态矩阵:");
             Console.WriteLine("    [已验证] user.login (RSA+AES 加密鉴权与 2FA)     : 100% 实测成功");
@@ -1882,6 +1882,7 @@ namespace FNSyncPlus.Tests
             catch (IOException) { conflictStopped = true; }
             Assert(conflictStopped && !Directory.Exists(Path.Combine(remoteRoot, "conflicting-target")),
                 "目录创建返回冲突码时停止同步，不当成创建成功");
+            Assert(!await FnOsPersonalSpacePoc.RunAsync(), "旧版未隔离的真实 NAS PoC 已禁用");
         }
 
         sealed class FaultInjectingProvider : INasStorageProvider, IExclusiveDirectoryProvider, IExperimentalContentReuseProvider
