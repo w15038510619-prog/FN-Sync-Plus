@@ -30,6 +30,20 @@ namespace FNSyncPlus.Core.Storage
         Task<ExclusiveDirectoryResult> TryCreateDirectoryExclusiveAsync(string relativePath, CancellationToken ct = default);
     }
 
+    public enum VerifiedMoveOutcome { Moved, DestinationExists, NotMoved }
+
+    /// <summary>Experimental only. A timeout after a move request leaves the remote outcome uncertain.</summary>
+    public interface IExperimentalFileMoveProvider
+    {
+        Task<VerifiedMoveOutcome> MoveFileVerifiedAsync(string sourcePath, string destinationDirectory,
+            string expectedSha256, long expectedSize, CancellationToken ct = default);
+    }
+
+    public sealed class RemoteMoveUncertainException : IOException
+    {
+        public RemoteMoveUncertainException(string message, Exception? inner = null) : base(message, inner) { }
+    }
+
     /// <summary>
     /// NAS 存储项目元数据模型
     /// </summary>

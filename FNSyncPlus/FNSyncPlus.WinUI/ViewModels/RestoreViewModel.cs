@@ -106,6 +106,18 @@ namespace FNSyncPlus.WinUI.ViewModels
             _settings = settings;
             _connectionService = connectionService;
 
+            _connectionService.PropertyChanged += (sender, args) =>
+            {
+                if (args.PropertyName == nameof(NasConnectionService.CurrentStorageProvider) &&
+                    _connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
+                {
+                    UIThreadHelper.RunOnUIThread(() =>
+                    {
+                        if (string.IsNullOrWhiteSpace(NasScanRoot)) NasScanRoot = "我的文件";
+                    });
+                }
+            };
+
             if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
             {
                 NasScanRoot = "我的文件";
@@ -430,6 +442,11 @@ namespace FNSyncPlus.WinUI.ViewModels
             };
             IsRestoring = true;
             RestoreStatusText = "正在核对并恢复所选历史版本...";
+            RestoreProgress = 0;
+            RestoredFilesCount = 0;
+            SkippedFilesCount = 0;
+            FailedFilesCount = 0;
+            IntegrityVerifiedCount = 0;
             DetailedErrorMessage = string.Empty;
             FailedFilesList.Clear();
             HasFailedFiles = false;

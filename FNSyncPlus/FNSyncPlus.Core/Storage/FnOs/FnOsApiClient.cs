@@ -41,6 +41,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
         private ClientWebSocket? _webSocket;
         private readonly SemaphoreSlim _wsLock = new(1, 1);
         private readonly Dictionary<string, TaskCompletionSource<string>> _pendingRequests = new();
+        private readonly Dictionary<string, TaskCompletionSource<string>> _pendingTaskRequests = new();
         private CancellationTokenSource? _receiveCts;
         private Task? _receiveLoopTask;
 
@@ -295,14 +296,28 @@ namespace FNSyncPlus.Core.Storage.FnOs
                     string? reqId = reqIdProp.GetString();
                     if (!string.IsNullOrEmpty(reqId))
                     {
+                        TaskCompletionSource<string>? completed = null;
                         lock (_pendingRequests)
                         {
-                            if (_pendingRequests.TryGetValue(reqId, out var tcs))
+                            if (_pendingTaskRequests.TryGetValue(reqId, out var taskCompletion))
+                            {
+                                bool terminalResult = doc.RootElement.TryGetProperty("result", out var result) &&
+                                    result.ValueKind == JsonValueKind.String && result.GetString() is "succ" or "fail" or "partialCompleted" or "canceled";
+                                bool terminalError = doc.RootElement.TryGetProperty("errno", out var error) &&
+                                    error.ValueKind == JsonValueKind.Number && error.TryGetInt32(out int code) && code != 0;
+                                if (terminalResult || terminalError)
+                                {
+                                    _pendingTaskRequests.Remove(reqId);
+                                    completed = taskCompletion;
+                                }
+                            }
+                            else if (_pendingRequests.TryGetValue(reqId, out var tcs))
                             {
                                 _pendingRequests.Remove(reqId);
-                                tcs.TrySetResult(jsonBody);
+                                completed = tcs;
                             }
                         }
+                        completed?.TrySetResult(jsonBody);
                     }
                 }
             }
@@ -495,10 +510,19 @@ namespace FNSyncPlus.Core.Storage.FnOs
         /// <summary>
         /// 发送带 HMAC-SHA256 签名的 WebSocket RPC 请求并等待响应
         /// </summary>
-        public async Task<string> SendSignedRpcAsync(string method, Dictionary<string, object?> payload, CancellationToken ct = default)
+        public Task<string> SendSignedRpcAsync(string method, Dictionary<string, object?> payload, CancellationToken ct = default)
+            => SendSignedRpcCoreAsync(method, payload, false, TimeSpan.FromSeconds(15), ct);
+
+        /// <summary>Waits for the terminal response of a long-running RPC; cancellation or timeout leaves the remote outcome unknown.</summary>
+        public Task<string> SendSignedTaskRpcAsync(string method, Dictionary<string, object?> payload, TimeSpan timeout, CancellationToken ct = default)
+            => SendSignedRpcCoreAsync(method, payload, true, timeout, ct);
+
+        private async Task<string> SendSignedRpcCoreAsync(string method, Dictionary<string, object?> payload,
+            bool waitForTerminalResult, TimeSpan timeout, CancellationToken ct)
         {
             if (!IsAuthenticated || _hmacKeyBytes == null)
                 throw new InvalidOperationException("未鉴权或缺少 HMAC 签名密钥，无法发送 RPC。");
+            if (timeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
 
             string reqId = FnOsCryptoHelper.GenerateReqId();
             payload["req"] = method;
@@ -507,19 +531,27 @@ namespace FNSyncPlus.Core.Storage.FnOs
             string jsonStr = JsonSerializer.Serialize(payload);
             string signedMessage = FnOsCryptoHelper.FormatSignedRpcMessage(_hmacKeyBytes, jsonStr);
 
-            var tcs = new TaskCompletionSource<string>();
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             lock (_pendingRequests)
             {
-                _pendingRequests[reqId] = tcs;
+                (waitForTerminalResult ? _pendingTaskRequests : _pendingRequests).Add(reqId, tcs);
             }
-
-            await SendRawTextAsync(signedMessage, ct);
-
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            using var reg = linked.Token.Register(() => tcs.TrySetCanceled());
-
-            return await tcs.Task;
+            try
+            {
+                using var timeoutCts = new CancellationTokenSource(timeout);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+                using var reg = linked.Token.Register(() => tcs.TrySetCanceled(linked.Token));
+                await SendRawTextAsync(signedMessage, linked.Token).ConfigureAwait(false);
+                return await tcs.Task.ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_pendingRequests)
+                {
+                    var pending = waitForTerminalResult ? _pendingTaskRequests : _pendingRequests;
+                    if (pending.TryGetValue(reqId, out var current) && ReferenceEquals(current, tcs)) pending.Remove(reqId);
+                }
+            }
         }
 
         /// <summary>

@@ -49,6 +49,38 @@ namespace FNSyncPlus.Core.Services
         public static AppSettings CreateInMemory() => new AppSettings { IsInMemoryOnly = true };
         public static AppSettings CreateForTest(string testFilePath) => new AppSettings { CustomConfigPath = testFilePath };
 
+        /// <summary>Reads only already-trusted SHA-256 certificate fingerprints; never migrates or writes the source settings.</summary>
+        public static Dictionary<string, string> ReadTrustedCertificates(string path)
+        {
+            var trusted = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (!File.Exists(path)) return trusted;
+                using var document = JsonDocument.Parse(File.ReadAllBytes(path));
+                if (document.RootElement.ValueKind != JsonValueKind.Object) return trusted;
+                bool found = false;
+                foreach (var property in document.RootElement.EnumerateObject())
+                {
+                    if (!property.Name.Equals(nameof(TrustedCertThumbprints), StringComparison.OrdinalIgnoreCase)) continue;
+                    if (found || property.Value.ValueKind != JsonValueKind.Object)
+                        return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    found = true;
+                    foreach (var entry in property.Value.EnumerateObject())
+                    {
+                        string? hash = entry.Value.ValueKind == JsonValueKind.String ? entry.Value.GetString() : null;
+                        if (!string.IsNullOrWhiteSpace(entry.Name) && hash?.Length == 64 && hash.All(Uri.IsHexDigit))
+                        {
+                            if (!trusted.TryAdd(entry.Name, hash)) return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        }
+                    }
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            catch (JsonException) { }
+            return trusted;
+        }
+
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
             WriteIndented = true,

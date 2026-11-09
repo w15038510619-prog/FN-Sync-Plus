@@ -4,9 +4,11 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Storage.FnOs;
+using FNSyncPlus.Core.Utils;
 
 namespace FNSyncPlus.Core.Storage
 {
@@ -14,7 +16,7 @@ namespace FNSyncPlus.Core.Storage
     /// 飞牛 fnOS 账号原生个人空间存储提供程序 (「我的文件」)
     /// 严格遵循官方 API 权限模型，直接对接个人空间，杜绝团队共享混用与伪造用户名路径
     /// </summary>
-    public class FnOsPersonalStorageProvider : INasStorageProvider, IExclusiveDirectoryProvider
+    public class FnOsPersonalStorageProvider : INasStorageProvider, IExclusiveDirectoryProvider, IExperimentalFileMoveProvider
     {
         private readonly FnOsApiClient _apiClient;
         private string? _personalRootPath; // 例如 vol1/1006
@@ -494,6 +496,66 @@ namespace FNSyncPlus.Core.Storage
             catch
             {
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Experimental no-overwrite move of one verified file. The final RPC response and both paths are checked;
+        /// server concurrency and crash semantics are not established, so production tasks must not use this yet.
+        /// </summary>
+        public async Task<VerifiedMoveOutcome> MoveFileVerifiedAsync(string sourcePath, string destinationDirectory,
+            string expectedSha256, long expectedSize, CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            string source = NormalizeRelativePath(sourcePath);
+            string directory = NormalizeRelativePath(destinationDirectory);
+            if (!PathHelper.IsSafeRelativePath(source) || !PathHelper.IsSafeRelativePath(directory))
+                throw new ArgumentException("移动路径必须是个人空间内的非空安全相对路径");
+            if (expectedSize < 0 || expectedSha256 == null || expectedSha256.Length != 64 || !expectedSha256.All(Uri.IsHexDigit))
+                throw new ArgumentException("移动前必须提供有效的文件大小和 SHA-256");
+            int slash = source.LastIndexOf('/');
+            string parent = slash < 0 ? "" : source[..slash];
+            string name = slash < 0 ? source : source[(slash + 1)..];
+            if (string.Equals(parent, directory, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("源文件和目标目录相同");
+            string destination = $"{directory}/{name}";
+            var sourceItem = await GetItemAsync(source, ct).ConfigureAwait(false);
+            bool sourceValid = sourceItem != null && !sourceItem.IsDirectory && sourceItem.Size == expectedSize &&
+                await VerifyFileIntegrityAsync(source, expectedSha256, expectedSize, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            if (!sourceValid)
+                throw new InvalidDataException("待移动文件不存在或校验不一致");
+            var targetDirectory = await GetItemAsync(directory, ct).ConfigureAwait(false);
+            if (targetDirectory == null || !targetDirectory.IsDirectory)
+                throw new DirectoryNotFoundException("移动目标目录不存在");
+            if (await GetItemAsync(destination, ct).ConfigureAwait(false) != null) return VerifiedMoveOutcome.DestinationExists;
+            ct.ThrowIfCancellationRequested();
+
+            try
+            {
+                string json = await _apiClient.SendSignedTaskRpcAsync("file.mv", new Dictionary<string, object?> {
+                    ["files"] = new[] { "/" + CombineWithPersonalRoot(source) },
+                    ["pathTo"] = "/" + CombineWithPersonalRoot(directory),
+                    ["overwrite"] = "skip",
+                    ["details"] = new { name, count = 1 }
+                }, TimeSpan.FromMinutes(2), ct).ConfigureAwait(false);
+                using var response = JsonDocument.Parse(json);
+                string? result = response.RootElement.TryGetProperty("result", out var value) && value.ValueKind == JsonValueKind.String
+                    ? value.GetString() : null;
+                var sourceAfter = await GetItemAsync(source, ct).ConfigureAwait(false);
+                var destinationAfter = await GetItemAsync(destination, ct).ConfigureAwait(false);
+                if (sourceAfter != null && !sourceAfter.IsDirectory && sourceAfter.Size == expectedSize &&
+                    await VerifyFileIntegrityAsync(source, expectedSha256, expectedSize, ct).ConfigureAwait(false))
+                    return VerifiedMoveOutcome.NotMoved;
+                if (result == "succ" && sourceAfter == null && destinationAfter != null && !destinationAfter.IsDirectory &&
+                    destinationAfter.Size == expectedSize && await VerifyFileIntegrityAsync(destination, expectedSha256, expectedSize, ct).ConfigureAwait(false))
+                    return VerifiedMoveOutcome.Moved;
+                throw new RemoteMoveUncertainException("移动结果无法确认，请检查源和目标后再继续");
+            }
+            catch (RemoteMoveUncertainException) { throw; }
+            catch (Exception ex)
+            {
+                throw new RemoteMoveUncertainException("移动请求已发送或结果不明，请检查源和目标，不能自动重试", ex);
             }
         }
 

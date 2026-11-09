@@ -207,6 +207,17 @@ namespace FNSyncPlus.Tests
                 var migrated = AppSettings.LoadFromPath(legacyConfig);
                 var migrationBackup = Directory.GetFiles(root, "legacy.json.pre-migration-*.bak");
                 Assert(migrated.Tasks.Count == 1 && migrationBackup.Length == 1 && File.ReadAllText(migrationBackup[0]) == legacyJson, "迁移配置前保留原始备份");
+                string trustedConfig = Path.Combine(root, "trusted-settings.json");
+                string trustedJson = "{\"TrustedCertThumbprints\":{\"nas.example\":\"" + new string('A', 64) + "\",\"invalid\":\"123\"}}";
+                File.WriteAllText(trustedConfig, trustedJson);
+                var trustedCerts = AppSettings.ReadTrustedCertificates(trustedConfig);
+                Assert(trustedCerts.Count == 1 && trustedCerts["NAS.EXAMPLE"] == new string('A', 64) && File.ReadAllText(trustedConfig) == trustedJson,
+                    "隔离会话只读复用已保存的有效证书指纹");
+                File.WriteAllText(trustedConfig, "{\"TrustedCertThumbprints\":{},\"trustedcertthumbprints\":{\"nas.example\":\"" + new string('A', 64) + "\"}}");
+                bool duplicateTrustRejected = AppSettings.ReadTrustedCertificates(trustedConfig).Count == 0;
+                File.WriteAllText(trustedConfig, "{broken");
+                Assert(duplicateTrustRejected && AppSettings.ReadTrustedCertificates(trustedConfig).Count == 0,
+                    "重复或损坏的信任配置不会自动放行证书");
                 string isolatedCredentials = Path.Combine(root, "credentials", "credentials.dat");
                 SmbAuthService.SaveCredentials("test.invalid", "test-user", "test-secret", isolatedCredentials);
                 var isolatedSaved = SmbAuthService.LoadCredentials(isolatedCredentials);
@@ -292,6 +303,45 @@ namespace FNSyncPlus.Tests
                 Assert(refused, "主备清单均损坏时拒绝返回空清单");
                 Assert(new FnOsFileListResponse { Files = new() }.IsSuccess, "fnOS 文件列表允许省略 result 的有效响应");
                 Assert(!new FnOsFileListResponse().IsSuccess && !new FnOsFileListResponse { Result = "fail", Files = new() }.IsSuccess, "fnOS 文件列表拒绝空响应或明确失败");
+                await using (var rpcClient = new FnOsApiClient())
+                {
+                    var type = typeof(FnOsApiClient);
+                    var process = type.GetMethod("ProcessIncomingMessage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+                    var taskRequests = (Dictionary<string, TaskCompletionSource<string>>)type.GetField("_pendingTaskRequests", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rpcClient)!;
+                    var pending = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    taskRequests.Add("task-test", pending);
+                    process.Invoke(rpcClient, new object[] { "{\"reqid\":\"task-test\",\"taskId\":\"id\",\"sysNotify\":true}" });
+                    process.Invoke(rpcClient, new object[] { "{\"reqid\":\"task-test\",\"percent\":20}" });
+                    process.Invoke(rpcClient, new object[] { "{\"reqid\":\"task-test\",\"result\":\"accepted\"}" });
+                    bool waited = !pending.Task.IsCompleted && taskRequests.ContainsKey("task-test");
+                    process.Invoke(rpcClient, new object[] { "{\"reqid\":\"task-test\",\"result\":\"succ\"}" });
+                    Assert(waited && pending.Task.IsCompletedSuccessfully && !taskRequests.ContainsKey("task-test"),
+                        "异步 RPC 等待最终结果，不把受理或进度当成完成");
+                    var failedTask = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    taskRequests.Add("failed-task-test", failedTask);
+                    process.Invoke(rpcClient, new object[] { "{\"reqid\":\"failed-task-test\",\"errno\":4102}" });
+                    Assert(failedTask.Task.IsCompletedSuccessfully && !taskRequests.ContainsKey("failed-task-test"),
+                        "异步 RPC 错误响应结束等待且不报告成功");
+                    rpcClient.SetAuthenticatedForTesting("isolated-test", 1, 1);
+                    type.GetField("_hmacKeyBytes", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.SetValue(rpcClient, new byte[32]);
+                    bool sendFailed = false;
+                    try { await rpcClient.SendSignedTaskRpcAsync("file.mv", new Dictionary<string, object?>(), TimeSpan.FromSeconds(1)); }
+                    catch (InvalidOperationException) { sendFailed = true; }
+                    Assert(sendFailed && taskRequests.Count == 0, "异步 RPC 发送失败时清除待处理请求");
+                }
+                await using (var moveApi = new FnOsApiClient())
+                {
+                    moveApi.SetAuthenticatedForTesting("isolated-test", 1, 1);
+                    await using var moveProvider = new FnOsPersonalStorageProvider(moveApi);
+                    int rejected = 0;
+                    foreach (var input in new[] { ("../escape.txt", "target", new string('A', 64)),
+                        ("folder/file.txt", "folder", new string('A', 64)), ("folder/file.txt", "target", "invalid") })
+                    {
+                        try { await moveProvider.MoveFileVerifiedAsync(input.Item1, input.Item2, input.Item3, 1); }
+                        catch (ArgumentException) { rejected++; }
+                    }
+                    Assert(rejected == 3, "实验性移动在发送请求前拒绝越界、原目录和无效校验值");
+                }
                 var versionProvider = new FaultInjectingProvider(root);
                 var versions = new VersionedManifestStore();
                 string newSource = Path.Combine(root, "version-new-source");

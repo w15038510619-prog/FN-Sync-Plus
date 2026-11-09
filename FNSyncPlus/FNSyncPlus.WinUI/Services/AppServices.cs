@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using FNSyncPlus.Core.Services;
 using FNSyncPlus.WinUI.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
@@ -29,6 +30,8 @@ namespace FNSyncPlus.WinUI.Services
                 settings.IsolatedCredentialPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                     "FNSyncPlus", "test-session", "credentials.dat");
                 settings.RememberCredentials = File.Exists(settings.IsolatedCredentialPath);
+                string productionSettings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FNSyncPlus", "settings.json");
+                settings.TrustedCertThumbprints = AppSettings.ReadTrustedCertificates(productionSettings);
             }
             services.AddSingleton(settings);
 
@@ -74,6 +77,24 @@ namespace FNSyncPlus.WinUI.Services
         public static T GetService<T>() where T : class
         {
             return Provider.GetRequiredService<T>();
+        }
+
+        public static async Task ConnectIsolatedSessionAsync()
+        {
+            if (!IsIsolatedTestSession) return;
+            var settings = GetService<AppSettings>();
+            if (!settings.IsInMemoryOnly || string.IsNullOrEmpty(settings.IsolatedCredentialPath)) return;
+            var credentials = SmbAuthService.LoadCredentials(settings.IsolatedCredentialPath);
+            if (credentials == null) return;
+            try
+            {
+                await GetService<NasConnectionService>().ConnectAsync(credentials.Value.Server, credentials.Value.Username,
+                    credentials.Value.Password, rememberCredentials: true);
+            }
+            catch (Exception)
+            {
+                System.Diagnostics.Debug.WriteLine("隔离会话自动连接失败，请在界面检查连接状态。");
+            }
         }
     }
 }
