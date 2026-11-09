@@ -398,6 +398,51 @@ namespace FNSyncPlus.Tests
                 Assert(created.Snapshot.Sequence == 1 && created.UploadedFiles == 1 && newRestoreReport.RestoredFiles == 1 &&
                     File.ReadAllText(Path.Combine(newRestore, newLongName)) == "new initial content" && Directory.Exists(Path.Combine(newRestore, "空目录")),
                     "新目标首批备份只提交完整版本，可恢复长文件名和空目录");
+                var physical = await new ExperimentalPhysicalSnapshot().PrepareAsync(versionProvider, "version-new-target");
+                string physicalRoot = Path.Combine(root, physical.CandidateRoot.Replace('/', Path.DirectorySeparatorChar));
+                string physicalFile = Path.Combine(physicalRoot, physical.Files.Single().PhysicalRel.Replace('/', Path.DirectorySeparatorChar));
+                Assert(physical.VersionId == created.Snapshot.Id && physical.Files.Single().OriginalRel == newLongName &&
+                    File.ReadAllText(physicalFile) == "new initial content" && Directory.Exists(Path.Combine(physicalRoot, "空目录")) &&
+                    File.Exists(Path.Combine(Path.GetDirectoryName(physicalRoot)!, "receipt.json")) &&
+                    !Directory.Exists(Path.Combine(root, "version-new-target", "current")),
+                    "候选物理文件树验证长文件名、空目录和记录，不切换当前目录");
+                versionProvider.FailUploadSuffix = ".txt";
+                bool physicalFailed = false;
+                try { await new ExperimentalPhysicalSnapshot().PrepareAsync(versionProvider, "version-new-target"); }
+                catch (IOException) { physicalFailed = true; }
+                versionProvider.FailUploadSuffix = null;
+                var afterPhysicalFailure = await versions.LoadForWritingAsync(versionProvider, "version-new-target");
+                Assert(physicalFailed && afterPhysicalFailure?.Id == created.Snapshot.Id && File.ReadAllText(physicalFile) == "new initial content" &&
+                    !Directory.Exists(Path.Combine(root, "version-new-target", "current")),
+                    "候选文件树写入失败不改变提交版本或现有候选目录");
+                versionProvider.CorruptProjectionUpload = true;
+                bool physicalCorruptionDetected = false;
+                try { await new ExperimentalPhysicalSnapshot().PrepareAsync(versionProvider, "version-new-target"); }
+                catch (InvalidDataException) { physicalCorruptionDetected = true; }
+                versionProvider.CorruptProjectionUpload = false;
+                Assert(physicalCorruptionDetected && (await versions.LoadForWritingAsync(versionProvider, "version-new-target"))?.Id == created.Snapshot.Id &&
+                    File.ReadAllText(physicalFile) == "new initial content",
+                    "候选文件内容损坏时拒绝完成且原备份和候选内容不变");
+                string projections = Path.Combine(root, "version-new-target", ".fnsync", "projections");
+                var existingCandidates = Directory.GetDirectories(projections).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var racingProjectionProvider = new FaultInjectingProvider(root) { BlockUploadContains = "/.fnsync/projections/" };
+                var pendingProjection = new ExperimentalPhysicalSnapshot().PrepareAsync(racingProjectionProvider, "version-new-target");
+                if (await Task.WhenAny(racingProjectionProvider.UploadEntered.Task, Task.Delay(10000)) != racingProjectionProvider.UploadEntered.Task)
+                    throw new TimeoutException("候选目录写入没有到达并发测试点");
+                VersionedManifestStore.Snapshot changedSnapshot;
+                try
+                {
+                    File.WriteAllText(Path.Combine(newSource, newLongName), "updated while preparing candidate");
+                    changedSnapshot = (await newBackup.RunAsync(versionProvider, newSource, "version-new-target")).Snapshot;
+                }
+                finally { racingProjectionProvider.ContinueUpload.TrySetResult(); }
+                bool staleProjectionRejected = false;
+                try { await pendingProjection; }
+                catch (IOException) { staleProjectionRejected = true; }
+                string staleCandidate = Directory.GetDirectories(projections).Single(d => !existingCandidates.Contains(d));
+                Assert(staleProjectionRejected && changedSnapshot.Id != created.Snapshot.Id && !File.Exists(Path.Combine(staleCandidate, "receipt.json")) &&
+                    File.ReadAllText(physicalFile) == "new initial content",
+                    "准备候选目录期间版本变化时不生成完成记录并保留原候选目录");
                 string reuseSource = Path.Combine(root, "reuse-source");
                 string reuseExisting = Path.Combine(root, "reuse-existing");
                 Directory.CreateDirectory(Path.Combine(reuseSource, "missing-folder"));
@@ -1943,6 +1988,7 @@ namespace FNSyncPlus.Tests
             public string? ErrorAfterCompleteContains { get; set; }
             public string? FailReadContains { get; set; }
             public bool CorruptObjectUpload { get; set; }
+            public bool CorruptProjectionUpload { get; set; }
             public bool FailReuseCopy { get; set; }
             public bool FailReuseCopyAfter { get; set; }
             public Action? AfterObjectUpload { get; set; }
@@ -2022,6 +2068,11 @@ namespace FNSyncPlus.Tests
                     ct.ThrowIfCancellationRequested();
                 }
                 if (CorruptObjectUpload && path.Contains("/.fnsync/objects/obj-", StringComparison.Ordinal))
+                {
+                    using var corrupt = new MemoryStream(Encoding.UTF8.GetBytes("corrupted"));
+                    return await inner.UploadFileAsync(path, corrupt, corrupt.Length, modified, overwrite, progress, ct);
+                }
+                if (CorruptProjectionUpload && path.Contains("/.fnsync/projections/", StringComparison.Ordinal) && path.Contains("/tree/", StringComparison.Ordinal))
                 {
                     using var corrupt = new MemoryStream(Encoding.UTF8.GetBytes("corrupted"));
                     return await inner.UploadFileAsync(path, corrupt, corrupt.Length, modified, overwrite, progress, ct);
