@@ -1906,6 +1906,13 @@ namespace FNSyncPlus.Tests
             var topLevel = await lab.RunNasFnOsPersonalTestAsync(provider, authorizedTestParent: "我的文件");
             Assert(!missing.IsAllPassed && !topLevel.IsAllPassed && !Directory.EnumerateFileSystemEntries(remoteRoot).Any(),
                 "未指定授权测试父目录或选择个人空间根目录时不写入");
+            Directory.CreateDirectory(Path.Combine(remoteRoot, "authorized"));
+            File.WriteAllText(Path.Combine(remoteRoot, "authorized", "existing-marker.txt"), "keep");
+            var authorized = await lab.RunNasFnOsPersonalTestAsync(provider, authorizedTestParent: "authorized");
+            string testFolder = authorized.TargetPath["我的文件/".Length..].Replace('/', Path.DirectorySeparatorChar);
+            Assert(authorized.IsAllPassed && provider.DeleteCalls == 0 && Directory.Exists(Path.Combine(remoteRoot, testFolder)) &&
+                File.ReadAllText(Path.Combine(remoteRoot, "authorized", "existing-marker.txt")) == "keep",
+                "授权父目录内的新测试目录保留且不调用远端删除");
             string source = Path.Combine(root, "test-lab-conflict-source");
             Directory.CreateDirectory(source);
             File.WriteAllText(Path.Combine(source, "sample.txt"), "data");
@@ -1947,6 +1954,7 @@ namespace FNSyncPlus.Tests
             public string? BlockUploadContains { get; set; }
             public bool ThrowOnMissingParent { get; set; }
             public string? FailDirectoryPath { get; set; }
+            public int DeleteCalls { get; private set; }
             public TaskCompletionSource UploadEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
             public TaskCompletionSource ContinueUpload { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
             public FaultInjectingProvider(string root) { rootPath = root; inner = new SmbStorageProvider(rootUncPath: root); }
@@ -2065,7 +2073,11 @@ namespace FNSyncPlus.Tests
                 return inner.OpenReadAsync(path, ct);
             }
             public Task<bool> VerifyFileIntegrityAsync(string path, string hash, long size, CancellationToken ct = default) => inner.VerifyFileIntegrityAsync(path, hash, size, ct);
-            public Task<StorageOperationResult> DeleteAsync(string path, bool moveToTrash = true, CancellationToken ct = default) => inner.DeleteAsync(path, moveToTrash, ct);
+            public Task<StorageOperationResult> DeleteAsync(string path, bool moveToTrash = true, CancellationToken ct = default)
+            {
+                DeleteCalls++;
+                return inner.DeleteAsync(path, moveToTrash, ct);
+            }
             public ValueTask DisposeAsync() => inner.DisposeAsync();
         }
 
