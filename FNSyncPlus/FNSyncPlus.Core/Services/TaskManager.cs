@@ -549,6 +549,9 @@ namespace FNSyncPlus.Core.Services
                         taskToken).ConfigureAwait(false);
                 }
 
+                if (report.State != SyncState.Completed && report.FailedFiles == 0)
+                    throw new IOException($"同步未完成（状态：{report.State}）：{report.StatusMessage}");
+
                 task.LastSyncTime = DateTime.Now;
                 task.LastScannedFiles = report.TotalFiles;
                 task.LastUploadedFiles = report.UploadedFiles;
@@ -618,6 +621,7 @@ namespace FNSyncPlus.Core.Services
             catch (Exception ex)
             {
                 task.State = TaskSyncState.Error;
+                task.LastFailureTime = DateTime.Now;
                 task.LastError = ex.Message;
                 if (task.LastScannedFiles == 0 && syncEngine.LastScannedCount > 0)
                 {

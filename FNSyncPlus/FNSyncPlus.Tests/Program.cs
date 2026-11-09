@@ -177,8 +177,7 @@ namespace FNSyncPlus.Tests
 
         static async Task TestIntegrityRegressionsAsync()
         {
-            string root = Path.Combine(Path.GetTempPath(), "FNSync_integrity_" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(root);
+            string root = Directory.CreateTempSubdirectory("FNSync_integrity_").FullName;
             try
             {
                 string config = Path.Combine(root, "settings.json");
@@ -1249,6 +1248,44 @@ namespace FNSyncPlus.Tests
                 var uniqueManifest = await manifestManager.LoadManifestAsync(uniqueProvider, "unique-rename-target");
                 Assert(uniqueResult.State == SyncState.Completed && uniqueManifest.Files.Single().PreviousRel == "old.txt" &&
                     uniqueManifest.History.Any(h => h.OriginalRel == "old.txt" && h.Reason == "renamed"), "唯一的离线重命名仍能识别");
+                string hintedSource = Path.Combine(root, "ambiguous-hints-source");
+                Directory.CreateDirectory(hintedSource);
+                File.WriteAllText(Path.Combine(hintedSource, "old-a.txt"), "first");
+                File.WriteAllText(Path.Combine(hintedSource, "old-b.txt"), "second");
+                var hintedProvider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+                await new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService())
+                    .RunSyncAsync(hintedSource, "ambiguous-hints-target", hintedProvider, BackupStrategy.Smart, null, CancellationToken.None);
+                File.Move(Path.Combine(hintedSource, "old-a.txt"), Path.Combine(hintedSource, "new.txt"));
+                File.Delete(Path.Combine(hintedSource, "old-b.txt"));
+                bool hintsStopped = false;
+                try
+                {
+                    await new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService())
+                        .RunSyncAsync(hintedSource, "ambiguous-hints-target", hintedProvider, BackupStrategy.Smart,
+                            new Dictionary<string, string> { ["old-a.txt"] = "new.txt", ["old-b.txt"] = "new.txt" }, CancellationToken.None);
+                }
+                catch (InvalidDataException) { hintsStopped = true; }
+                var hintManifest = await manifestManager.LoadManifestAsync(hintedProvider, "ambiguous-hints-target");
+                Assert(hintsStopped && hintManifest.Files.Count == 2 && hintManifest.Files.All(f => f.OriginalRel.StartsWith("old-", StringComparison.Ordinal)),
+                    "多个重命名事件指向同一新文件时停止并保留旧清单");
+                string occupiedSource = Path.Combine(root, "occupied-hint-source");
+                Directory.CreateDirectory(occupiedSource);
+                File.WriteAllText(Path.Combine(occupiedSource, "old.txt"), "old data");
+                File.WriteAllText(Path.Combine(occupiedSource, "existing.txt"), "other data");
+                await new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService())
+                    .RunSyncAsync(occupiedSource, "occupied-hint-target", hintedProvider, BackupStrategy.Smart, null, CancellationToken.None);
+                File.Delete(Path.Combine(occupiedSource, "old.txt"));
+                bool occupiedStopped = false;
+                try
+                {
+                    await new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService())
+                        .RunSyncAsync(occupiedSource, "occupied-hint-target", hintedProvider, BackupStrategy.Smart,
+                            new Dictionary<string, string> { ["old.txt"] = "existing.txt" }, CancellationToken.None);
+                }
+                catch (InvalidDataException) { occupiedStopped = true; }
+                var occupiedManifest = await manifestManager.LoadManifestAsync(hintedProvider, "occupied-hint-target");
+                Assert(occupiedStopped && occupiedManifest.Files.Count == 2 && occupiedManifest.History.Count == 0,
+                    "重命名事件指向原有文件时停止并保留旧清单");
                 string legacyRenameSource = Path.Combine(root, "legacy-rename-source");
                 string legacyRenameTarget = Path.Combine(root, "legacy-rename-target");
                 Directory.CreateDirectory(legacyRenameSource);

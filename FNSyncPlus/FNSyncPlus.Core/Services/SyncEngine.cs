@@ -237,25 +237,40 @@ namespace FNSyncPlus.Core.Services
             }
 
             var matchedNewRels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var ambiguousOldRels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            // 1. 优先比对外部传入的文件系统重命名事件提示 (pendingRenames)
+            // Event hints only identify a rename if both sides are unique and the
+            // destination is genuinely new. Concurrent or coalesced events can conflict.
             if (pendingRenames != null && pendingRenames.Count > 0)
             {
+                var newCandidates = new HashSet<string>(candidateNewRelList, StringComparer.OrdinalIgnoreCase);
                 foreach (var missing in missingManifestEntries)
                 {
-                    if (pendingRenames.TryGetValue(missing.OriginalRel, out string? hintNewRel) &&
-                        !string.IsNullOrEmpty(hintNewRel) &&
-                        localRelMap.ContainsKey(hintNewRel) &&
-                        !matchedNewRels.Contains(hintNewRel))
+                    if (pendingRenames.TryGetValue(missing.OriginalRel, out var target) &&
+                        !string.IsNullOrEmpty(target) && localRelMap.ContainsKey(target) && !newCandidates.Contains(target))
                     {
-                        detectedRenames[missing.OriginalRel] = hintNewRel;
-                        matchedNewRels.Add(hintNewRel);
+                        ambiguousOldRels.Add(missing.OriginalRel);
+                        Log("WARN", $"[待处理差异] 重命名目标已在原清单中存在: {target}");
                     }
+                }
+                var hinted = missingManifestEntries
+                    .Where(m => pendingRenames.TryGetValue(m.OriginalRel, out var name) &&
+                        !string.IsNullOrEmpty(name) && newCandidates.Contains(name))
+                    .GroupBy(m => pendingRenames[m.OriginalRel], StringComparer.OrdinalIgnoreCase);
+                foreach (var group in hinted)
+                {
+                    if (group.Count() != 1)
+                    {
+                        foreach (var missing in group) ambiguousOldRels.Add(missing.OriginalRel);
+                        Log("WARN", $"[待处理差异] 多个重命名事件指向同一目标: {group.Key}");
+                        continue;
+                    }
+                    detectedRenames[group.Single().OriginalRel] = group.Key;
+                    matchedNewRels.Add(group.Key);
                 }
             }
 
             // 2. 离线匹配必须在旧项和新项两侧均唯一；重复内容不能推断身份。
-            var ambiguousOldRels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var candidateHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var unmatchedNew = candidateNewRelList.Where(r => !matchedNewRels.Contains(r)).ToList();
             if (unmatchedNew.Count > 0)
