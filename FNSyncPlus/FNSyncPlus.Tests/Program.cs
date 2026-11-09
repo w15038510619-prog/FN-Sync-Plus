@@ -594,12 +594,20 @@ namespace FNSyncPlus.Tests
                 catch (IOException) { staleRejected = true; }
                 Assert(staleRejected, "版本已变化时拒绝过期写入");
                 var secondVersion = await versions.SaveAsync(versionProvider, "version-healthy", new Manifest { SourceRoot = "version-two" }, firstVersion.Id);
+                var historical = await versions.LoadCommittedByIdForWritingAsync(versionProvider, "version-healthy", firstVersion.Id);
+                Assert(historical?.Id == firstVersion.Id && historical.Manifest.SourceRoot == "version-one" &&
+                    (await versions.LoadForWritingAsync(versionProvider, "version-healthy"))?.Id == secondVersion.Id,
+                    "可严格读取已提交的历史版本而不改变最新版本");
                 string versionsDir = Path.Combine(root, "version-healthy", ".fnsync", "manifest-versions");
                 string secondCandidate = Path.Combine(versionsDir, $"candidate-{secondVersion.Id}.json");
                 byte[] goodSecondCandidate = File.ReadAllBytes(secondCandidate);
                 File.WriteAllText(secondCandidate, "{}");
                 loadedVersion = await versions.LoadAsync(versionProvider, "version-healthy");
                 Assert(loadedVersion?.Id == firstVersion.Id, "较新版本损坏时回退到完整旧版本");
+                bool historyWriteRejected = false;
+                try { await versions.LoadCommittedByIdForWritingAsync(versionProvider, "version-healthy", firstVersion.Id); }
+                catch (InvalidDataException) { historyWriteRejected = true; }
+                Assert(historyWriteRejected, "存在损坏提交时拒绝读取用于写入的历史版本");
                 var damagedWarnings = new List<string>();
                 var damagedPackages = await new RestoreEngine(new ManifestManager()).DiscoverBackupPackagesAsync(
                     versionProvider, "version-healthy", warnings: damagedWarnings);
@@ -607,6 +615,16 @@ namespace FNSyncPlus.Tests
                     damagedPackages[0].HasDamagedVersionRecords && damagedWarnings.Count == 1,
                     "恢复发现回退的旧版本时显示损坏记录警告");
                 File.WriteAllBytes(secondCandidate, goodSecondCandidate);
+                string duplicateIdReceipt = Path.Combine(versionsDir, $"commit-{3:D20}-{firstVersion.Id}.json");
+                string firstReceiptPath = Path.Combine(versionsDir, $"commit-{firstVersion.Sequence:D20}-{firstVersion.Id}.json");
+                var duplicateReceipt = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(firstReceiptPath))!.AsObject();
+                duplicateReceipt["Sequence"] = 3;
+                File.WriteAllText(duplicateIdReceipt, duplicateReceipt.ToJsonString());
+                bool duplicateIdRejected = false;
+                try { await versions.LoadCommittedByIdForWritingAsync(versionProvider, "version-healthy", firstVersion.Id); }
+                catch (InvalidDataException) { duplicateIdRejected = true; }
+                File.Delete(duplicateIdReceipt);
+                Assert(duplicateIdRejected, "同一历史版本标识对应多个提交时拒绝选择");
                 string otherId = Guid.NewGuid().ToString("N");
                 File.Copy(Path.Combine(versionsDir, $"candidate-{firstVersion.Id}.json"), Path.Combine(versionsDir, $"candidate-{otherId}.json"));
                 string firstReceipt = Path.Combine(versionsDir, $"commit-{firstVersion.Sequence:D20}-{firstVersion.Id}.json");

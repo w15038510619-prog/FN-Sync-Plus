@@ -158,6 +158,36 @@ public sealed class VersionedManifestStore
         return snapshot;
     }
 
+    /// <summary>
+    /// Reads one committed historical version after rejecting damaged or ambiguous records.
+    /// A caller that will mutate the backup must hold the writer lease throughout validation and mutation.
+    /// </summary>
+    public async Task<Snapshot?> LoadCommittedByIdForWritingAsync(INasStorageProvider provider, string target,
+        string id, CancellationToken token = default)
+    {
+        if (!Guid.TryParseExact(id, "N", out _)) throw new ArgumentException("版本标识无效", nameof(id));
+        var (_, _, hasReceipts, invalidReceipts) = await ScanAsync(provider, target, token).ConfigureAwait(false);
+        if (invalidReceipts) throw new InvalidDataException("存在无效的清单提交，拒绝读取用于写入的历史版本");
+        if (!hasReceipts) return null;
+        string directory = DirectoryPath(target);
+        var entries = await provider.ListEntriesAsync(directory, token).ConfigureAwait(false);
+        var matches = new List<(long Sequence, string Name)>();
+        foreach (var item in entries)
+            if (!item.IsDirectory && TryParseReceiptName(item.Name, out long sequence, out string receiptId) &&
+                string.Equals(receiptId, id, StringComparison.Ordinal)) matches.Add((sequence, item.Name));
+        if (matches.Count == 0) return null;
+        if (matches.Count != 1) throw new InvalidDataException("同一版本标识对应多个提交，拒绝选择");
+        byte[] receiptBytes = await ReadBytesAsync(provider, $"{directory}/{matches[0].Name}", token).ConfigureAwait(false);
+        Receipt? receipt = JsonSerializer.Deserialize<Receipt>(receiptBytes, JsonOptions);
+        if (receipt == null || receipt.Sequence != matches[0].Sequence || receipt.Id != id ||
+            receipt.Sha256?.Length != 64 || !receipt.Sha256.All(Uri.IsHexDigit))
+            throw new InvalidDataException("历史版本提交记录无效");
+        byte[] bytes = await ReadBytesAsync(provider, $"{directory}/{CandidateName(id)}", token).ConfigureAwait(false);
+        if (!string.Equals(Convert.ToHexString(SHA256.HashData(bytes)), receipt.Sha256, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("历史版本清单校验失败");
+        return new Snapshot(ParseManifest(bytes), receipt.Sequence, id);
+    }
+
     public async Task<Snapshot> SaveAsync(INasStorageProvider provider, string target, Manifest manifest,
         string? expectedPreviousId, CancellationToken token = default)
     {
