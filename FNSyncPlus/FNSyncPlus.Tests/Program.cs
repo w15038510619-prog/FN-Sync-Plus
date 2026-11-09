@@ -1200,6 +1200,7 @@ namespace FNSyncPlus.Tests
                 await Task.Delay(200);
                 await TestTaskRemovalWhileRunningAsync(root);
                 await TestTaskRemovalFailureAsync(root);
+                await TestIsolatedVersionedTaskAsync(root);
             }
             finally
             {
@@ -1312,6 +1313,112 @@ namespace FNSyncPlus.Tests
             }
         }
 
+        static async Task TestIsolatedVersionedTaskAsync(string root)
+        {
+            string source = Path.Combine(root, "isolated-version-task-source");
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "sample.txt"), "version one");
+            var provider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+            var settings = AppSettings.CreateInMemory();
+            var task = new SyncTask { TaskName = "隔离版本任务", SourceFolder = source, DestinationFolder = "isolated-version-task-target", ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            string oldDirectory = Environment.CurrentDirectory;
+            try
+            {
+                Environment.CurrentDirectory = root;
+                using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "isolated-version-task-logs")));
+                manager.UseExperimentalVersionedBackup = true;
+                manager.StorageProviderSupplier = () => provider;
+                manager.AddTask(task);
+                TaskCompletionSource completed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                manager.TaskStateChanged += t => { if (t.TaskId == task.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) completed.TrySetResult(); };
+                manager.TriggerSync(task.TaskId);
+                if (await Task.WhenAny(completed.Task, Task.Delay(15000)) != completed.Task)
+                    throw new TimeoutException("隔离版本任务首次备份超时");
+                var versions = new VersionedManifestStore();
+                var first = await versions.LoadAsync(provider, task.DestinationFolder);
+                Assert(task.State == TaskSyncState.Completed && task.DisplayStatus.Contains("隔离试验", StringComparison.Ordinal) &&
+                    first?.Manifest.Files.Count == 1 && first.Manifest.Files[0].Sha256 == HashHelper.ComputeFileSha256(Path.Combine(source, "sample.txt")),
+                    "内存隔离任务首次同步提交版本化清单并明确显示试验状态");
+                File.WriteAllText(Path.Combine(source, "sample.txt"), "version two");
+                completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                for (int attempt = 0; attempt < 150 && !completed.Task.IsCompleted; attempt++)
+                {
+                    manager.TriggerSync(task.TaskId);
+                    await Task.WhenAny(completed.Task, Task.Delay(100));
+                }
+                if (!completed.Task.IsCompleted)
+                    throw new TimeoutException("隔离版本任务增量备份超时");
+                var second = await versions.LoadAsync(provider, task.DestinationFolder);
+                var historical = second?.Manifest.History.Single(h => h.OriginalRel == "sample.txt" && h.Reason == "superseded");
+                string oldDestination = Path.Combine(root, "isolated-version-task-history");
+                bool restored = historical != null && await new RestoreEngine(new ManifestManager()).RunRestoreHistoryFileAsync(provider, task.DestinationFolder, oldDestination, historical);
+                Assert(task.State == TaskSyncState.Completed && second?.Id != first?.Id && restored && File.ReadAllText(Path.Combine(oldDestination, "sample.txt")) == "version one",
+                    "隔离任务增量同步保留可恢复的旧内容");
+
+                await Task.Delay(300);
+                task.ScheduleMode = TaskSyncScheduleMode.RealtimeOnly;
+                task.SettlingDelaySeconds = 1;
+                manager.UpdateTask(task);
+                if (!task.IsWatching) throw new IOException("隔离任务监听器未启动");
+                provider.BlockUploadContains = "/.fnsync/objects/obj-";
+                File.WriteAllText(Path.Combine(source, "sample.txt"), "version three");
+                manager.TriggerSync(task.TaskId);
+                if (await Task.WhenAny(provider.UploadEntered.Task, Task.Delay(10000)) != provider.UploadEntered.Task)
+                    throw new TimeoutException("隔离任务未进入阻塞上传");
+                File.WriteAllText(Path.Combine(source, "late.txt"), "created during sync");
+                await Task.Delay(1600);
+                provider.BlockUploadContains = null;
+                provider.ContinueUpload.TrySetResult();
+                VersionedManifestStore.Snapshot? caughtUp = null;
+                for (int attempt = 0; attempt < 150; attempt++)
+                {
+                    await Task.Delay(100);
+                    caughtUp = await versions.LoadAsync(provider, task.DestinationFolder);
+                    if (caughtUp?.Manifest.Files.Any(f => f.OriginalRel == "late.txt") == true) break;
+                }
+                Assert(caughtUp?.Manifest.Files.Any(f => f.OriginalRel == "late.txt") == true &&
+                    caughtUp.Manifest.Files.Single(f => f.OriginalRel == "sample.txt").Sha256 == HashHelper.ComputeFileSha256(Path.Combine(source, "sample.txt")),
+                    "同步期间发生的文件变化会在工作结束后自动重新扫描");
+                await Task.Delay(300);
+                File.Delete(Path.Combine(source, "late.txt"));
+                VersionedManifestStore.Snapshot? afterDelete = null;
+                for (int attempt = 0; attempt < 150; attempt++)
+                {
+                    await Task.Delay(100);
+                    afterDelete = await versions.LoadAsync(provider, task.DestinationFolder);
+                    if (afterDelete?.Manifest.History.Any(h => h.OriginalRel == "late.txt" && h.Reason == "deleted") == true) break;
+                }
+                Assert(afterDelete?.Manifest.History.Any(h => h.OriginalRel == "late.txt" && h.Reason == "deleted") == true &&
+                    afterDelete.Manifest.Files.All(f => f.OriginalRel != "late.txt"),
+                    "监听到本地删除后自动扫描并在试验清单保留历史");
+
+                string occupiedSource = Path.Combine(root, "isolated-version-occupied-source");
+                Directory.CreateDirectory(occupiedSource);
+                File.WriteAllText(Path.Combine(occupiedSource, "sample.txt"), "new source");
+                string occupied = Path.Combine(root, "isolated-version-occupied-target");
+                Directory.CreateDirectory(occupied);
+                File.WriteAllText(Path.Combine(occupied, "keep.txt"), "existing data");
+                var occupiedTask = new SyncTask { TaskName = "拒绝复用", SourceFolder = occupiedSource, DestinationFolder = "isolated-version-occupied-target", ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+                manager.AddTask(occupiedTask);
+                var occupiedDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                manager.TaskStateChanged += t => { if (t.TaskId == occupiedTask.TaskId && t.State == TaskSyncState.Error) occupiedDone.TrySetResult(); };
+                manager.TriggerSync(occupiedTask.TaskId);
+                if (await Task.WhenAny(occupiedDone.Task, Task.Delay(15000)) != occupiedDone.Task)
+                    throw new TimeoutException("隔离任务目标冲突未结束");
+                Assert(File.ReadAllText(Path.Combine(occupied, "keep.txt")) == "existing data" && !Directory.Exists(Path.Combine(occupied, ".fnsync")),
+                    "新隔离任务遇到已有目录时报错且不写入原内容");
+                await Task.Delay(200);
+            }
+            finally { Environment.CurrentDirectory = oldDirectory; }
+
+            var persistedSettings = AppSettings.CreateForTest(Path.Combine(root, "nonisolated-settings.json"));
+            using var nonisolated = new TaskManager(persistedSettings, new SmbAuthService(), new LogService(Path.Combine(root, "nonisolated-logs")));
+            bool refused = false;
+            try { nonisolated.UseExperimentalVersionedBackup = true; }
+            catch (InvalidOperationException) { refused = true; }
+            Assert(refused, "正式配置无法启用隔离试验备份");
+        }
+
         sealed class FaultInjectingProvider : INasStorageProvider, IExclusiveDirectoryProvider
         {
             private readonly SmbStorageProvider inner;
@@ -1332,6 +1439,7 @@ namespace FNSyncPlus.Tests
             public string? FailItemSuffix { get; set; }
             public string? FailListPath { get; set; }
             public string? BlockUploadSuffix { get; set; }
+            public string? BlockUploadContains { get; set; }
             public bool ThrowOnMissingParent { get; set; }
             public TaskCompletionSource UploadEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
             public TaskCompletionSource ContinueUpload { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1376,7 +1484,8 @@ namespace FNSyncPlus.Tests
             }
             public async Task<StorageOperationResult> UploadFileAsync(string path, Stream stream, long size, DateTime modified, bool overwrite = true, IProgress<long>? progress = null, CancellationToken ct = default)
             {
-                if (BlockUploadSuffix != null && path.EndsWith(BlockUploadSuffix, StringComparison.Ordinal))
+                if ((BlockUploadSuffix != null && path.EndsWith(BlockUploadSuffix, StringComparison.Ordinal)) ||
+                    (BlockUploadContains != null && path.Contains(BlockUploadContains, StringComparison.Ordinal)))
                 {
                     UploadEntered.TrySetResult();
                     await ContinueUpload.Task;

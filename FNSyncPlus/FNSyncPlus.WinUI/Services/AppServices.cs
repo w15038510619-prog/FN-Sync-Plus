@@ -42,6 +42,7 @@ namespace FNSyncPlus.WinUI.Services
             services.AddSingleton(manifestManager);
 
             var taskManager = new TaskManager(settings, longNameEngine, manifestManager, smbService);
+            taskManager.UseExperimentalVersionedBackup = IsIsolatedTestSession;
             services.AddSingleton(taskManager);
 
             var connectionService = new NasConnectionService(smbService, settings, taskManager);

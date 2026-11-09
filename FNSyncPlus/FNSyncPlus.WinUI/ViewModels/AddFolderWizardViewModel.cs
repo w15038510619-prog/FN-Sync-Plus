@@ -701,7 +701,9 @@ namespace FNSyncPlus.WinUI.ViewModels
 
                     try
                     {
-                        var created = await fnProvider.TryCreateDirectoryExclusiveAsync(destSub);
+                        var created = _taskManager.UseExperimentalVersionedBackup
+                            ? (await fnProvider.GetItemAsync(destSub) == null ? ExclusiveDirectoryResult.Created : ExclusiveDirectoryResult.AlreadyExists)
+                            : await fnProvider.TryCreateDirectoryExclusiveAsync(destSub);
                         if (created != ExclusiveDirectoryResult.Created)
                         {
                             item.IsFailed = true;
@@ -719,7 +721,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                     }
 
                     item.FinalTargetUnc = item.FullTargetUnc;
-                    item.StatusText = "✔ 目标就绪，任务已建立";
+                    item.StatusText = _taskManager.UseExperimentalVersionedBackup ? "✔ 隔离试验任务已建立，目标将在同步时创建" : "✔ 目标就绪，任务已建立";
                     item.IsFailed = false;
 
                     var task = new SyncTask

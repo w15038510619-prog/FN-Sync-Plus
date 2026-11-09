@@ -53,6 +53,18 @@ namespace FNSyncPlus.Core.Services
         /// </summary>
         public Func<INasStorageProvider?>? StorageProviderSupplier { get; set; }
 
+        private bool _useExperimentalVersionedBackup;
+        public bool UseExperimentalVersionedBackup
+        {
+            get => _useExperimentalVersionedBackup;
+            set
+            {
+                if (value && !_settings.IsInMemoryOnly)
+                    throw new InvalidOperationException("实验性备份只能用于内存隔离测试会话");
+                _useExperimentalVersionedBackup = value;
+            }
+        }
+
         public IReadOnlyList<SyncTask> Tasks => _settings.Tasks;
 
         public TaskManager(
@@ -94,6 +106,8 @@ namespace FNSyncPlus.Core.Services
         public void AddTask(SyncTask task)
         {
             if (task == null) throw new ArgumentNullException(nameof(task));
+            task.IsExperimentalBackup = UseExperimentalVersionedBackup && task.ProviderType == StorageProviderType.FnOsPersonal;
+            task.RequiresNewExperimentalBackup = task.IsExperimentalBackup;
 
             // 1. 检查本地源是否与已有任务冲突（禁止同源、禁止父子嵌套）
             foreach (var existing in _settings.Tasks)
@@ -483,13 +497,34 @@ namespace FNSyncPlus.Core.Services
 
                 _pendingRenames.TryRemove(task.TaskId, out var renames);
 
-                var report = await syncEngine.RunSyncAsync(
-                    task.SourceFolder, 
-                    task.DestinationFolder, 
-                    provider, 
-                    task.Strategy, 
-                    renames, 
-                    taskToken).ConfigureAwait(false);
+                SyncProgressReport report;
+                if (task.IsExperimentalBackup)
+                {
+                    if (!UseExperimentalVersionedBackup || provider == null)
+                        throw new InvalidOperationException("实验性备份必须使用隔离会话和已连接的飞牛存储");
+                    AppendTaskLog(task, "INFO", "隔离试验：正在准备版本化内容；NAS 活动目录尚不反映文件树。");
+                    var experimental = new ExperimentalVersionedBackup();
+                    var result = task.RequiresNewExperimentalBackup
+                        ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy).ConfigureAwait(false)
+                        : await experimental.RunAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy).ConfigureAwait(false);
+                    task.RequiresNewExperimentalBackup = false;
+                    report = new SyncProgressReport {
+                        State = SyncState.Completed, TotalFiles = result.Snapshot.Manifest.Files.Count,
+                        ScannedFiles = result.Snapshot.Manifest.Files.Count, UploadedFiles = result.UploadedFiles,
+                        UnchangedFiles = result.UnchangedFiles,
+                        LongNameFiles = result.Snapshot.Manifest.Files.Count(f => f.IsLongName)
+                    };
+                }
+                else
+                {
+                    report = await syncEngine.RunSyncAsync(
+                        task.SourceFolder,
+                        task.DestinationFolder,
+                        provider,
+                        task.Strategy,
+                        renames,
+                        taskToken).ConfigureAwait(false);
+                }
 
                 task.LastSyncTime = DateTime.Now;
                 task.LastScannedFiles = report.TotalFiles;
@@ -542,8 +577,8 @@ namespace FNSyncPlus.Core.Services
                         task.NextScheduledTime = DateTime.Now.AddMinutes(task.IntervalMinutes);
                     }
                     task.CurrentProgress = 100.0;
-                    task.CurrentFile = "所有文件均已同步更新至最新状态";
-                    task.LastSyncStatus = "同步成功完成 (已最新)";
+                    task.CurrentFile = task.IsExperimentalBackup ? "隔离试验清单已提交；物理活动目录尚未实现" : "所有文件均已同步更新至最新状态";
+                    task.LastSyncStatus = task.IsExperimentalBackup ? "隔离试验版本已提交" : "同步成功完成 (已最新)";
                 }
 
                 _settings.Save();
@@ -663,16 +698,32 @@ namespace FNSyncPlus.Core.Services
                         NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size
                     };
 
-                    var debounceTimer = new Timer(_ =>
+                    Timer? debounceTimer = null;
+                    debounceTimer = new Timer(_ =>
                     {
-                        if (task.Enabled && !task.IsRunning)
+                        lock (_taskLifecycleLock)
                         {
-                            AppendTaskLog(task, "INFO", "检测到本地文件变动且写入已平稳，正在触发自动增量同步...");
-                            TriggerSync(task.TaskId);
+                            if (!task.Enabled || task.State == TaskSyncState.Paused ||
+                                task.State == TaskSyncState.Removing || _removingTasks.Contains(task.TaskId)) return;
+                            if (_runningCompletions.ContainsKey(task.TaskId))
+                            {
+                                // A change during a running scan must trigger another scan after it ends.
+                                try { debounceTimer?.Change(settlingMs, Timeout.Infinite); }
+                                catch (ObjectDisposedException) { }
+                            }
+                            else
+                            {
+                                AppendTaskLog(task, "INFO", "检测到本地文件变动且写入已平稳，正在触发自动增量同步...");
+                                TriggerSync(task.TaskId);
+                            }
                         }
                     }, null, Timeout.Infinite, Timeout.Infinite);
 
-                    Action queueEvent = () => debounceTimer.Change(settlingMs, Timeout.Infinite);
+                    Action queueEvent = () =>
+                    {
+                        try { debounceTimer.Change(settlingMs, Timeout.Infinite); }
+                        catch (ObjectDisposedException) { }
+                    };
 
                     watcher.Changed += (s, e) =>
                     {
@@ -684,6 +735,13 @@ namespace FNSyncPlus.Core.Services
                     watcher.Created += (s, e) =>
                     {
                         task.LastDetectedChange = $"新增: {e.Name}";
+                        task.QueuedChangesCount++;
+                        TaskStateChanged?.Invoke(task);
+                        queueEvent();
+                    };
+                    watcher.Deleted += (s, e) =>
+                    {
+                        task.LastDetectedChange = $"删除: {e.Name}";
                         task.QueuedChangesCount++;
                         TaskStateChanged?.Invoke(task);
                         queueEvent();

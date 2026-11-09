@@ -171,6 +171,12 @@ namespace FNSyncPlus.Core.Models
         [JsonIgnore]
         public bool IsPaused => State == TaskSyncState.Paused;
 
+        [JsonIgnore]
+        public bool IsExperimentalBackup { get; internal set; }
+
+        [JsonIgnore]
+        public bool RequiresNewExperimentalBackup { get; internal set; }
+
         /// <summary>
         /// 自动化状态友好摘要（展示调度模式、监听状态、下次检查时间与排队情况）
         /// 例如：“实时监听中 · 每 5 分钟检查 · 下次 14:00 · 待上传 1 个文件”
@@ -236,7 +242,7 @@ namespace FNSyncPlus.Core.Models
             TaskSyncState.Syncing => $"正在同步备份 ({CurrentProgress:F0}%)...",
             TaskSyncState.Paused => "已暂停",
             TaskSyncState.OfflineWaiting => "NAS离线等待恢复",
-            TaskSyncState.Completed => "已就绪 (已最新)",
+            TaskSyncState.Completed => IsExperimentalBackup ? "隔离试验版本已提交" : "已就绪 (已最新)",
             TaskSyncState.Error => !string.IsNullOrEmpty(LastSyncStatus) && LastSyncStatus.Contains("失败")
                 ? LastSyncStatus
                 : (string.IsNullOrEmpty(LastError) ? (string.IsNullOrEmpty(LastSyncStatus) ? "同步出错" : LastSyncStatus) : $"出错: {LastError}"),
