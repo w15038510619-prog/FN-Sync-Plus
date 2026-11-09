@@ -567,11 +567,14 @@ namespace FNSyncPlus.Tests
                 Assert(failedBatch && retainedBatch?.Id == editedBatch.Snapshot.Id && retainedReport.RestoredFiles == 2 &&
                     File.ReadAllText(Path.Combine(failedBatchRestore, "new.txt")) == "new content", "增量对象损坏时保留上一版本及可恢复内容");
                 File.Delete(batchExisting);
+                string unrelatedNew = Path.Combine(batchSource, "unrelated-new.txt");
+                File.WriteAllText(unrelatedNew, "different unrelated content");
                 bool missingBatchRejected = false;
                 try { await versionedBackup.RunAsync(versionProvider, batchSource, batchFixture.folder); }
                 catch (InvalidDataException) { missingBatchRejected = true; }
                 Assert(missingBatchRejected && (await versions.LoadAsync(versionProvider, batchFixture.folder))?.Id == editedBatch.Snapshot.Id,
-                    "实验增量遇到删除或重命名时拒绝提交");
+                    "无法确认新增与消失文件关系时拒绝提交");
+                File.Delete(unrelatedNew);
                 File.WriteAllText(batchExisting, "edited active");
                 using var batchCancellation = new CancellationTokenSource();
                 versionProvider.AfterObjectUpload = batchCancellation.Cancel;
@@ -618,6 +621,133 @@ namespace FNSyncPlus.Tests
                 catch (InvalidDataException) { damagedHistoryRejected = true; }
                 Assert(damagedHistoryRejected && (await versions.LoadAsync(versionProvider, damagedHistoryFixture.folder))?.Id == damagedHistoryBase.Id,
                     "已有历史对象损坏时拒绝提交新版本");
+                var versionRenameFixture = await MakeLegacyAsync("versioned-rename", 4);
+                var versionRenameBase = await migration.MigrateAsync(versionProvider, versionRenameFixture.folder);
+                string renameVersionSource = Path.Combine(root, "versioned-rename-source");
+                Directory.CreateDirectory(renameVersionSource);
+                File.WriteAllText(Path.Combine(renameVersionSource, "renamed.txt"), "legacy active");
+                var versionRenameResult = await versionedBackup.RunAsync(versionProvider, renameVersionSource, versionRenameFixture.folder);
+                string versionRenameCurrent = Path.Combine(root, "versioned-rename-current");
+                string versionRenameHistory = Path.Combine(root, "versioned-rename-history");
+                var renameCurrentReport = await historyEngine.RunRestoreVersionedAsync(versionProvider, versionRenameFixture.folder, versionRenameCurrent);
+                var renameHistoryEntry = versionRenameResult.Snapshot.Manifest.History.Last(h => h.Reason == "renamed");
+                bool renameHistoryRestored = await historyEngine.RunRestoreHistoryFileAsync(versionProvider, versionRenameFixture.folder, versionRenameHistory, renameHistoryEntry);
+                Assert(versionRenameResult.RenamedFiles == 1 && versionRenameResult.UploadedFiles == 0 &&
+                    versionRenameResult.Snapshot.Manifest.Files.Single().OriginalRel == "renamed.txt" &&
+                    versionRenameResult.Snapshot.Manifest.Files.Single().StoredRel == versionRenameBase.Manifest.Files.Single().StoredRel &&
+                    renameCurrentReport.RestoredFiles == 1 && renameHistoryRestored &&
+                    File.ReadAllText(Path.Combine(versionRenameCurrent, "renamed.txt")) == "legacy active" &&
+                    File.ReadAllText(Path.Combine(versionRenameHistory, longOriginal)) == "legacy active",
+                    "唯一重命名复用已验证对象并可恢复新旧名称");
+                var versionDeleteFixture = await MakeLegacyAsync("versioned-delete", 4);
+                await migration.MigrateAsync(versionProvider, versionDeleteFixture.folder);
+                string deleteSource = Path.Combine(root, "versioned-delete-source");
+                Directory.CreateDirectory(deleteSource);
+                var deleteResult = await versionedBackup.RunAsync(versionProvider, deleteSource, versionDeleteFixture.folder);
+                var deleteHistory = deleteResult.Snapshot.Manifest.History.Last(h => h.Reason == "deleted");
+                string deleteRestore = Path.Combine(root, "versioned-delete-history");
+                bool deletedRestored = await historyEngine.RunRestoreHistoryFileAsync(versionProvider, versionDeleteFixture.folder, deleteRestore, deleteHistory);
+                Assert(deleteResult.DeletedFiles == 1 && deleteResult.Snapshot.Manifest.Files.Count == 0 && deletedRestored &&
+                    File.ReadAllText(Path.Combine(deleteRestore, longOriginal)) == "legacy active" && File.Exists(Path.Combine(root, versionDeleteFixture.folder, "current.txt")),
+                    "智能模式移除活动记录时保留可恢复历史对象");
+                var archiveFixture = await MakeLegacyAsync("versioned-archive", 4);
+                await migration.MigrateAsync(versionProvider, archiveFixture.folder);
+                string archiveSource = Path.Combine(root, "versioned-archive-source");
+                Directory.CreateDirectory(archiveSource);
+                var archiveResult = await versionedBackup.RunAsync(versionProvider, archiveSource, archiveFixture.folder, strategy: BackupStrategy.Archive);
+                string archiveRestore = Path.Combine(root, "versioned-archive-restore");
+                var archiveReport = await historyEngine.RunRestoreVersionedAsync(versionProvider, archiveFixture.folder, archiveRestore);
+                Assert(archiveResult.DeletedFiles == 0 && archiveResult.Snapshot.Manifest.Files.Count == 1 && archiveReport.RestoredFiles == 1 &&
+                    Directory.Exists(Path.Combine(archiveRestore, "空目录")) && File.ReadAllText(Path.Combine(archiveRestore, longOriginal)) == "legacy active",
+                    "归档模式保留消失的文件和空目录");
+                var pathConflictFixture = await MakeLegacyAsync("versioned-path-conflict", 4);
+                var pathConflictBase = await migration.MigrateAsync(versionProvider, pathConflictFixture.folder);
+                string pathConflictSource = Path.Combine(root, "versioned-path-conflict-source");
+                Directory.CreateDirectory(pathConflictSource);
+                File.WriteAllText(Path.Combine(pathConflictSource, longOriginal), "legacy active");
+                File.WriteAllText(Path.Combine(pathConflictSource, "空目录"), "this is now a file");
+                bool pathConflictRejected = false;
+                try { await versionedBackup.RunAsync(versionProvider, pathConflictSource, pathConflictFixture.folder, strategy: BackupStrategy.Archive); }
+                catch (InvalidDataException) { pathConflictRejected = true; }
+                Assert(pathConflictRejected && (await versions.LoadAsync(versionProvider, pathConflictFixture.folder))?.Id == pathConflictBase.Id,
+                    "归档旧目录与新文件同名时不提交无法恢复的清单");
+                var ambiguousVersionFixture = await MakeLegacyAsync("versioned-ambiguous", 4);
+                var ambiguousVersionBase = await migration.MigrateAsync(versionProvider, ambiguousVersionFixture.folder);
+                string ambiguousVersionSource = Path.Combine(root, "versioned-ambiguous-source");
+                Directory.CreateDirectory(ambiguousVersionSource);
+                File.WriteAllText(Path.Combine(ambiguousVersionSource, "new-a.txt"), "legacy active");
+                File.WriteAllText(Path.Combine(ambiguousVersionSource, "new-b.txt"), "legacy active");
+                bool versionAmbiguityRejected = false;
+                try { await versionedBackup.RunAsync(versionProvider, ambiguousVersionSource, ambiguousVersionFixture.folder); }
+                catch (InvalidDataException) { versionAmbiguityRejected = true; }
+                Assert(versionAmbiguityRejected && (await versions.LoadAsync(versionProvider, ambiguousVersionFixture.folder))?.Id == ambiguousVersionBase.Id,
+                    "版本化同步拒绝多个同内容重命名候选");
+                var existingDuplicateFixture = await MakeLegacyAsync("versioned-existing-duplicate", 4);
+                var existingDuplicateManifest = await manifestManager.LoadManifestAsync(versionProvider, existingDuplicateFixture.folder);
+                string existingDuplicatePath = Path.Combine(root, existingDuplicateFixture.folder, "duplicate.txt");
+                File.WriteAllText(existingDuplicatePath, "legacy active");
+                existingDuplicateManifest.Files.Add(new ManifestFileEntry {
+                    OriginalRel = "duplicate.txt", StoredRel = "duplicate.txt", Size = new FileInfo(existingDuplicatePath).Length,
+                    Sha256 = HashHelper.ComputeFileSha256(existingDuplicatePath)
+                });
+                await manifestManager.SaveManifestAtomicAsync(versionProvider, existingDuplicateFixture.folder, existingDuplicateManifest);
+                var existingDuplicateBase = await migration.MigrateAsync(versionProvider, existingDuplicateFixture.folder);
+                string existingDuplicateSource = Path.Combine(root, "versioned-existing-duplicate-source");
+                Directory.CreateDirectory(existingDuplicateSource);
+                File.WriteAllText(Path.Combine(existingDuplicateSource, "duplicate.txt"), "legacy active");
+                File.WriteAllText(Path.Combine(existingDuplicateSource, "new.txt"), "legacy active");
+                bool existingDuplicateRejected = false;
+                try { await versionedBackup.RunAsync(versionProvider, existingDuplicateSource, existingDuplicateFixture.folder); }
+                catch (InvalidDataException) { existingDuplicateRejected = true; }
+                Assert(existingDuplicateRejected && (await versions.LoadAsync(versionProvider, existingDuplicateFixture.folder))?.Id == existingDuplicateBase.Id,
+                    "已有同内容文件仍存在时不猜测新文件的重命名来源");
+                async Task<bool> TestVersionedEmptyRenameAsync(bool duplicateOld)
+                {
+                    string folder = duplicateOld ? "versioned-empty-duplicate" : "versioned-empty-unique";
+                    string targetDirectory = Path.Combine(root, folder);
+                    Directory.CreateDirectory(targetDirectory);
+                    var entries = new List<ManifestFileEntry>();
+                    foreach (string fileName in duplicateOld ? new[] { "old-a.txt", "old-b.txt" } : new[] { "old-a.txt" })
+                    {
+                        string path = Path.Combine(targetDirectory, fileName);
+                        File.WriteAllBytes(path, Array.Empty<byte>());
+                        entries.Add(new ManifestFileEntry { OriginalRel = fileName, StoredRel = fileName, Size = 0, Sha256 = HashHelper.ComputeFileSha256(path) });
+                    }
+                    await manifestManager.SaveManifestAtomicAsync(versionProvider, folder, new Manifest { Files = entries });
+                    var before = await migration.MigrateAsync(versionProvider, folder);
+                    string source = Path.Combine(root, folder + "-source");
+                    Directory.CreateDirectory(source);
+                    File.WriteAllBytes(Path.Combine(source, "new.txt"), Array.Empty<byte>());
+                    try
+                    {
+                        var result = await versionedBackup.RunAsync(versionProvider, source, folder);
+                        return !duplicateOld && result.RenamedFiles == 1 && result.Snapshot.Manifest.Files.Single().OriginalRel == "new.txt" &&
+                            result.Snapshot.Manifest.History.Any(h => h.OriginalRel == "old-a.txt" && h.Reason == "renamed");
+                    }
+                    catch (InvalidDataException)
+                    {
+                        return duplicateOld && (await versions.LoadAsync(versionProvider, folder))?.Id == before.Id;
+                    }
+                }
+                Assert(await TestVersionedEmptyRenameAsync(false), "唯一零字节文件重命名可识别并保留历史");
+                Assert(await TestVersionedEmptyRenameAsync(true), "多个零字节文件不能唯一匹配时保留原版本");
+                var caseFixture = await MakeLegacyAsync("versioned-case-rename", 4);
+                var caseLegacy = await manifestManager.LoadManifestAsync(versionProvider, caseFixture.folder);
+                caseLegacy.Files.Single().OriginalRel = "case.txt";
+                await manifestManager.SaveManifestAtomicAsync(versionProvider, caseFixture.folder, caseLegacy);
+                await migration.MigrateAsync(versionProvider, caseFixture.folder);
+                string caseSource = Path.Combine(root, "versioned-case-source");
+                Directory.CreateDirectory(caseSource);
+                File.WriteAllText(Path.Combine(caseSource, "CASE.txt"), "legacy active");
+                var caseResult = await versionedBackup.RunAsync(versionProvider, caseSource, caseFixture.folder);
+                Assert(caseResult.RenamedFiles == 1 && caseResult.Snapshot.Manifest.Files.Single().OriginalRel == "CASE.txt" &&
+                    caseResult.Snapshot.Manifest.History.Any(h => h.OriginalRel == "case.txt" && h.Reason == "renamed"),
+                    "仅大小写变化的名称保留新名称及旧名称历史");
+                bool mirrorRejected = false;
+                try { await versionedBackup.RunAsync(versionProvider, archiveSource, archiveFixture.folder, strategy: BackupStrategy.Mirror); }
+                catch (NotSupportedException) { mirrorRejected = true; }
+                Assert(mirrorRejected && (await versions.LoadAsync(versionProvider, archiveFixture.folder))?.Id == archiveResult.Snapshot.Id,
+                    "实验同步显式拒绝未实现的镜像删除");
                 using var cancelRestore = new CancellationTokenSource();
                 versionProvider.AfterObjectOpen = cancelRestore.Cancel;
                 string canceledRestorePath = Path.Combine(root, "migration-canceled-restore");
