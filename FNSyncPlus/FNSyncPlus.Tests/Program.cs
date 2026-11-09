@@ -397,6 +397,16 @@ namespace FNSyncPlus.Tests
                         catch (ArgumentException) { candidateRejected++; }
                     }
                     Assert(candidateRejected == 5, "候选服务端复制在联网前拒绝越界、错误目录和无效哈希");
+                    int publicationRejected = 0;
+                    foreach (var pair in new[] { ("/backup", candidateRoot),
+                        ("backup", "other/.fnsync/projections/candidate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                        ("backup", "backup/.fnsync/projections/candidate-not-a-guid"),
+                        ("backup", "backup/../outside") })
+                    {
+                        try { await moveProvider.MoveCandidateDirectoryAsync(pair.Item1, pair.Item2); }
+                        catch (ArgumentException) { publicationRejected++; }
+                    }
+                    Assert(publicationRejected == 4, "候选目录发布在联网前拒绝越界或错误目录");
                 }
                 var versionProvider = new FaultInjectingProvider(root);
                 var versions = new VersionedManifestStore();
@@ -1482,6 +1492,7 @@ namespace FNSyncPlus.Tests
                 await TestDisconnectLockAsync(root);
                 await TestInitialOfflineRetryAsync(root);
                 await TestTestLabIsolationAsync(root);
+                await TestFirstPhysicalProjectionAsync(root);
             }
             finally
             {
@@ -1942,6 +1953,63 @@ namespace FNSyncPlus.Tests
                 "首次连接时网络不可用会安排重试，主动断开可取消");
         }
 
+        static async Task TestFirstPhysicalProjectionAsync(string root)
+        {
+            string source = Path.Combine(root, "projection-publish-source");
+            Directory.CreateDirectory(Path.Combine(source, "empty"));
+            File.WriteAllText(Path.Combine(source, "file.txt"), "first version");
+            var provider = new FaultInjectingProvider(root);
+            var created = await new ExperimentalVersionedBackup().CreateNewAsync(provider, source, "projection-publish");
+            var candidate = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, "projection-publish");
+            var stale = candidate;
+            created = await new ExperimentalVersionedBackup().RunAsync(provider, source, "projection-publish");
+            bool staleRejected = false;
+            try { await new ExperimentalFirstProjection().PublishAsync(provider, "projection-publish", stale); }
+            catch (InvalidDataException) { staleRejected = true; }
+            Assert(staleRejected && !Directory.Exists(Path.Combine(root, "projection-publish", "current")),
+                "首次发布拒绝过期版本的候选目录");
+            candidate = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, "projection-publish");
+            string candidatePath = Path.Combine(root, candidate.CandidateRoot.Replace('/', Path.DirectorySeparatorChar));
+            string receiptPath = Path.Combine(Path.GetDirectoryName(candidatePath)!, "receipt.json");
+            byte[] validReceipt = await File.ReadAllBytesAsync(receiptPath);
+            await File.WriteAllTextAsync(receiptPath, "corrupted");
+            bool receiptRejected = false;
+            try { await new ExperimentalFirstProjection().PublishAsync(provider, "projection-publish", candidate); }
+            catch (InvalidDataException) { receiptRejected = true; }
+            await File.WriteAllBytesAsync(receiptPath, validReceipt);
+            Assert(receiptRejected && !Directory.Exists(Path.Combine(root, "projection-publish", "current")),
+                "首次发布拒绝损坏的候选记录");
+            string extra = Path.Combine(candidatePath, "unexpected.txt");
+            File.WriteAllText(extra, "unexpected");
+            bool extraRejected = false;
+            try { await new ExperimentalFirstProjection().PublishAsync(provider, "projection-publish", candidate); }
+            catch (InvalidDataException) { extraRejected = true; }
+            Assert(extraRejected && !Directory.Exists(Path.Combine(root, "projection-publish", "current")) && File.Exists(extra),
+                "首次发布拒绝含额外文件的候选目录并保留原数据");
+            File.Delete(extra);
+            var published = await new ExperimentalFirstProjection().PublishAsync(provider, "projection-publish", candidate);
+            string current = Path.Combine(root, "projection-publish", "current");
+            Assert(published.VersionId == created.Snapshot.Id && File.ReadAllText(Path.Combine(current, "file.txt")) == "first version" &&
+                Directory.Exists(Path.Combine(current, "empty")) && !Directory.Exists(candidatePath) &&
+                File.Exists(Path.Combine(root, published.JournalDirectory.Replace('/', Path.DirectorySeparatorChar), "committed.json")),
+                "首次发布前后校验物理文件树并记录完成");
+            bool existingRejected = false;
+            try { await new ExperimentalFirstProjection().PublishAsync(provider, "projection-publish", candidate); }
+            catch (IOException) { existingRejected = true; }
+            Assert(existingRejected && File.ReadAllText(Path.Combine(current, "file.txt")) == "first version",
+                "首次发布拒绝覆盖已有当前目录");
+            var uncertainProvider = new FaultInjectingProvider(root) { FailAfterCandidateMove = true };
+            var old = await new ExperimentalVersionedBackup().CreateNewAsync(uncertainProvider, source, "projection-uncertain");
+            var uncertainCandidate = await new ExperimentalPhysicalSnapshot().PrepareAsync(uncertainProvider, "projection-uncertain");
+            bool uncertain = false;
+            try { await new ExperimentalFirstProjection().PublishAsync(uncertainProvider, "projection-uncertain", uncertainCandidate); }
+            catch (IOException) { uncertain = true; }
+            var competing = await ExperimentalRemoteLease.TryAcquireAsync(uncertainProvider, "projection-uncertain");
+            Assert(uncertain && competing == null && (await new VersionedManifestStore().LoadForWritingAsync(uncertainProvider, "projection-uncertain"))?.Id == old.Snapshot.Id &&
+                File.ReadAllText(Path.Combine(root, "projection-uncertain", "current", "file.txt")) == "first version",
+                "目录移动后响应丢失时保留锁，已提交备份仍可读取");
+        }
+
         sealed class ImmediateProgress<T> : IProgress<T>
         {
             private readonly Action<T> callback;
@@ -1997,7 +2065,7 @@ namespace FNSyncPlus.Tests
             Assert(!await FnOsPersonalSpacePoc.RunAsync(), "旧版未隔离的真实 NAS PoC 已禁用");
         }
 
-        sealed class FaultInjectingProvider : INasStorageProvider, IExclusiveDirectoryProvider, IExperimentalContentReuseProvider
+        sealed class FaultInjectingProvider : INasStorageProvider, IExclusiveDirectoryProvider, IExperimentalContentReuseProvider, IExperimentalCandidateDirectoryMover
         {
             private readonly SmbStorageProvider inner;
             private readonly string rootPath;
@@ -2012,6 +2080,7 @@ namespace FNSyncPlus.Tests
             public string? FailReadContains { get; set; }
             public bool CorruptObjectUpload { get; set; }
             public bool CorruptProjectionUpload { get; set; }
+            public bool FailAfterCandidateMove { get; set; }
             public bool FailReuseCopy { get; set; }
             public bool FailReuseCopyAfter { get; set; }
             public Action? AfterObjectUpload { get; set; }
@@ -2049,6 +2118,22 @@ namespace FNSyncPlus.Tests
                     Directory.CreateDirectory(directory);
                     return Task.FromResult(ExclusiveDirectoryResult.Created);
                 }
+            }
+            public Task<VerifiedMoveOutcome> MoveCandidateDirectoryAsync(string backupRoot, string candidateDirectory, CancellationToken ct = default)
+            {
+                ct.ThrowIfCancellationRequested();
+                string root = PathHelper.NormalizeRelPath(backupRoot);
+                string candidate = PathHelper.NormalizeRelPath(candidateDirectory);
+                string prefix = $"{root}/.fnsync/projections/candidate-";
+                if (!PathHelper.IsSafeRelativePath(root) || !PathHelper.IsSafeRelativePath(candidate) ||
+                    !candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !Guid.TryParseExact(candidate[prefix.Length..], "N", out _))
+                    throw new ArgumentException("无效的测试候选目录");
+                string source = Path.Combine(rootPath, candidate.Replace('/', Path.DirectorySeparatorChar), "current");
+                string destination = Path.Combine(rootPath, root.Replace('/', Path.DirectorySeparatorChar), "current");
+                if (Directory.Exists(destination) || File.Exists(destination)) return Task.FromResult(VerifiedMoveOutcome.DestinationExists);
+                Directory.Move(source, destination);
+                if (FailAfterCandidateMove) throw new IOException("模拟移动后响应丢失");
+                return Task.FromResult(VerifiedMoveOutcome.Moved);
             }
             public async Task<string?> CopyIntoNewObjectAsync(string sourcePath, string backupRoot, string expectedSha256, long expectedSize, CancellationToken ct = default)
             {

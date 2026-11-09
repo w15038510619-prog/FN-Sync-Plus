@@ -16,7 +16,7 @@ namespace FNSyncPlus.Core.Storage
     /// 飞牛 fnOS 账号原生个人空间存储提供程序 (「我的文件」)
     /// 严格遵循官方 API 权限模型，直接对接个人空间，杜绝团队共享混用与伪造用户名路径
     /// </summary>
-    public class FnOsPersonalStorageProvider : INasStorageProvider, IExclusiveDirectoryProvider, IExperimentalFileMoveProvider, IExperimentalContentReuseProvider
+    public class FnOsPersonalStorageProvider : INasStorageProvider, IExclusiveDirectoryProvider, IExperimentalFileMoveProvider, IExperimentalContentReuseProvider, IExperimentalCandidateDirectoryMover
     {
         private readonly FnOsApiClient _apiClient;
         private string? _personalRootPath; // 例如 vol1/1006
@@ -549,6 +549,47 @@ namespace FNSyncPlus.Core.Storage
             {
                 throw new RemoteMoveUncertainException("移动请求已发送或结果不明，请检查源和目标，不能自动重试", ex);
             }
+        }
+
+        /// <summary>Moves only a candidate's current directory into an empty backup root.</summary>
+        public async Task<VerifiedMoveOutcome> MoveCandidateDirectoryAsync(string backupRoot, string candidateDirectory,
+            CancellationToken ct = default)
+        {
+            EnsureAuthenticated();
+            if (!PathHelper.IsSafeRelativePath(backupRoot) || !PathHelper.IsSafeRelativePath(candidateDirectory))
+                throw new ArgumentException("候选发布路径必须是安全的相对路径");
+            string root = NormalizeRelativePath(backupRoot);
+            string candidate = NormalizeRelativePath(candidateDirectory);
+            string prefix = $"{root}/.fnsync/projections/candidate-";
+            if (!PathHelper.IsSafeRelativePath(root) || !candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                !Guid.TryParseExact(candidate[prefix.Length..], "N", out _))
+                throw new ArgumentException("候选目录必须位于备份的专用候选目录下");
+            string source = $"{candidate}/current";
+            string destination = $"{root}/current";
+            var sourceItem = await GetItemAsync(source, ct).ConfigureAwait(false);
+            if (sourceItem == null || !sourceItem.IsDirectory) throw new DirectoryNotFoundException("候选文件树不存在");
+            if (await GetItemAsync(destination, ct).ConfigureAwait(false) != null) return VerifiedMoveOutcome.DestinationExists;
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                string json = await _apiClient.SendSignedTaskRpcAsync("file.mv", new Dictionary<string, object?> {
+                    ["files"] = new[] { "/" + CombineWithPersonalRoot(source) },
+                    ["pathTo"] = "/" + CombineWithPersonalRoot(root), ["overwrite"] = "skip",
+                    ["details"] = new { name = "current", count = 1 }
+                }, TimeSpan.FromMinutes(2), ct).ConfigureAwait(false);
+                using var response = JsonDocument.Parse(json);
+                bool succeeded = response.RootElement.TryGetProperty("result", out var value) &&
+                    value.ValueKind == JsonValueKind.String && value.GetString() == "succ";
+                if (response.RootElement.TryGetProperty("errno", out var error) && error.ValueKind == JsonValueKind.Number &&
+                    error.TryGetInt32(out int errorCode) && errorCode != 0) succeeded = false;
+                var oldItem = await GetItemAsync(source, ct).ConfigureAwait(false);
+                var newItem = await GetItemAsync(destination, ct).ConfigureAwait(false);
+                if (succeeded && oldItem == null && newItem?.IsDirectory == true) return VerifiedMoveOutcome.Moved;
+                if (oldItem?.IsDirectory == true && newItem == null) return VerifiedMoveOutcome.NotMoved;
+                throw new RemoteMoveUncertainException("候选目录移动结果不确定，请检查后再处理");
+            }
+            catch (RemoteMoveUncertainException) { throw; }
+            catch (Exception ex) { throw new RemoteMoveUncertainException("候选目录移动结果不确定，不能自动重试", ex); }
         }
 
         /// <summary>

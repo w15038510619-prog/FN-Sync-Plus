@@ -39,6 +39,13 @@ namespace FNSyncPlus.Core.Storage
             string expectedSha256, long expectedSize, CancellationToken ct = default);
     }
 
+    /// <summary>Experimental first publication only; a sent move may have an uncertain outcome.</summary>
+    public interface IExperimentalCandidateDirectoryMover
+    {
+        Task<VerifiedMoveOutcome> MoveCandidateDirectoryAsync(string backupRoot, string candidateDirectory,
+            CancellationToken ct = default);
+    }
+
     /// <summary>Experimental server-side copy into a new, independently verified object.</summary>
     public interface IExperimentalContentReuseProvider
     {
