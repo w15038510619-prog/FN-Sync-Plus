@@ -25,6 +25,9 @@ namespace FNSyncPlus.Core.Services
 
         private readonly ConcurrentQueue<string> _taskQueue = new();
         private readonly ConcurrentDictionary<string, CancellationTokenSource> _runningCts = new();
+        private readonly object _taskLifecycleLock = new();
+        private readonly Dictionary<string, TaskCompletionSource> _runningCompletions = new();
+        private readonly HashSet<string> _removingTasks = new();
         private readonly ConcurrentDictionary<string, FileSystemWatcher> _watchers = new();
         private readonly ConcurrentDictionary<string, Timer> _watcherDebounceTimers = new();
         private readonly ConcurrentDictionary<string, Timer> _intervalTimers = new();
@@ -107,10 +110,15 @@ namespace FNSyncPlus.Core.Services
                 }
             }
 
-            _settings.Tasks.Add(task);
-            _settings.Save();
-
-            ApplyTaskAutomation(task);
+            lock (_taskLifecycleLock)
+            {
+                lock (_settings.Tasks)
+                {
+                    _settings.Tasks.Add(task);
+                    _settings.Save();
+                }
+                ApplyTaskAutomation(task);
+            }
             TaskListChanged?.Invoke();
             AppendTaskLog(task, "INFO", $"任务【{task.TaskName}】已创建成功 (源: {task.SourceFolder} -> 目标: {task.DestinationFolder})");
         }
@@ -123,62 +131,72 @@ namespace FNSyncPlus.Core.Services
             if (string.IsNullOrWhiteSpace(taskId)) return false;
 
             SyncTask? task;
-            lock (_settings.Tasks)
+            CancellationTokenSource? cts;
+            Task? completion;
+            lock (_taskLifecycleLock)
             {
                 task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+                if (task == null || !_removingTasks.Add(taskId)) return false;
+                task.State = TaskSyncState.Removing;
+                task.LastSyncStatus = "正在停止同步并移除任务配置...";
+                _runningCts.TryGetValue(taskId, out cts);
+                completion = _runningCompletions.TryGetValue(taskId, out var done) ? done.Task : null;
             }
-            if (task == null) return false;
-
-            // 1. 标记状态为正在安全移除，通知界面
-            task.State = TaskSyncState.Removing;
-            task.LastSyncStatus = "正在移除任务配置...";
-            TaskStateChanged?.Invoke(task);
-
-            // 2. 停止文件系统监听与定时器
-            StopTaskAutomation(taskId);
-
-            // 3. 安全停止正在运行的同步进程（等待工作线程优雅退出，杜绝提前 Dispose CTS 引发的崩溃）
-            if (_runningCts.TryRemove(taskId, out var cts))
+            bool releaseRemovalGate = true;
+            try
             {
-                try
+                TaskStateChanged?.Invoke(task);
+                StopTaskAutomation(taskId);
+                if (cts != null)
                 {
-                    cts.Cancel();
-                    for (int i = 0; i < 20; i++)
+                    try { cts.Cancel(); }
+                    catch (ObjectDisposedException) { }
+                }
+                if (completion != null && await Task.WhenAny(completion, Task.Delay(TimeSpan.FromSeconds(10))).ConfigureAwait(false) != completion)
+                {
+                    task.State = TaskSyncState.Paused;
+                    task.LastSyncStatus = "同步尚未停止，任务配置已保留";
+                    task.LastError = "等待同步停止超时，请稍后重试移除任务";
+                    TaskStateChanged?.Invoke(task);
+                    releaseRemovalGate = false;
+                    _ = completion.ContinueWith(_ =>
                     {
-                        if (!task.IsRunning) break;
-                        await Task.Delay(100).ConfigureAwait(false);
+                        lock (_taskLifecycleLock)
+                        {
+                            task.State = TaskSyncState.Paused;
+                            task.LastSyncStatus = "同步已停止，任务配置已保留";
+                            _removingTasks.Remove(taskId);
+                        }
+                        TaskStateChanged?.Invoke(task);
+                    }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+                    return false;
+                }
+
+                lock (_taskLifecycleLock)
+                {
+                    lock (_settings.Tasks)
+                    {
+                        int index = _settings.Tasks.IndexOf(task);
+                        if (index < 0) return false;
+                        _settings.Tasks.RemoveAt(index);
+                        try { _settings.Save(); }
+                        catch
+                        {
+                            _settings.Tasks.Insert(index, task);
+                            task.State = TaskSyncState.Paused;
+                            task.LastSyncStatus = "保存失败，任务配置已保留";
+                            throw;
+                        }
                     }
                 }
-                catch { }
-                finally
-                {
-                    _ = Task.Delay(3000).ContinueWith(_ =>
-                    {
-                        try { cts.Dispose(); } catch { }
-                    });
-                }
-            }
-
-            // 4. 清除任务运行日志
-            ClearTaskLogs(taskId);
-
-            // 5. 从本地配置中移除并持久化（绝对不删除本地源文件或 NAS 备份文件）
-            bool removed;
-            lock (_settings.Tasks)
-            {
-                removed = _settings.Tasks.Remove(task);
-                if (removed)
-                {
-                    _settings.Save();
-                }
-            }
-
-            if (removed)
-            {
+                ClearTaskLogs(taskId);
                 TaskListChanged?.Invoke();
+                return true;
             }
-
-            return removed;
+            finally
+            {
+                if (releaseRemovalGate) lock (_taskLifecycleLock) _removingTasks.Remove(taskId);
+            }
         }
 
         /// <summary>
@@ -194,22 +212,26 @@ namespace FNSyncPlus.Core.Services
         /// </summary>
         public void UpdateTask(SyncTask task)
         {
-            var existing = _settings.Tasks.FirstOrDefault(t => t.TaskId == task.TaskId);
-            if (existing != null)
+            lock (_taskLifecycleLock)
             {
-                existing.TaskName = task.TaskName;
-                existing.Enabled = task.Enabled;
-                existing.AutoSyncEnabled = task.AutoSyncEnabled;
-                existing.RealtimeWatchEnabled = task.RealtimeWatchEnabled;
-                existing.IntervalMinutes = task.IntervalMinutes;
-                existing.Mode = task.Mode;
-                existing.ScheduleMode = task.ScheduleMode;
-                existing.Strategy = task.Strategy;
-                existing.SettlingDelaySeconds = task.SettlingDelaySeconds;
-                _settings.Save();
+                if (_removingTasks.Contains(task.TaskId)) return;
+                var existing = _settings.Tasks.FirstOrDefault(t => t.TaskId == task.TaskId);
+                if (existing != null)
+                {
+                    existing.TaskName = task.TaskName;
+                    existing.Enabled = task.Enabled;
+                    existing.AutoSyncEnabled = task.AutoSyncEnabled;
+                    existing.RealtimeWatchEnabled = task.RealtimeWatchEnabled;
+                    existing.IntervalMinutes = task.IntervalMinutes;
+                    existing.Mode = task.Mode;
+                    existing.ScheduleMode = task.ScheduleMode;
+                    existing.Strategy = task.Strategy;
+                    existing.SettlingDelaySeconds = task.SettlingDelaySeconds;
+                    _settings.Save();
 
-                ApplyTaskAutomation(existing);
-                TaskListChanged?.Invoke();
+                    ApplyTaskAutomation(existing);
+                    TaskListChanged?.Invoke();
+                }
             }
         }
 
@@ -222,40 +244,44 @@ namespace FNSyncPlus.Core.Services
         /// </summary>
         public void TriggerSync(string taskId)
         {
-            var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-            if (task == null || !task.Enabled || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing)
+            lock (_taskLifecycleLock)
             {
-                if (task != null && task.State == TaskSyncState.Paused)
+                if (_removingTasks.Contains(taskId) || _runningCompletions.ContainsKey(taskId)) return;
+                var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+                if (task == null || !task.Enabled || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing)
                 {
-                    AppendTaskLog(task, "INFO", "任务处于暂停状态，已忽略触发。");
+                    if (task != null && task.State == TaskSyncState.Paused)
+                    {
+                        AppendTaskLog(task, "INFO", "任务处于暂停状态，已忽略触发。");
+                    }
+                    return;
                 }
-                return;
-            }
 
-            // 任务配置合法性校验拦截（杜绝自同步死循环、盘符越界或无效路径伪造成功）
-            if (!task.ValidateConfiguration(out string configError))
-            {
-                task.State = TaskSyncState.ConfigurationError;
-                task.LastError = configError;
-                task.LastSyncStatus = "配置异常";
-                AppendTaskLog(task, "ERROR", $"任务配置异常，无法执行同步：{configError}");
-                TaskStateChanged?.Invoke(task);
-                return;
-            }
+                // 任务配置合法性校验拦截（杜绝自同步死循环、盘符越界或无效路径伪造成功）
+                if (!task.ValidateConfiguration(out string configError))
+                {
+                    task.State = TaskSyncState.ConfigurationError;
+                    task.LastError = configError;
+                    task.LastSyncStatus = "配置异常";
+                    AppendTaskLog(task, "ERROR", $"任务配置异常，无法执行同步：{configError}");
+                    TaskStateChanged?.Invoke(task);
+                    return;
+                }
 
-            if (task.IsRunning)
-            {
-                AppendTaskLog(task, "INFO", "任务正在执行中，已忽略重复触发。");
-                return;
-            }
+                if (task.IsRunning)
+                {
+                    AppendTaskLog(task, "INFO", "任务正在执行中，已忽略重复触发。");
+                    return;
+                }
 
-            if (!_taskQueue.Contains(taskId))
-            {
-                task.State = TaskSyncState.Queued;
-                TaskStateChanged?.Invoke(task);
-                _taskQueue.Enqueue(taskId);
-                _queueSignal.Release();
-                AppendTaskLog(task, "INFO", "任务已加入执行队列，等待调度...");
+                if (!_taskQueue.Contains(taskId))
+                {
+                    task.State = TaskSyncState.Queued;
+                    TaskStateChanged?.Invoke(task);
+                    _taskQueue.Enqueue(taskId);
+                    _queueSignal.Release();
+                    AppendTaskLog(task, "INFO", "任务已加入执行队列，等待调度...");
+                }
             }
         }
 
@@ -264,7 +290,9 @@ namespace FNSyncPlus.Core.Services
         /// </summary>
         public void TriggerSyncAll()
         {
-            foreach (var task in _settings.Tasks.Where(t => t.Enabled && t.State != TaskSyncState.Paused))
+            SyncTask[] tasks;
+            lock (_taskLifecycleLock) tasks = _settings.Tasks.ToArray();
+            foreach (var task in tasks.Where(t => t.Enabled && t.State != TaskSyncState.Paused))
             {
                 TriggerSync(task.TaskId);
             }
@@ -272,45 +300,46 @@ namespace FNSyncPlus.Core.Services
 
         public void PauseTask(string taskId)
         {
-            var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-            if (task == null) return;
+            lock (_taskLifecycleLock)
+            {
+                if (_removingTasks.Contains(taskId)) return;
+                var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+                if (task == null) return;
 
-            CancelTaskSync(taskId);
-            StopTaskAutomation(taskId); // 彻底注销并停止文件变动监听与定时轮询
-            task.State = TaskSyncState.Paused;
-            task.LastSyncStatus = "已暂停";
-            _settings.Save();
-            TaskStateChanged?.Invoke(task);
-            AppendTaskLog(task, "INFO", "任务已手动暂停，本地变动监控与定时器已彻底停止。");
+                CancelTaskSync(taskId);
+                StopTaskAutomation(taskId); // 彻底注销并停止文件变动监听与定时轮询
+                task.State = TaskSyncState.Paused;
+                task.LastSyncStatus = "已暂停";
+                _settings.Save();
+                TaskStateChanged?.Invoke(task);
+                AppendTaskLog(task, "INFO", "任务已手动暂停，本地变动监控与定时器已彻底停止。");
+            }
         }
 
         public void ResumeTask(string taskId)
         {
-            var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-            if (task == null) return;
+            lock (_taskLifecycleLock)
+            {
+                if (_removingTasks.Contains(taskId) || _runningCompletions.ContainsKey(taskId)) return;
+                var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+                if (task == null) return;
 
-            task.State = TaskSyncState.Idle;
-            task.LastSyncStatus = "已恢复就绪";
-            ApplyTaskAutomation(task); // 重新挂载监听与定时轮询
-            _settings.Save();
-            TaskStateChanged?.Invoke(task);
-            AppendTaskLog(task, "INFO", "任务已恢复，已重新激活变动监听，即将触发首次检查。");
-            TriggerSync(taskId);
+                task.State = TaskSyncState.Idle;
+                task.LastSyncStatus = "已恢复就绪";
+                ApplyTaskAutomation(task); // 重新挂载监听与定时轮询
+                _settings.Save();
+                TaskStateChanged?.Invoke(task);
+                AppendTaskLog(task, "INFO", "任务已恢复，已重新激活变动监听，即将触发首次检查。");
+                TriggerSync(taskId);
+            }
         }
 
         private void CancelTaskSync(string taskId)
         {
-            if (_runningCts.TryRemove(taskId, out var cts))
+            if (_runningCts.TryGetValue(taskId, out var cts))
             {
-                try
-                {
-                    cts.Cancel();
-                }
-                catch { }
-                _ = Task.Delay(3000).ContinueWith(_ =>
-                {
-                    try { cts.Dispose(); } catch { }
-                });
+                try { cts.Cancel(); }
+                catch (ObjectDisposedException) { }
             }
         }
 
@@ -324,24 +353,53 @@ namespace FNSyncPlus.Core.Services
 
                     if (_taskQueue.TryDequeue(out string? taskId))
                     {
-                        var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-                        if (task == null || !task.Enabled || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing || task.State == TaskSyncState.ConfigurationError) continue;
+                        SyncTask? task;
+                        lock (_taskLifecycleLock)
+                        {
+                            task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+                            if (task == null || _removingTasks.Contains(taskId) || !task.Enabled || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing || task.State == TaskSyncState.ConfigurationError) continue;
+                        }
 
                         // 等待获取全局并发信号量槽位
                         await _concurrencySemaphore.WaitAsync(token).ConfigureAwait(false);
+
+                        CancellationTokenSource taskCts;
+                        TaskCompletionSource completion;
+                        lock (_taskLifecycleLock)
+                        {
+                            if (!_settings.Tasks.Contains(task) || _removingTasks.Contains(taskId) ||
+                                _runningCompletions.ContainsKey(taskId) || !task.Enabled ||
+                                task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing ||
+                                task.State == TaskSyncState.ConfigurationError)
+                            {
+                                _concurrencySemaphore.Release();
+                                continue;
+                            }
+                            taskCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                            completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                            _runningCts[taskId] = taskCts;
+                            _runningCompletions[taskId] = completion;
+                        }
 
                         // 异步执行单个任务
                         _ = Task.Run(async () =>
                         {
                             try
                             {
-                                await ExecuteSingleTaskSyncAsync(task, token).ConfigureAwait(false);
+                                await ExecuteSingleTaskSyncAsync(task, taskCts.Token).ConfigureAwait(false);
                             }
                             finally
                             {
-                                _concurrencySemaphore.Release();
+                                lock (_taskLifecycleLock)
+                                {
+                                    _runningCts.TryRemove(taskId, out _);
+                                    _runningCompletions.Remove(taskId);
+                                }
+                                taskCts.Dispose();
+                                try { _concurrencySemaphore.Release(); }
+                                finally { completion.TrySetResult(); }
                             }
-                        }, token);
+                        });
                     }
                 }
                 catch (OperationCanceledException)
@@ -355,8 +413,9 @@ namespace FNSyncPlus.Core.Services
             }
         }
 
-        private async Task ExecuteSingleTaskSyncAsync(SyncTask task, CancellationToken managerToken)
+        private async Task ExecuteSingleTaskSyncAsync(SyncTask task, CancellationToken taskToken)
         {
+            taskToken.ThrowIfCancellationRequested();
             // 运行时二次安全配置校验拦截
             if (!task.ValidateConfiguration(out string valErr))
             {
@@ -394,9 +453,6 @@ namespace FNSyncPlus.Core.Services
                 return;
             }
 
-            var taskCts = CancellationTokenSource.CreateLinkedTokenSource(managerToken);
-            _runningCts[task.TaskId] = taskCts;
-
             // 每个任务独立实例化 LongNameEngine 与 ManifestManager，彻底隔离多任务字典与临时映射
             // 根据任务实际的存储提供程序动态配置安全阈值 (fnOS 个人空间上传接口安全阈值 251 字节，SMB 共享保持 255 字节)
             var taskLongNameEngine = LongNameEngine.CreateForProvider(provider ?? (task.ProviderType == FNSyncPlus.Core.Storage.StorageProviderType.FnOsPersonal ? new FNSyncPlus.Core.Storage.FnOsPersonalStorageProvider() : null));
@@ -418,6 +474,7 @@ namespace FNSyncPlus.Core.Services
 
             try
             {
+                taskToken.ThrowIfCancellationRequested();
                 task.State = TaskSyncState.Syncing;
                 task.LastError = null;
                 task.QueuedChangesCount = 0;
@@ -432,7 +489,7 @@ namespace FNSyncPlus.Core.Services
                     provider, 
                     task.Strategy, 
                     renames, 
-                    taskCts.Token).ConfigureAwait(false);
+                    taskToken).ConfigureAwait(false);
 
                 task.LastSyncTime = DateTime.Now;
                 task.LastScannedFiles = report.TotalFiles;
@@ -520,11 +577,6 @@ namespace FNSyncPlus.Core.Services
                 AppendTaskLog(task, "ERROR", $"任务异常中断: {ex.Message}");
                 _settings.Save();
                 TaskStateChanged?.Invoke(task);
-            }
-            finally
-            {
-                _runningCts.TryRemove(task.TaskId, out _);
-                taskCts.Dispose();
             }
         }
 

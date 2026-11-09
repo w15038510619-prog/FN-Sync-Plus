@@ -142,20 +142,23 @@ namespace FNSyncPlus.Core.Services
         {
             if (IsInMemoryOnly) return; // 单元测试或沙盒模式绝不写入磁盘配置文件
 
-            string path = !string.IsNullOrEmpty(CustomConfigPath) ? CustomConfigPath : GetConfigFilePath();
-            string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            try
+            lock (Tasks)
             {
-                File.WriteAllText(temp, JsonSerializer.Serialize(this, JsonOptions));
-                if (File.Exists(path)) File.Replace(temp, path, path + ".bak");
-                else File.Move(temp, path);
+                string path = !string.IsNullOrEmpty(CustomConfigPath) ? CustomConfigPath : GetConfigFilePath();
+                string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
+                {
+                    File.WriteAllText(temp, JsonSerializer.Serialize(this, JsonOptions));
+                    if (File.Exists(path)) File.Replace(temp, path, path + ".bak");
+                    else File.Move(temp, path);
+                }
+                finally
+                {
+                    if (File.Exists(temp)) File.Delete(temp);
+                }
+                if (string.IsNullOrEmpty(CustomConfigPath))
+                    ApplyStartupRegistry(StartWithWindows);
             }
-            finally
-            {
-                if (File.Exists(temp)) File.Delete(temp);
-            }
-            if (string.IsNullOrEmpty(CustomConfigPath))
-                ApplyStartupRegistry(StartWithWindows);
         }
 
         public static void ApplyStartupRegistry(bool enable)

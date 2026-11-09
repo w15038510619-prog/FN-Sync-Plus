@@ -171,7 +171,7 @@ namespace FNSyncPlus.WinUI.Pages
                 var confirmDialog = new ContentDialog
                 {
                     Title = "确认仅移除任务配置",
-                    Content = $"确定要在当前软件中移除任务【{taskItem.TaskName}】的配置吗？\n\n注意：此操作仅移除任务自动化调度与清单记录，绝对不会删除或修改您的本地源文件或 NAS 已有的任何备份文件。",
+                    Content = $"确定要在当前软件中移除任务【{taskItem.TaskName}】的配置吗？\n\n程序会先请求停止当前同步，再移除任务配置。此操作不会主动删除本地源文件或 NAS 备份文件。",
                     PrimaryButtonText = "确认移除",
                     CloseButtonText = "取消",
                     DefaultButton = ContentDialogButton.Close,
@@ -182,12 +182,33 @@ namespace FNSyncPlus.WinUI.Pages
                 if (res == ContentDialogResult.Primary)
                 {
                     var tm = AppServices.GetService<FNSyncPlus.Core.Services.TaskManager>();
-                    await tm.RemoveTaskAsync(taskItem.TaskId);
+                    if (!await tm.RemoveTaskAsync(taskItem.TaskId))
+                    {
+                        var warning = new ContentDialog
+                        {
+                            Title = "任务配置未移除",
+                            Content = taskItem.Model.LastError ?? "任务可能仍在停止或已被移除，请检查任务状态后重试。",
+                            CloseButtonText = "知道了",
+                            XamlRoot = this.XamlRoot
+                        };
+                        await warning.ShowAsync();
+                    }
                 }
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[TasksPage] 移除任务弹窗或处理异常: {ex.Message}");
+                if (this.XamlRoot != null)
+                {
+                    var error = new ContentDialog
+                    {
+                        Title = "移除任务失败",
+                        Content = $"任务配置未能移除：{ex.Message}",
+                        CloseButtonText = "知道了",
+                        XamlRoot = this.XamlRoot
+                    };
+                    await error.ShowAsync();
+                }
             }
             finally
             {

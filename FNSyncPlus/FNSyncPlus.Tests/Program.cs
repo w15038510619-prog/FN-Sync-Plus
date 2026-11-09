@@ -1099,10 +1099,117 @@ namespace FNSyncPlus.Tests
                         "飞牛已连接时本地任务仍写入本地目标");
                 }
                 await Task.Delay(200);
+                await TestTaskRemovalWhileRunningAsync(root);
+                await TestTaskRemovalFailureAsync(root);
             }
             finally
             {
                 Directory.Delete(root, true);
+            }
+        }
+
+        static async Task TestTaskRemovalWhileRunningAsync(string root)
+        {
+            string sourceA = Path.Combine(root, "remove-source-a");
+            string sourceB = Path.Combine(root, "remove-source-b");
+            Directory.CreateDirectory(sourceA);
+            Directory.CreateDirectory(sourceB);
+            File.WriteAllText(Path.Combine(sourceA, "hold.txt"), "source A");
+            File.WriteAllText(Path.Combine(sourceB, "queued.txt"), "source B");
+            var settings = AppSettings.CreateForTest(Path.Combine(root, "removal-settings.json"));
+            settings.MaxConcurrentSyncs = 1;
+            var first = new SyncTask { TaskName = "运行中", SourceFolder = sourceA, DestinationFolder = "我的文件/remove-a", ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            var second = new SyncTask { TaskName = "排队中", SourceFolder = sourceB, DestinationFolder = "我的文件/remove-b", ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            settings.Tasks.Add(first);
+            settings.Tasks.Add(second);
+            settings.Save();
+            var provider = new FaultInjectingProvider(root) { ClaimFnOs = true, BlockUploadSuffix = "/hold.txt" };
+            string oldDirectory = Environment.CurrentDirectory;
+            try
+            {
+                Environment.CurrentDirectory = root;
+                using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "removal-logs")));
+                manager.StorageProviderSupplier = () => provider;
+                manager.TriggerSync(first.TaskId);
+                if (await Task.WhenAny(provider.UploadEntered.Task, Task.Delay(10000)) != provider.UploadEntered.Task)
+                    throw new TimeoutException("隔离上传没有进入阻塞测试点");
+                manager.TriggerSync(second.TaskId);
+                bool removedQueued = await manager.RemoveTaskAsync(second.TaskId);
+                var removing = manager.RemoveTaskAsync(first.TaskId);
+                await Task.Delay(200);
+                Assert(removedQueued && !removing.IsCompleted && settings.Tasks.Contains(first), "移除排队任务并等待运行中同步真正停止");
+                provider.ContinueUpload.TrySetResult();
+                bool removedRunning = await removing;
+                await Task.Delay(300);
+                Assert(removedRunning && settings.Tasks.Count == 0 && AppSettings.LoadFromPath(settings.CustomConfigPath!).Tasks.Count == 0 &&
+                    File.ReadAllText(Path.Combine(sourceA, "hold.txt")) == "source A" &&
+                    File.ReadAllText(Path.Combine(sourceB, "queued.txt")) == "source B" &&
+                    !File.Exists(Path.Combine(root, "我的文件", "remove-b", "queued.txt")),
+                    "移除完成后配置持久化、源文件保留，排队任务不会继续执行");
+            }
+            finally
+            {
+                provider.ContinueUpload.TrySetResult();
+                Environment.CurrentDirectory = oldDirectory;
+            }
+        }
+
+        static async Task TestTaskRemovalFailureAsync(string root)
+        {
+            string source = Path.Combine(root, "remove-timeout-source");
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "hold.txt"), "source content");
+            var settings = AppSettings.CreateForTest(Path.Combine(root, "removal-timeout-settings.json"));
+            var task = new SyncTask { TaskName = "超时保留", SourceFolder = source, DestinationFolder = "我的文件/remove-timeout", ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            settings.Tasks.Add(task);
+            settings.Save();
+            var provider = new FaultInjectingProvider(root) { ClaimFnOs = true, BlockUploadSuffix = "/hold.txt" };
+            string oldDirectory = Environment.CurrentDirectory;
+            try
+            {
+                Environment.CurrentDirectory = root;
+                using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "removal-timeout-logs")));
+                manager.StorageProviderSupplier = () => provider;
+                manager.TriggerSync(task.TaskId);
+                if (await Task.WhenAny(provider.UploadEntered.Task, Task.Delay(10000)) != provider.UploadEntered.Task)
+                    throw new TimeoutException("隔离上传没有进入超时测试点");
+                bool removed = await manager.RemoveTaskAsync(task.TaskId);
+                manager.ResumeTask(task.TaskId);
+                manager.TriggerSync(task.TaskId);
+                Assert(!removed && settings.Tasks.Contains(task) && AppSettings.LoadFromPath(settings.CustomConfigPath!).Tasks.Count == 1 &&
+                    task.LastError?.Contains("超时", StringComparison.Ordinal) == true,
+                    "同步停止超时保留任务配置并阻止重新启动");
+                var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                manager.TaskStateChanged += t => { if (t.LastSyncStatus == "同步已停止，任务配置已保留") stopped.TrySetResult(); };
+                provider.ContinueUpload.TrySetResult();
+                if (await Task.WhenAny(stopped.Task, Task.Delay(10000)) != stopped.Task)
+                    throw new TimeoutException("隔离任务未停止");
+                Assert(task.State == TaskSyncState.Paused && settings.Tasks.Contains(task) &&
+                    File.ReadAllText(Path.Combine(source, "hold.txt")) == "source content",
+                    "超时后同步最终停止时保留并暂停任务和源文件");
+
+                string validSettingsPath = settings.CustomConfigPath!;
+                settings.CustomConfigPath = Path.Combine(root, "missing-settings-directory", "settings.json");
+                bool saveFailed = false;
+                try { await manager.RemoveTaskAsync(task.TaskId); }
+                catch (IOException) { saveFailed = true; }
+                finally { settings.CustomConfigPath = validSettingsPath; }
+                Assert(saveFailed && settings.Tasks.Contains(task) && AppSettings.LoadFromPath(validSettingsPath).Tasks.Count == 1,
+                    "移除时配置保存失败会恢复内存任务并保留磁盘配置");
+
+                var saveWorkers = Enumerable.Range(0, 3).Select(_ => Task.Run(() =>
+                {
+                    for (int i = 0; i < 10; i++) settings.Save();
+                })).ToArray();
+                bool removedAfterFailure = await manager.RemoveTaskAsync(task.TaskId);
+                await Task.WhenAll(saveWorkers);
+                Assert(removedAfterFailure && AppSettings.LoadFromPath(validSettingsPath).Tasks.Count == 0,
+                    "并发保存配置时已移除任务不会在磁盘配置中复活");
+            }
+            finally
+            {
+                provider.ContinueUpload.TrySetResult();
+                Environment.CurrentDirectory = oldDirectory;
             }
         }
 
@@ -1125,6 +1232,9 @@ namespace FNSyncPlus.Tests
             public Action? OnObjectUploaded { get; set; }
             public string? FailItemSuffix { get; set; }
             public string? FailListPath { get; set; }
+            public string? BlockUploadSuffix { get; set; }
+            public TaskCompletionSource UploadEntered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            public TaskCompletionSource ContinueUpload { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
             public FaultInjectingProvider(string root) { rootPath = root; inner = new SmbStorageProvider(rootUncPath: root); }
             public StorageProviderType ProviderType => ClaimFnOs ? StorageProviderType.FnOsPersonal : StorageProviderType.LocalFileSystem;
             public bool IsAuthenticated => inner.IsAuthenticated;
@@ -1160,6 +1270,12 @@ namespace FNSyncPlus.Tests
             }
             public async Task<StorageOperationResult> UploadFileAsync(string path, Stream stream, long size, DateTime modified, bool overwrite = true, IProgress<long>? progress = null, CancellationToken ct = default)
             {
+                if (BlockUploadSuffix != null && path.EndsWith(BlockUploadSuffix, StringComparison.Ordinal))
+                {
+                    UploadEntered.TrySetResult();
+                    await ContinueUpload.Task;
+                    ct.ThrowIfCancellationRequested();
+                }
                 if (CorruptObjectUpload && path.Contains("/.fnsync/objects/obj-", StringComparison.Ordinal))
                 {
                     using var corrupt = new MemoryStream(Encoding.UTF8.GetBytes("corrupted"));
