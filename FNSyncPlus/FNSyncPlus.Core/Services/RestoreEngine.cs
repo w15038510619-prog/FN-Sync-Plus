@@ -736,9 +736,9 @@ namespace FNSyncPlus.Core.Services
                         HashVerified = true
                     });
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException canceled)
                 {
-                    if (File.Exists(tempRestorePath)) try { File.Delete(tempRestorePath); } catch { }
+                    DeleteCanceledTemporaryFile(tempRestorePath, canceled);
                     throw;
                 }
                 catch (Exception ex)
@@ -888,9 +888,9 @@ namespace FNSyncPlus.Core.Services
                     report.IntegrityVerifiedFiles++;
                     report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, Success = true, HashVerified = true });
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException canceled)
                 {
-                    if (File.Exists(tempRestorePath)) try { File.Delete(tempRestorePath); } catch { }
+                    DeleteCanceledTemporaryFile(tempRestorePath, canceled);
                     throw;
                 }
                 catch (Exception ex)
@@ -904,6 +904,16 @@ namespace FNSyncPlus.Core.Services
             }
 
             return report;
+        }
+
+        private static void DeleteCanceledTemporaryFile(string path, OperationCanceledException canceled)
+        {
+            try { File.Delete(path); }
+            catch (DirectoryNotFoundException) { return; }
+            catch (Exception cleanupError)
+            {
+                throw new IOException("恢复已取消，但无法清理临时文件", new AggregateException(canceled, cleanupError));
+            }
         }
 
         private static void EnsureSafeRestoreDirectory(string root, string directory)

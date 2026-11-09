@@ -413,6 +413,15 @@ namespace FNSyncPlus.Tests
                     var skipReport = await historyEngine.RunRestoreVersionedAsync(versionProvider, fixture.folder, currentRestore);
                     Assert(skipReport.SkippedFiles == 1 && File.ReadAllText(Path.Combine(currentRestore, longOriginal)) == "user existing",
                         $"v{legacyVersion} 版本化恢复默认不覆盖用户文件");
+                    var renameReport = await historyEngine.RunRestoreVersionedAsync(versionProvider, fixture.folder, currentRestore, ConflictResolution.RenameWithTimestamp);
+                    var restoredVariants = Directory.GetFiles(currentRestore, "*", SearchOption.TopDirectoryOnly);
+                    Assert(renameReport.RestoredFiles == 1 && restoredVariants.Length == 2 &&
+                        File.ReadAllText(Path.Combine(currentRestore, longOriginal)) == "user existing" &&
+                        restoredVariants.Any(p => p != Path.Combine(currentRestore, longOriginal) && File.ReadAllText(p) == "legacy active"),
+                        $"v{legacyVersion} 版本化恢复可重命名并保留现有文件");
+                    var overwriteReport = await historyEngine.RunRestoreVersionedAsync(versionProvider, fixture.folder, currentRestore, ConflictResolution.Overwrite);
+                    Assert(overwriteReport.RestoredFiles == 1 && File.ReadAllText(Path.Combine(currentRestore, longOriginal)) == "legacy active",
+                        $"v{legacyVersion} 版本化恢复仅在明确选择时覆盖");
                     bool legacyReadRejected = false, legacyWriteRejected = false, localReadRejected = false, localWriteRejected = false;
                     try { await manifestManager.LoadManifestAsync(versionProvider, fixture.folder); } catch (InvalidDataException) { legacyReadRejected = true; }
                     try { await manifestManager.SaveManifestAtomicAsync(versionProvider, fixture.folder, new Manifest()); } catch (InvalidDataException) { legacyWriteRejected = true; }
@@ -756,6 +765,15 @@ namespace FNSyncPlus.Tests
                 catch (OperationCanceledException) { restoreCanceled = true; }
                 Assert(restoreCanceled && Directory.GetFiles(canceledRestorePath, "*", SearchOption.AllDirectories).Length == 0,
                     "版本化恢复取消时不提交或遗留临时文件");
+                var canceledHistory = (await versions.LoadAsync(versionProvider, versionedRestorableFolder))!.Manifest.History.Single();
+                using var cancelHistoryRestore = new CancellationTokenSource();
+                versionProvider.AfterObjectOpen = cancelHistoryRestore.Cancel;
+                string canceledHistoryPath = Path.Combine(root, "migration-canceled-history");
+                bool historyCanceled = false;
+                try { await historyEngine.RunRestoreHistoryFileAsync(versionProvider, versionedRestorableFolder, canceledHistoryPath, canceledHistory, cancelHistoryRestore.Token); }
+                catch (OperationCanceledException) { historyCanceled = true; }
+                Assert(historyCanceled && Directory.GetFiles(canceledHistoryPath, "*", SearchOption.AllDirectories).Length == 0,
+                    "历史恢复取消时不提交或遗留临时文件");
                 await versions.SaveAsync(versionProvider, "unsafe-directories", new Manifest {
                     Directories = new() { new ManifestDirEntry { OriginalRel = "../escape", StoredRel = "escape" } }
                 }, null);
@@ -764,6 +782,21 @@ namespace FNSyncPlus.Tests
                 try { await historyEngine.RunRestoreVersionedAsync(versionProvider, "unsafe-directories", unsafeRestorePath); }
                 catch (InvalidDataException) { unsafeDirectoryRejected = true; }
                 Assert(unsafeDirectoryRejected && !Directory.Exists(unsafeRestorePath), "恢复开始前拒绝越界的目录记录");
+                var corruptRestoreFixture = await MakeLegacyAsync("versioned-corrupt-restore", 4);
+                await migration.MigrateAsync(versionProvider, corruptRestoreFixture.folder);
+                string corruptRestoreSource = Path.Combine(root, "versioned-corrupt-restore-source");
+                Directory.CreateDirectory(corruptRestoreSource);
+                File.WriteAllText(Path.Combine(corruptRestoreSource, longOriginal), "legacy active");
+                File.WriteAllText(Path.Combine(corruptRestoreSource, "good.txt"), "good data");
+                var corruptRestoreSnapshot = await versionedBackup.RunAsync(versionProvider, corruptRestoreSource, corruptRestoreFixture.folder);
+                var corruptEntry = corruptRestoreSnapshot.Snapshot.Manifest.Files.Single(f => f.OriginalRel == longOriginal);
+                File.WriteAllText(Path.Combine(root, corruptRestoreFixture.folder, corruptEntry.StoredRel.Replace('/', Path.DirectorySeparatorChar)), "damaged test data");
+                string partialRestorePath = Path.Combine(root, "versioned-corrupt-restore-output");
+                var partialRestore = await historyEngine.RunRestoreVersionedAsync(versionProvider, corruptRestoreFixture.folder, partialRestorePath);
+                Assert(partialRestore.FailedFiles == 1 && partialRestore.RestoredFiles == 1 &&
+                    !File.Exists(Path.Combine(partialRestorePath, longOriginal)) && File.ReadAllText(Path.Combine(partialRestorePath, "good.txt")) == "good data" &&
+                    partialRestore.FileResults.Any(r => r.OriginalRel == longOriginal && !r.Success),
+                    "版本化恢复逐项报告哈希损坏并恢复未损坏文件");
                 var leaseProviderOne = new FaultInjectingProvider(root);
                 var leaseProviderTwo = new FaultInjectingProvider(root);
                 var lease = await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderOne, "lease-normal");
