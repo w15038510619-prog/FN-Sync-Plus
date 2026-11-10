@@ -475,6 +475,9 @@ namespace FNSyncPlus.Tests
                         catch (ArgumentException) { aliasesRejected++; }
                     }
                     Assert(aliasesRejected == 3, "复用目录的飞牛路径别名不能绕过根目录和重叠保护");
+                    var distinctLocations = ExperimentalVersionedBackup.ValidateReuseLocations(moveProvider, "我的文件/new-backup", "vol1/1/old-backup");
+                    Assert(distinctLocations.Target == "new-backup" && distinctLocations.ExistingRoot == "old-backup",
+                        "复用位置检查可识别不同的飞牛路径别名并允许独立目录");
                     const string candidateRoot = "backup/.fnsync/projections/candidate-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
                     int candidateRejected = 0;
                     foreach (var input in new[] {

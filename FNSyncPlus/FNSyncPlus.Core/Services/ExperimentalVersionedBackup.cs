@@ -20,6 +20,28 @@ public sealed class ExperimentalVersionedBackup
     private readonly ImmutableContentStore _objects = new();
     public event Action<string>? ProgressChanged;
 
+    /// <summary>Validates that an existing source and a new backup target do not overlap.</summary>
+    public static (string Target, string ExistingRoot) ValidateReuseLocations(INasStorageProvider provider, string target, string existingRoot)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        if (!PathHelper.IsSafeRelativePath(target) || !PathHelper.IsSafeRelativePath(existingRoot))
+            throw new ArgumentException("已有文件目录和新备份目录必须是安全的相对路径");
+        string targetRoot = PathHelper.NormalizeRelPath(target);
+        string sourceRoot = PathHelper.NormalizeRelPath(existingRoot);
+        if (provider is FnOsPersonalStorageProvider fnOs)
+        {
+            targetRoot = fnOs.NormalizeRelativePath(targetRoot);
+            sourceRoot = fnOs.NormalizeRelativePath(sourceRoot);
+        }
+        if (string.IsNullOrEmpty(sourceRoot) || string.IsNullOrEmpty(targetRoot))
+            throw new ArgumentException("已有目录和新备份目录不能是个人空间根目录");
+        if (sourceRoot.Equals(targetRoot, StringComparison.OrdinalIgnoreCase) ||
+            sourceRoot.StartsWith(targetRoot + "/", StringComparison.OrdinalIgnoreCase) ||
+            targetRoot.StartsWith(sourceRoot + "/", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("已有文件目录和新备份目录不能相同或嵌套");
+        return (targetRoot, sourceRoot);
+    }
+
     public Task<Result> RunAsync(INasStorageProvider provider, string sourceDirectory, string target,
         CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0)
         => RunCoreAsync(provider, sourceDirectory, target, false, null, token, strategy, settlingDelaySeconds);
@@ -50,23 +72,9 @@ public sealed class ExperimentalVersionedBackup
         if (existingRoot != null)
         {
             if (provider is not IExperimentalContentReuseProvider) throw new NotSupportedException("存储不支持已验证的服务端复制");
-            if (!PathHelper.IsSafeRelativePath(existingRoot)) throw new ArgumentException("已有文件目录必须是安全的相对路径", nameof(existingRoot));
-            existingRoot = PathHelper.NormalizeRelPath(existingRoot);
-            string targetRoot = PathHelper.NormalizeRelPath(target);
-            // fnOS accepts both personal-root aliases and plain relative paths. Compare canonical
-            // paths so an alias cannot hide an overlap with the directory being preserved.
-            if (provider is FnOsPersonalStorageProvider fnOs)
-            {
-                existingRoot = fnOs.NormalizeRelativePath(existingRoot);
-                targetRoot = fnOs.NormalizeRelativePath(targetRoot);
-                if (string.IsNullOrEmpty(existingRoot) || string.IsNullOrEmpty(targetRoot))
-                    throw new ArgumentException("已有目录和新备份目录不能是个人空间根目录");
-                target = targetRoot;
-            }
-            if (existingRoot.Equals(targetRoot, StringComparison.OrdinalIgnoreCase) ||
-                existingRoot.StartsWith(targetRoot + "/", StringComparison.OrdinalIgnoreCase) ||
-                targetRoot.StartsWith(existingRoot + "/", StringComparison.OrdinalIgnoreCase))
-                throw new ArgumentException("已有文件目录和新备份目录不能相同或嵌套");
+            var locations = ValidateReuseLocations(provider, target, existingRoot);
+            existingRoot = locations.ExistingRoot;
+            if (provider is FnOsPersonalStorageProvider) target = locations.Target;
             var existingDirectory = await provider.GetItemAsync(existingRoot, token).ConfigureAwait(false);
             if (existingDirectory == null || !existingDirectory.IsDirectory) throw new DirectoryNotFoundException("已有文件目录不存在");
         }

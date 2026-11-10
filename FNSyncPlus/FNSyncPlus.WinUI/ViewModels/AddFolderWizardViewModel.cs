@@ -712,6 +712,21 @@ namespace FNSyncPlus.WinUI.ViewModels
                         destSub = item.TargetSubFolder;
                     }
 
+                    if (ShowExperimentalReuse && !string.IsNullOrWhiteSpace(ExperimentalExistingRoot))
+                    {
+                        try { ExperimentalVersionedBackup.ValidateReuseLocations(fnProvider, destSub, ExperimentalExistingRoot); }
+                        catch (ArgumentException)
+                        {
+                            item.IsFailed = true;
+                            item.StatusText = "❌ 新旧目录冲突";
+                            item.ErrorMessage = "新备份目录必须与已有目录分开，不能相同或互相包含。请更改备份父目录。";
+                            SecurityTitle = "请选择独立的备份位置";
+                            SecurityDescription = item.ErrorMessage + " 原有飞牛目录不会被修改。";
+                            IsTeamShareWarning = true;
+                            continue;
+                        }
+                    }
+
                     try
                     {
                         var created = _taskManager.UseExperimentalVersionedBackup
@@ -756,7 +771,17 @@ namespace FNSyncPlus.WinUI.ViewModels
                         IntervalMinutes = 5
                     };
 
-                    _taskManager.AddTask(task);
+                    try { _taskManager.AddTask(task); }
+                    catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
+                    {
+                        item.IsFailed = true;
+                        item.StatusText = "❌ 无法建立任务";
+                        item.ErrorMessage = ex.Message;
+                        SecurityTitle = "任务未建立";
+                        SecurityDescription = ex.Message;
+                        IsTeamShareWarning = true;
+                        continue;
+                    }
                     _taskManager.TriggerSync(task.TaskId);
                     createdCount++;
                 }
