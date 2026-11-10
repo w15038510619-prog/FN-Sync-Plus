@@ -2069,6 +2069,37 @@ namespace FNSyncPlus.Tests
             catch (InvalidOperationException) { refusedUnknownFormat = true; }
             Assert(refusedUnknownFormat, "隔离引擎拒绝未知版本格式，不启动同步");
 
+            var importProfile = AppSettings.LoadVersionedBetaTestProfile(Guid.NewGuid());
+            var legacyFixture = AppSettings.CreateForTest(importProfile.VersionedLegacySettingsPath!);
+            legacyFixture.RememberCredentials = true;
+            legacyFixture.TrustedCertThumbprints["fixture.invalid"] = new string('A', 64);
+            legacyFixture.Save();
+            string legacyCredentials = Path.Combine(Path.GetDirectoryName(importProfile.VersionedLegacySettingsPath!)!, "credentials.dat");
+            if (!SmbAuthService.SaveCredentials("fixture.invalid", "fixture-user", "fixture-secret", legacyCredentials))
+                throw new IOException("无法建立模拟旧凭据");
+            byte[] legacyBytes = File.ReadAllBytes(legacyCredentials);
+            bool imported = importProfile.ImportRememberedLegacyConnection();
+            var importedCredentials = SmbAuthService.LoadCredentials(importProfile.IsolatedCredentialPath);
+            Assert(imported && importedCredentials?.Password == "fixture-secret" &&
+                legacyBytes.SequenceEqual(File.ReadAllBytes(legacyCredentials)) &&
+                importProfile.TrustedCertThumbprints.ContainsKey("fixture.invalid") && !File.Exists(importProfile.VersionedBetaProfilePath),
+                "新版独立复制已记住的凭据和证书，不修改旧凭据");
+            importProfile.Save();
+            if (!SmbAuthService.SaveCredentials("fixture.invalid", "new-user", "new-secret", importProfile.IsolatedCredentialPath))
+                throw new IOException("无法建立模拟新版凭据");
+            Assert(!importProfile.ImportRememberedLegacyConnection() &&
+                SmbAuthService.LoadCredentials(importProfile.IsolatedCredentialPath)?.Password == "new-secret" &&
+                legacyBytes.SequenceEqual(File.ReadAllBytes(legacyCredentials)), "已有新版配置不会被旧凭据覆盖");
+            var declinedImport = AppSettings.LoadVersionedBetaTestProfile(Guid.NewGuid());
+            var declinedLegacy = AppSettings.CreateForTest(declinedImport.VersionedLegacySettingsPath!);
+            declinedLegacy.RememberCredentials = false;
+            declinedLegacy.Save();
+            string declinedCredentials = Path.Combine(Path.GetDirectoryName(declinedImport.VersionedLegacySettingsPath!)!, "credentials.dat");
+            if (!SmbAuthService.SaveCredentials("fixture.invalid", "fixture-user", "fixture-secret", declinedCredentials))
+                throw new IOException("无法建立未记住凭据的模拟数据");
+            Assert(!declinedImport.ImportRememberedLegacyConnection() && !declinedImport.RememberCredentials &&
+                !File.Exists(declinedImport.IsolatedCredentialPath), "旧版未选择记住密码时不复制凭据");
+
             Guid profileId = Guid.NewGuid();
             var betaProfile = AppSettings.LoadVersionedBetaTestProfile(profileId);
             Assert(betaProfile.ReadVersionedLegacySettings() == null && !File.Exists(betaProfile.VersionedLegacySettingsPath),
@@ -2953,6 +2984,18 @@ namespace FNSyncPlus.Tests
             try { await unboundedManager.BeginIsolatedRecoveryAsync(unboundedTask.TaskId, TimeSpan.FromSeconds(5)); }
             catch (InvalidOperationException) { unboundedRejected = true; }
             Assert(unboundedRejected && !unboundedTask.IsUserPaused, "无授权边界的新版配置不能进入隔离恢复流程");
+
+            // Exercise the ordinary beta branch using only the temporary test profile and provider.
+            var ordinaryBeta = AppSettings.LoadVersionedBetaTestProfile(Guid.NewGuid());
+            typeof(AppSettings).GetProperty(nameof(AppSettings.IsVersionedBetaTestProfile))!.SetValue(ordinaryBeta, false);
+            var ordinaryTask = new SyncTask { SourceFolder = betaSource, DestinationFolder = "ordinary-beta-recovery", ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            using var ordinaryManager = new TaskManager(ordinaryBeta, new SmbAuthService(), new LogService(Path.Combine(root, "ordinary-beta-recovery-logs")), experimentalVersionedBackup: true);
+            ordinaryManager.AddTask(ordinaryTask);
+            await using (var ordinarySession = await ordinaryManager.BeginIsolatedRecoveryAsync(ordinaryTask.TaskId, TimeSpan.FromSeconds(5)))
+            {
+                Assert(ordinarySession != null && ordinaryTask.IsUserPaused, "独立新版配置可暂停任务并进入恢复检查");
+            }
+            if (!await ordinaryManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("新版恢复会话未退出");
         }
 
         static async Task TestLongDirectoryRenameAsync(string root)

@@ -91,6 +91,8 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _nasDestinationRoot = string.Empty;
 
         public bool ShowExperimentalReuse => _taskManager.UseExperimentalVersionedBackup;
+        public string ReuseHeading => _settings.IsVersionedBetaProfile && !_settings.IsVersionedBetaTestProfile
+            ? "复用飞牛已有文件（一次选择一个本地文件夹）" : "隔离试验：复用飞牛已有文件（仅支持一个本地文件夹）";
 
         [ObservableProperty]
         private string _experimentalExistingRoot = string.Empty;
@@ -661,7 +663,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             if (!CanCreate || PlannedTasks.Count == 0) return 0;
             if (!string.IsNullOrWhiteSpace(ExperimentalExistingRoot) && (!ShowExperimentalReuse || PlannedTasks.Count != 1))
             {
-                SecurityTitle = "复用已有目录仅支持一个隔离测试任务";
+                SecurityTitle = "复用已有目录一次只能选择一个本地文件夹";
                 SecurityDescription = "请仅选择一个本地文件夹，或清除已有目录后重试。";
                 return 0;
             }
@@ -749,7 +751,9 @@ namespace FNSyncPlus.WinUI.ViewModels
                     }
 
                     item.FinalTargetUnc = item.FullTargetUnc;
-                    item.StatusText = _taskManager.UseExperimentalVersionedBackup ? "✔ 隔离试验任务已建立，目标将在同步时创建" : "✔ 目标就绪，任务已建立";
+                    item.StatusText = _taskManager.UseExperimentalVersionedBackup
+                        ? (_settings.IsVersionedBetaProfile && !_settings.IsVersionedBetaTestProfile ? "✔ 新版备份任务已建立，目标将在同步时创建" : "✔ 隔离试验任务已建立，目标将在同步时创建")
+                        : "✔ 目标就绪，任务已建立";
                     item.IsFailed = false;
 
                     var task = new SyncTask

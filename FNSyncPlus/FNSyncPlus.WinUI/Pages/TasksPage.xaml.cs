@@ -25,6 +25,7 @@ namespace FNSyncPlus.WinUI.Pages
             ViewModel = AppServices.GetService<TasksViewModel>();
             InitializeComponent();
             BtnViewLegacyTasks.Visibility = AppServices.GetService<AppSettings>().IsVersionedBetaProfile ? Visibility.Visible : Visibility.Collapsed;
+            BetaSafetyNotice.Visibility = AppServices.IsVersionedBetaSession ? Visibility.Visible : Visibility.Collapsed;
 
             Loaded += OnPageLoaded;
             Unloaded += OnPageUnloaded;
@@ -110,7 +111,7 @@ namespace FNSyncPlus.WinUI.Pages
 
         private async void InspectInterruptedBackup(SyncTaskItemViewModel item)
         {
-            if (_isInspectingInterruption || !AppServices.IsIsolatedTestSession || item?.Model.IsExperimentalBackup != true || XamlRoot == null) return;
+            if (_isInspectingInterruption || (!AppServices.IsIsolatedTestSession && !AppServices.IsVersionedBetaSession) || item?.Model.IsExperimentalBackup != true || XamlRoot == null) return;
             _isInspectingInterruption = true;
             try
             {
@@ -142,7 +143,7 @@ namespace FNSyncPlus.WinUI.Pages
                 };
                 var confirm = new ContentDialog
                 {
-                    Title = "确认修复中断的隔离备份",
+                    Title = "确认修复中断的备份",
                     Content = $"检查结果：{stage}。\n\n本机此任务已暂停并停止写入。请先确认原同步程序和所有其他可能写入此备份的设备都已停止；软件无法替你判断其他设备是否停止。\n\n确认后会按记录完成目录恢复并释放该锁。任务仍保持暂停，需手动恢复同步。",
                     PrimaryButtonText = "已确认全部停止，修复",
                     CloseButtonText = "取消",
@@ -151,7 +152,7 @@ namespace FNSyncPlus.WinUI.Pages
                 };
                 if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
                 await session.RecoverAsync(inspection, ExperimentalProjectionRecovery.RequiredAcknowledgement);
-                await new ContentDialog { Title = "隔离备份已修复", Content = "目录和记录已核验，任务仍保持暂停。请检查结果后手动恢复同步。",
+                await new ContentDialog { Title = "备份已修复", Content = "目录和记录已核验，任务仍保持暂停。请检查结果后手动恢复同步。",
                     CloseButtonText = "知道了", XamlRoot = XamlRoot }.ShowAsync();
             }
             catch (Exception ex)

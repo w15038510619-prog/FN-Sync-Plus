@@ -11,6 +11,7 @@ namespace FNSyncPlus.WinUI.Services
     {
         private static IServiceProvider? _serviceProvider;
         public static bool IsIsolatedTestSession { get; private set; }
+        public static bool IsVersionedBetaSession { get; private set; }
 
         public static IServiceProvider Provider => _serviceProvider 
             ?? throw new InvalidOperationException("AppServices has not been initialized.");
@@ -23,6 +24,9 @@ namespace FNSyncPlus.WinUI.Services
             IsIsolatedTestSession = Array.Exists(Environment.GetCommandLineArgs(),
                 arg => arg.Equals("--isolated-test-session", StringComparison.Ordinal));
             var args = Environment.GetCommandLineArgs();
+            IsVersionedBetaSession = Array.Exists(args, arg => arg.Equals("--versioned-beta", StringComparison.Ordinal));
+            if (IsIsolatedTestSession && IsVersionedBetaSession)
+                throw new InvalidOperationException("新版试用与隔离测试参数不能同时使用");
             string? stateArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-state=", StringComparison.Ordinal));
             string? betaStateArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-beta-profile=", StringComparison.Ordinal));
             string? remoteArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-remote=", StringComparison.Ordinal));
@@ -44,7 +48,13 @@ namespace FNSyncPlus.WinUI.Services
                 settings = AppSettings.LoadIsolatedTestSession(id);
                 settings.SetIsolatedTestBoundary(remoteRoot);
             }
-            else settings = IsIsolatedTestSession ? AppSettings.CreateInMemory() : AppSettings.Load();
+            else settings = IsIsolatedTestSession ? AppSettings.CreateInMemory()
+                : IsVersionedBetaSession ? AppSettings.LoadVersionedBetaProfile() : AppSettings.Load();
+            if (IsVersionedBetaSession)
+            {
+                try { settings.ImportRememberedLegacyConnection(); }
+                catch (InvalidOperationException) { System.Diagnostics.Debug.WriteLine("旧连接设置不可读取，请在新版配置中手动连接。"); }
+            }
             if (IsIsolatedTestSession)
             {
                 settings.IsolatedCredentialPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -65,7 +75,7 @@ namespace FNSyncPlus.WinUI.Services
             services.AddSingleton(manifestManager);
 
             var taskManager = new TaskManager(settings, longNameEngine, manifestManager, smbService,
-                experimentalVersionedBackup: IsIsolatedTestSession);
+                experimentalVersionedBackup: IsIsolatedTestSession || IsVersionedBetaSession);
             services.AddSingleton(taskManager);
 
             var connectionService = new NasConnectionService(smbService, settings, taskManager);
@@ -101,10 +111,10 @@ namespace FNSyncPlus.WinUI.Services
 
         public static async Task ConnectIsolatedSessionAsync()
         {
-            if (!IsIsolatedTestSession) return;
+            if (!IsIsolatedTestSession && !IsVersionedBetaSession) return;
             var settings = GetService<AppSettings>();
-            if ((!settings.IsInMemoryOnly && !(settings.IsVersionedBetaTestProfile && settings.HasIsolatedTestBoundary)) ||
-                string.IsNullOrEmpty(settings.IsolatedCredentialPath)) return;
+            if ((!settings.IsInMemoryOnly && !(settings.IsVersionedBetaTestProfile && settings.HasIsolatedTestBoundary) && !IsVersionedBetaSession) ||
+                !settings.RememberCredentials || string.IsNullOrEmpty(settings.IsolatedCredentialPath)) return;
             var credentials = SmbAuthService.LoadCredentials(settings.IsolatedCredentialPath);
             if (credentials == null) return;
             try

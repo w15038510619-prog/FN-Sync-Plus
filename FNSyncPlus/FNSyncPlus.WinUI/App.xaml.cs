@@ -72,7 +72,7 @@ namespace FNSyncPlus.WinUI
                 Helpers.UIThreadHelper.Initialize(win.DispatcherQueue);
 
                 win.Activate();
-                if (AppServices.IsIsolatedTestSession)
+                if (AppServices.IsIsolatedTestSession || AppServices.IsVersionedBetaSession)
                     _ = AppServices.ConnectIsolatedSessionAsync();
                 if (Array.Exists(cmdArgs, arg => arg.Equals("--minimize", StringComparison.OrdinalIgnoreCase)))
                     win.HideToTray();

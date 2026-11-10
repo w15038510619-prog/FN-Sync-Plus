@@ -480,9 +480,10 @@ namespace FNSyncPlus.Core.Services
             {
                 task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId)
                     ?? throw new InvalidOperationException("任务不存在");
-                if ((!_settings.IsInMemoryOnly && !(_settings.IsVersionedBetaTestProfile && _settings.HasIsolatedTestBoundary)) ||
+                if ((!_settings.IsInMemoryOnly && !(_settings.IsVersionedBetaProfile &&
+                    (!_settings.IsVersionedBetaTestProfile || _settings.HasIsolatedTestBoundary))) ||
                     !UseExperimentalVersionedBackup || !task.IsExperimentalBackup)
-                    throw new InvalidOperationException("中断恢复目前仅支持隔离试验任务");
+                    throw new InvalidOperationException("中断恢复仅支持新版备份任务");
                 if (_stopping || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId))
                     throw new InvalidOperationException("任务正在停止、移除或执行其他恢复操作");
                 _settings.EnsureIsolatedTestTask(task);
@@ -922,9 +923,10 @@ namespace FNSyncPlus.Core.Services
                         task.NextScheduledTime = DateTime.Now.AddMinutes(task.IntervalMinutes);
                     }
                     task.CurrentProgress = 100.0;
-                    task.CurrentFile = task.IsExperimentalBackup ? $"隔离试验已提交：复用 {reusedFiles}，上传 {report.UploadedFiles}；物理目录已发布" : "所有文件均已同步更新至最新状态";
+                    string trialLabel = _settings.IsVersionedBetaProfile && !_settings.IsVersionedBetaTestProfile ? "新版备份试用" : "隔离试验";
+                    task.CurrentFile = task.IsExperimentalBackup ? $"{trialLabel}已提交：复用 {reusedFiles}，上传 {report.UploadedFiles}；物理目录已发布" : "所有文件均已同步更新至最新状态";
                     task.LastSyncStatus = task.IsExperimentalBackup
-                        ? $"隔离试验物理目录已发布（复用 {reusedFiles}，上传 {report.UploadedFiles}）"
+                        ? $"{trialLabel}物理目录已发布（复用 {reusedFiles}，上传 {report.UploadedFiles}）"
                         : "同步成功完成 (已最新)";
                 }
 

@@ -170,7 +170,7 @@ namespace FNSyncPlus.WinUI.Pages
             var dialog = new Dialogs.NasBrowserDialog
             {
                 XamlRoot = this.XamlRoot,
-                Title = "选择已有飞牛同步文件夹（隔离试验）"
+                Title = AppServices.IsVersionedBetaSession ? "选择已有飞牛同步文件夹" : "选择已有飞牛同步文件夹（隔离试验）"
             };
             if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
             string selected = !string.IsNullOrWhiteSpace(dialog.ViewModel.ConfirmedSelectedPath)

@@ -83,7 +83,9 @@ namespace FNSyncPlus.Core.Services
         {
             if (id == Guid.Empty) throw new ArgumentException("测试配置标识无效", nameof(id));
             string folder = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"VersionedProfile_{id:N}");
-            var settings = LoadVersionedProfileAt(folder, Path.Combine(folder, "old-settings-readonly.json"));
+            string legacyFolder = Path.Combine(folder, "legacy-fixture");
+            Directory.CreateDirectory(legacyFolder);
+            var settings = LoadVersionedProfileAt(folder, Path.Combine(legacyFolder, "settings.json"));
             settings.IsVersionedBetaTestProfile = true;
             return settings;
         }
@@ -116,6 +118,27 @@ namespace FNSyncPlus.Core.Services
             catch (DirectoryNotFoundException) { return null; }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException or JsonException)
             { throw new InvalidOperationException("无法安全读取旧程序配置，原文件未修改。", ex); }
+        }
+
+        /// <summary>Copies an already-remembered DPAPI credential only into a fresh, separate profile.</summary>
+        public bool ImportRememberedLegacyConnection()
+        {
+            if (!IsVersionedBetaProfile || VersionedBetaProfilePath == null || VersionedLegacySettingsPath == null || IsolatedCredentialPath == null)
+                throw new InvalidOperationException("只有独立新版配置可以导入已保存的连接。");
+            if (File.Exists(VersionedBetaProfilePath)) return false;
+            var legacy = ReadVersionedLegacySettings();
+            if (legacy == null) return false;
+            RememberCredentials = legacy.RememberCredentials;
+            foreach (var entry in ReadTrustedCertificates(VersionedLegacySettingsPath))
+                TrustedCertThumbprints.TryAdd(entry.Key, entry.Value);
+            if (!RememberCredentials || File.Exists(IsolatedCredentialPath)) return false;
+            string legacyCredentialPath = Path.Combine(Path.GetDirectoryName(VersionedLegacySettingsPath)!, "credentials.dat");
+            var credentials = SmbAuthService.LoadCredentials(legacyCredentialPath);
+            if (credentials == null) return false;
+            if (!SmbAuthService.SaveCredentials(credentials.Value.Server, credentials.Value.Username, credentials.Value.Password, IsolatedCredentialPath)) return false;
+            NasServer = credentials.Value.Server;
+            Username = credentials.Value.Username;
+            return true;
         }
 
         public static AppSettings LoadIsolatedTestSession(Guid id)
