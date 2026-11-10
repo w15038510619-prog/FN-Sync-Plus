@@ -1617,6 +1617,7 @@ namespace FNSyncPlus.Tests
                 await TestTaskRemovalWhileRunningAsync(root);
                 await TestTaskRemovalFailureAsync(root);
                 await TestIsolatedVersionedTaskAsync(root);
+                await TestLegacyTargetProtectionAsync(root);
                 await TestIsolatedTaskReattachmentAsync(root);
                 await TestReconnectSchedulingAsync(root);
                 await TestShutdownAsync(root);
@@ -2073,6 +2074,98 @@ namespace FNSyncPlus.Tests
             try { AppSettings.LoadVersionedBetaTestProfile(profileId); }
             catch (System.Text.Json.JsonException) { refusedBrokenProfile = true; }
             Assert(refusedBrokenProfile && File.ReadAllText(betaPath) == "broken beta settings", "新版配置损坏时停止且不重置原文件");
+        }
+
+        static async Task TestLegacyTargetProtectionAsync(string root)
+        {
+            var beta = AppSettings.LoadVersionedBetaTestProfile(Guid.NewGuid());
+            string oldPath = beta.VersionedLegacySettingsPath!;
+            string source = Path.Combine(root, "legacy-target-guard-source");
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "sample.txt"), "keep");
+            var oldSettings = AppSettings.CreateInMemory();
+            var oldTask = new SyncTask { SourceFolder = source, DestinationFolder = "我的文件/protected", ProviderType = StorageProviderType.FnOsPersonal };
+            oldSettings.Tasks.Add(oldTask);
+            string original = oldSettings.ToJson();
+            File.WriteAllText(oldPath, original);
+            using var manager = new TaskManager(beta, new SmbAuthService(), new LogService(Path.Combine(root, "legacy-target-guard-logs")), experimentalVersionedBackup: true);
+            int refused = 0;
+            foreach (string target in new[] { "protected", "protected/child", "我的文件/protected/child/grandchild" })
+            {
+                try { manager.AddTask(new SyncTask { SourceFolder = source, DestinationFolder = target, ScheduleMode = TaskSyncScheduleMode.ManualOnly }); }
+                catch (InvalidOperationException) { refused++; }
+            }
+            Assert(refused == 3 && beta.Tasks.Count == 0 && File.ReadAllText(oldPath) == original,
+                "新版配置拒绝与旧飞牛目标相同或嵌套，旧配置只读保留");
+            var task = new SyncTask { TaskName = "独立目标", SourceFolder = source, DestinationFolder = "independent-target", ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            manager.AddTask(task);
+            oldTask.DestinationFolder = "我的文件/independent-target/subdir";
+            File.WriteAllText(oldPath, oldSettings.ToJson());
+            var blocked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            manager.TaskStateChanged += t => { if (t.TaskId == task.TaskId && t.State == TaskSyncState.ConfigurationError) blocked.TrySetResult(); };
+            manager.TriggerSync(task.TaskId);
+            if (await Task.WhenAny(blocked.Task, Task.Delay(5000)) != blocked.Task) throw new TimeoutException("旧任务目标运行时检查超时");
+            Assert(task.LastSyncStatus == "旧任务目标冲突或无法确认" && !Directory.Exists(Path.Combine(root, "independent-target")),
+                "旧配置在创建后出现嵌套冲突时，运行前停止且不建立新版目标");
+
+            File.WriteAllText(oldPath, "broken old settings");
+            bool refusedBroken = false;
+            try { manager.AddTask(new SyncTask { SourceFolder = source, DestinationFolder = "another-target", ScheduleMode = TaskSyncScheduleMode.ManualOnly }); }
+            catch (InvalidOperationException) { refusedBroken = true; }
+            Assert(refusedBroken && File.ReadAllText(oldPath) == "broken old settings", "旧配置损坏时停止新版任务并保留旧文件");
+            int refusedUnknownAlias = 0;
+            foreach (string oldTarget in new[] { "vol2/1000/protected", "vol3" })
+            {
+                oldTask.DestinationFolder = oldTarget;
+                File.WriteAllText(oldPath, oldSettings.ToJson());
+                try { manager.AddTask(new SyncTask { SourceFolder = source, DestinationFolder = "third-target", ScheduleMode = TaskSyncScheduleMode.ManualOnly }); }
+                catch (InvalidOperationException) { refusedUnknownAlias++; }
+            }
+            Assert(refusedUnknownAlias == 2, "离线时拒绝无法确认的任意卷路径别名");
+            oldTask.DestinationFolder = "我的文件";
+            File.WriteAllText(oldPath, oldSettings.ToJson());
+            bool refusedRoot = false;
+            try { manager.AddTask(new SyncTask { SourceFolder = source, DestinationFolder = "fourth-target", ScheduleMode = TaskSyncScheduleMode.ManualOnly }); }
+            catch (InvalidOperationException) { refusedRoot = true; }
+            Assert(refusedRoot, "旧任务以个人空间根目录为目标时拒绝创建新版任务");
+            oldTask.DestinationFolder = "protected";
+            oldSettings.LegacySourceFolder = "legacy-single-source";
+            oldSettings.LegacyTargetShare = "legacy-single-target";
+            File.WriteAllText(oldPath, oldSettings.ToJson());
+            bool refusedLegacyFields = false;
+            try { manager.AddTask(new SyncTask { SourceFolder = source, DestinationFolder = "fourth-target", ScheduleMode = TaskSyncScheduleMode.ManualOnly }); }
+            catch (InvalidOperationException) { refusedLegacyFields = true; }
+            Assert(refusedLegacyFields, "旧配置同时包含单任务字段时也拒绝猜测其目标");
+            oldSettings.LegacySourceFolder = null;
+            oldSettings.LegacyTargetShare = null;
+            oldTask.ProviderType = StorageProviderType.SmbShare;
+            oldTask.DestinationFolder = "\\\\nas\\share";
+            File.WriteAllText(oldPath, oldSettings.ToJson());
+            bool refusedUnmappedShare = false;
+            try { manager.AddTask(new SyncTask { SourceFolder = source, DestinationFolder = "fourth-target", ScheduleMode = TaskSyncScheduleMode.ManualOnly }); }
+            catch (InvalidOperationException) { refusedUnmappedShare = true; }
+            Assert(refusedUnmappedShare, "无法确认旧 SMB 或本地任务与飞牛目标的关系时停止");
+            oldTask.ProviderType = StorageProviderType.FnOsPersonal;
+            await using (var aliasApi = new FnOsApiClient())
+            {
+                aliasApi.SetAuthenticatedForTesting("isolated-test", 1000, 1);
+                await using var aliasProvider = new FnOsPersonalStorageProvider(aliasApi);
+                manager.StorageProviderSupplier = () => aliasProvider;
+                oldTask.DestinationFolder = "vol1/1000/online-protected";
+                File.WriteAllText(oldPath, oldSettings.ToJson());
+                bool refusedKnownAlias = false;
+                try { manager.AddTask(new SyncTask { SourceFolder = source, DestinationFolder = "我的文件/online-protected/child", ScheduleMode = TaskSyncScheduleMode.ManualOnly }); }
+                catch (InvalidOperationException) { refusedKnownAlias = true; }
+                Assert(refusedKnownAlias, "已连接账号的卷路径别名不能绕过旧任务目标保护");
+                oldTask.DestinationFolder = "vol2/1000/unconfirmed";
+                File.WriteAllText(oldPath, oldSettings.ToJson());
+                bool refusedOtherVolume = false;
+                try { manager.AddTask(new SyncTask { SourceFolder = source, DestinationFolder = "fifth-target", ScheduleMode = TaskSyncScheduleMode.ManualOnly }); }
+                catch (InvalidOperationException) { refusedOtherVolume = true; }
+                Assert(refusedOtherVolume, "已连接时不把不属于当前账号的卷路径误当作普通相对路径");
+                manager.StorageProviderSupplier = null;
+            }
+            if (!await manager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("旧目标检查任务未停止");
         }
 
         static async Task TestIsolatedTaskReattachmentAsync(string root)

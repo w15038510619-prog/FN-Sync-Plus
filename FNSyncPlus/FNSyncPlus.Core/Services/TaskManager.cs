@@ -132,6 +132,67 @@ namespace FNSyncPlus.Core.Services
 
         #region 任务集合增删改查
 
+        private string CanonicalFnDestination(string path)
+        {
+            static bool LooksLikeVolumePath(string value)
+            {
+                int slash = value.IndexOf('/');
+                int volumeEnd = slash < 0 ? value.Length : slash;
+                return volumeEnd > 3 && value.StartsWith("vol", StringComparison.OrdinalIgnoreCase) && value[3..volumeEnd].All(char.IsAsciiDigit);
+            }
+            var fn = StorageProviderSupplier?.Invoke() as FnOsPersonalStorageProvider;
+            string value = PathHelper.NormalizeRelPath(path);
+            if (fn?.IsAuthenticated == true)
+            {
+                string resolved = fn.NormalizeRelativePath(path);
+                if (LooksLikeVolumePath(value) && resolved.Equals(value, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("飞牛卷路径不属于当前账号，无法安全确认目标");
+                return resolved;
+            }
+            if (value.Equals("我的文件", StringComparison.OrdinalIgnoreCase)) return string.Empty;
+            if (value.StartsWith("我的文件/", StringComparison.OrdinalIgnoreCase)) value = value["我的文件/".Length..];
+            if (LooksLikeVolumePath(value))
+                throw new InvalidOperationException("无法离线确认飞牛目标路径别名，请连接后再操作");
+            return value;
+        }
+
+        private void EnsureSeparateFromLegacyTasks(SyncTask task)
+        {
+            if (!_settings.IsVersionedBetaProfile) return;
+            string path = _settings.VersionedLegacySettingsPath ?? throw new InvalidOperationException("旧配置检查路径缺失");
+            AppSettings legacy;
+            try
+            {
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var reader = new StreamReader(stream);
+                legacy = AppSettings.FromJson(reader.ReadToEnd());
+            }
+            catch (FileNotFoundException) { return; }
+            catch (DirectoryNotFoundException) { return; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException or System.Text.Json.JsonException)
+            { throw new InvalidOperationException("无法安全读取旧程序配置，已停止新版任务；请先检查旧配置。", ex); }
+            if (!string.IsNullOrWhiteSpace(legacy.LegacySourceFolder) || !string.IsNullOrWhiteSpace(legacy.LegacyTargetShare))
+                throw new InvalidOperationException("旧程序存在尚未确认的单任务配置，不能判断目标是否重叠。");
+            if (!PathHelper.IsSafeRelativePath(task.DestinationFolder)) throw new InvalidOperationException("新版备份目标路径无效");
+            string target = CanonicalFnDestination(task.DestinationFolder);
+            if (!PathHelper.IsSafeRelativePath(target)) throw new InvalidOperationException("新版备份目标路径无效");
+            foreach (var oldTask in legacy.Tasks)
+            {
+                if (oldTask == null) throw new InvalidOperationException("旧程序配置包含无效任务，无法检查目标重叠。");
+                if (oldTask.ProviderType != StorageProviderType.FnOsPersonal)
+                    throw new InvalidOperationException("无法确认旧程序非飞牛个人空间任务与当前目标是否重叠。");
+                if (!PathHelper.IsSafeRelativePath(oldTask.DestinationFolder))
+                    throw new InvalidOperationException("旧程序任务目标无效，无法检查目标重叠。");
+                string oldTarget = CanonicalFnDestination(oldTask.DestinationFolder);
+                if (string.IsNullOrEmpty(oldTarget)) throw new InvalidOperationException("旧程序任务使用个人空间根目录，无法安全建立新版目标。");
+                if (!PathHelper.IsSafeRelativePath(oldTarget)) throw new InvalidOperationException("旧程序任务目标无效，无法检查目标重叠。");
+                if (target.Equals(oldTarget, StringComparison.OrdinalIgnoreCase) ||
+                    target.StartsWith(oldTarget + "/", StringComparison.OrdinalIgnoreCase) ||
+                    oldTarget.StartsWith(target + "/", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("新版备份目标与旧程序任务相同或嵌套，请选择独立目标。");
+            }
+        }
+
         /// <summary>
         /// 添加新同步任务，并执行严格的安全冲突防重叠检查
         /// </summary>
@@ -141,6 +202,7 @@ namespace FNSyncPlus.Core.Services
             _settings.EnsureIsolatedTestTask(task);
             if (_settings.IsVersionedBetaProfile && (!UseExperimentalVersionedBackup || task.ProviderType != StorageProviderType.FnOsPersonal))
                 throw new InvalidOperationException("新版试验配置仅接受飞牛版本化备份任务。");
+            EnsureSeparateFromLegacyTasks(task);
             if (task.BackupStorageFormat != null)
                 throw new InvalidOperationException("不能把已有备份格式的任务作为新任务添加");
             task.IsExperimentalBackup = UseExperimentalVersionedBackup && task.ProviderType == StorageProviderType.FnOsPersonal;
@@ -162,18 +224,7 @@ namespace FNSyncPlus.Core.Services
                             throw new InvalidOperationException($"无法添加任务【{task.TaskName}】：本地源文件夹与已有任务【{existing.TaskName}】冲突！\n{reason}");
                         if (task.ProviderType == StorageProviderType.FnOsPersonal && existing.ProviderType == StorageProviderType.FnOsPersonal)
                         {
-                            var fn = StorageProviderSupplier?.Invoke() as FnOsPersonalStorageProvider;
-                            string CanonicalDestination(string path)
-                            {
-                                if (fn?.IsAuthenticated == true) return fn.NormalizeRelativePath(path);
-                                string value = PathHelper.NormalizeRelPath(path);
-                                if (value.Equals("我的文件", StringComparison.OrdinalIgnoreCase)) return string.Empty;
-                                if (value.StartsWith("我的文件/", StringComparison.OrdinalIgnoreCase)) value = value["我的文件/".Length..];
-                                if (value.StartsWith("vol1/", StringComparison.OrdinalIgnoreCase))
-                                    throw new InvalidOperationException("无法离线确认飞牛目标路径别名，请连接后再添加任务");
-                                return value;
-                            }
-                            string candidate = CanonicalDestination(task.DestinationFolder), prior = CanonicalDestination(existing.DestinationFolder);
+                            string candidate = CanonicalFnDestination(task.DestinationFolder), prior = CanonicalFnDestination(existing.DestinationFolder);
                             if (string.IsNullOrEmpty(candidate) || string.IsNullOrEmpty(prior) || candidate.Equals(prior, StringComparison.OrdinalIgnoreCase) ||
                                 candidate.StartsWith(prior + "/", StringComparison.OrdinalIgnoreCase) ||
                                 prior.StartsWith(candidate + "/", StringComparison.OrdinalIgnoreCase))
@@ -634,6 +685,16 @@ namespace FNSyncPlus.Core.Services
                 task.LastSyncStatus = "备份格式不受支持";
                 task.LastError = "任务的备份格式与当前同步引擎不匹配，已阻止同步。";
                 AppendTaskLog(task, "ERROR", task.LastError);
+                TaskStateChanged?.Invoke(task);
+                return;
+            }
+            try { EnsureSeparateFromLegacyTasks(task); }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
+            {
+                task.State = TaskSyncState.ConfigurationError;
+                task.LastSyncStatus = "旧任务目标冲突或无法确认";
+                task.LastError = ex.Message;
+                AppendTaskLog(task, "ERROR", ex.Message);
                 TaskStateChanged?.Invoke(task);
                 return;
             }

@@ -57,6 +57,9 @@ namespace FNSyncPlus.Core.Services
         public string? VersionedBetaProfilePath { get; private set; }
 
         [JsonIgnore]
+        public string? VersionedLegacySettingsPath { get; private set; }
+
+        [JsonIgnore]
         public bool IsVersionedBetaProfile => VersionedBetaProfilePath != null;
 
         [JsonIgnore]
@@ -66,16 +69,18 @@ namespace FNSyncPlus.Core.Services
         public static AppSettings CreateForTest(string testFilePath) => new AppSettings { CustomConfigPath = testFilePath };
 
         public static AppSettings LoadVersionedBetaProfile() => LoadVersionedProfileAt(
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "versioned-beta"));
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "versioned-beta"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FNSyncPlus", "settings.json"));
 
         // This isolated test path is never selected by ordinary application startup.
         public static AppSettings LoadVersionedBetaTestProfile(Guid id)
         {
             if (id == Guid.Empty) throw new ArgumentException("测试配置标识无效", nameof(id));
-            return LoadVersionedProfileAt(Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"VersionedProfile_{id:N}"));
+            string folder = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"VersionedProfile_{id:N}");
+            return LoadVersionedProfileAt(folder, Path.Combine(folder, "old-settings-readonly.json"));
         }
 
-        private static AppSettings LoadVersionedProfileAt(string folder)
+        private static AppSettings LoadVersionedProfileAt(string folder, string legacySettingsPath)
         {
             Directory.CreateDirectory(folder);
             string path = Path.Combine(folder, "settings.json");
@@ -83,6 +88,7 @@ namespace FNSyncPlus.Core.Services
             if (!string.IsNullOrEmpty(settings.LegacySourceFolder) || !string.IsNullOrEmpty(settings.LegacyTargetShare))
                 throw new InvalidDataException("新版配置包含旧式单任务字段，必须先明确迁移。");
             settings.VersionedBetaProfilePath = path;
+            settings.VersionedLegacySettingsPath = legacySettingsPath;
             settings.IsolatedCredentialPath = Path.Combine(folder, "credentials.dat");
             return settings;
         }
