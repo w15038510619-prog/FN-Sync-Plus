@@ -596,9 +596,15 @@ namespace FNSyncPlus.Core.Services
             public Task<ExperimentalProjectionRecoveryInspector.Inspection?> InspectAsync() =>
                 RunAsync((provider, token) => new ExperimentalProjectionRecoveryLocator().LocateAsync(provider, _destination, token));
 
+            public Task<ExperimentalStableLockRecovery.Inspection?> InspectStableLockAsync() =>
+                RunAsync((provider, token) => new ExperimentalStableLockRecovery().InspectAsync(provider, _destination, token));
+
             public Task<ExperimentalProjectionRecovery.Recovered> RecoverAsync(
                 ExperimentalProjectionRecoveryInspector.Inspection expected, string acknowledgement) =>
                 RunAsync((provider, token) => new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(provider, _destination, expected, acknowledgement, token));
+
+            public Task ReleaseStableLockAsync(ExperimentalStableLockRecovery.Inspection expected, string acknowledgement) =>
+                RunAsync(async (provider, token) => { await new ExperimentalStableLockRecovery().ReleaseAfterOwnerStoppedAsync(provider, _destination, expected, acknowledgement, token).ConfigureAwait(false); return true; });
 
             public async ValueTask DisposeAsync()
             {

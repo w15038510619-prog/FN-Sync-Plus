@@ -1704,6 +1704,7 @@ namespace FNSyncPlus.Tests
                 await TestScheduledTimeAfterManualSyncAsync(root);
                 await TestStartupModeSwitchAsync(root);
                 await TestStaleAutomationCallbacksAsync(root);
+                await TestStableLockRecoveryAsync(root);
                 await TestExperimentalMirrorAsync(root);
                 await TestVersionedDeviceBindingAsync(root);
                 await TestLegacyTargetProtectionAsync(root);
@@ -2063,6 +2064,88 @@ namespace FNSyncPlus.Tests
                 provider.ContinueUpload.TrySetResult();
                 Environment.CurrentDirectory = oldDirectory;
             }
+        }
+
+        static async Task TestStableLockRecoveryAsync(string root)
+        {
+            string source = Path.Combine(root, "stable-lock-source"), target = "stable-lock-target";
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "sample.txt"), "committed before interruption");
+            var provider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+            var first = await new ExperimentalVersionedBackup().CreateNewAsync(provider, source, target);
+            var plan = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, target);
+            await new ExperimentalFirstProjection().PublishAsync(provider, target, plan);
+            var abandoned = await ExperimentalRemoteLease.TryAcquireAsync(provider, target)
+                ?? throw new InvalidDataException("测试锁未能获取");
+            var recovery = new ExperimentalStableLockRecovery();
+            var inspection = await recovery.InspectAsync(provider, target)
+                ?? throw new InvalidDataException("未发现测试遗留锁");
+            Assert(inspection.VersionId == first.Snapshot.Id && (await ExperimentalRemoteLease.InspectAsync(provider, target)) != null,
+                "上传中断锁只读检查确认清单和当前目录一致且不释放锁");
+            bool missingConsentRejected = false, changedInspectionRejected = false;
+            try { await recovery.ReleaseAfterOwnerStoppedAsync(provider, target, inspection, ""); }
+            catch (InvalidOperationException) { missingConsentRejected = true; }
+            try { await recovery.ReleaseAfterOwnerStoppedAsync(provider, target, inspection with { OwnerSha256 = new string('0', 64) }, ExperimentalProjectionRecovery.RequiredAcknowledgement); }
+            catch (InvalidDataException) { changedInspectionRejected = true; }
+            Assert(missingConsentRejected && changedInspectionRejected && (await ExperimentalRemoteLease.InspectAsync(provider, target)) != null,
+                "缺少停止写入确认或锁身份不匹配时保留锁");
+            string current = Path.Combine(root, target, "current", "sample.txt");
+            File.WriteAllText(current, "unexpected external modification");
+            bool changedCurrentRejected = false;
+            try { await recovery.ReleaseAfterOwnerStoppedAsync(provider, target, inspection, ExperimentalProjectionRecovery.RequiredAcknowledgement); }
+            catch (InvalidDataException) { changedCurrentRejected = true; }
+            Assert(changedCurrentRejected && (await ExperimentalRemoteLease.InspectAsync(provider, target)) != null,
+                "当前物理文件发生变化时拒绝释放锁");
+            File.WriteAllText(current, "committed before interruption");
+            var settings = AppSettings.CreateInMemory();
+            var task = new SyncTask { TaskName = "稳定锁恢复", SourceFolder = source, DestinationFolder = target,
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            using (var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "stable-lock-logs")), experimentalVersionedBackup: true))
+            {
+                manager.StorageProviderSupplier = () => provider;
+                manager.AddTask(task);
+                await using (var session = await manager.BeginIsolatedRecoveryAsync(task.TaskId, TimeSpan.FromSeconds(5))
+                    ?? throw new TimeoutException("稳定锁恢复会话未开始"))
+                {
+                    var managedInspection = await session.InspectStableLockAsync();
+                    Assert(task.IsUserPaused && managedInspection == inspection, "任务暂停后通过恢复会话只读检查稳定锁");
+                    await session.ReleaseStableLockAsync(managedInspection!, ExperimentalProjectionRecovery.RequiredAcknowledgement);
+                }
+                Assert(task.IsUserPaused, "稳定锁恢复完成后任务仍保持暂停");
+                if (!await manager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("稳定锁恢复管理器未停止");
+            }
+            var nextLease = await ExperimentalRemoteLease.TryAcquireAsync(provider, target);
+            Assert(nextLease != null && File.ReadAllText(current) == "committed before interruption" && provider.DeleteCalls == 0,
+                "确认停止并复核一致后可释放遗留锁，当前内容不变且不删除文件");
+            if (nextLease != null) await nextLease.ReleaseAsync();
+
+            var secondAbandoned = await ExperimentalRemoteLease.TryAcquireAsync(provider, target)
+                ?? throw new InvalidDataException("第二个测试锁未能获取");
+            await new VersionedManifestStore().SaveAsync(provider, target, first.Snapshot.Manifest, first.Snapshot.Id);
+            bool newerVersionRejected = false;
+            try { await recovery.InspectAsync(provider, target); }
+            catch (InvalidDataException) { newerVersionRejected = true; }
+            Assert(newerVersionRejected && (await ExperimentalRemoteLease.InspectAsync(provider, target)) != null,
+                "最新清单与当前物理版本不一致时保留锁");
+
+            const string publicationTarget = "stable-lock-publication-target";
+            var publicationProvider = new FaultInjectingProvider(root);
+            await new ExperimentalVersionedBackup().CreateNewAsync(publicationProvider, source, publicationTarget);
+            var publicationPlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(publicationProvider, publicationTarget);
+            publicationProvider.FailUploadSuffix = "/released";
+            bool releaseFailed = false;
+            try { await new ExperimentalFirstProjection().PublishAsync(publicationProvider, publicationTarget, publicationPlan); }
+            catch (IOException) { releaseFailed = true; }
+            publicationProvider.FailUploadSuffix = null;
+            bool boundJournalRejected = false;
+            try { await recovery.InspectAsync(publicationProvider, publicationTarget); }
+            catch (InvalidDataException) { boundJournalRejected = true; }
+            var publicationInspection = await new ExperimentalProjectionRecoveryLocator().LocateAsync(publicationProvider, publicationTarget);
+            Assert(releaseFailed && boundJournalRejected && publicationInspection?.Stage == ExperimentalProjectionRecoveryInspector.Stage.Committed,
+                "锁已绑定发布记录时拒绝走上传阶段解锁流程");
+            if (publicationInspection != null)
+                await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(publicationProvider, publicationTarget,
+                    publicationInspection, ExperimentalProjectionRecovery.RequiredAcknowledgement);
         }
 
         static async Task TestStaleAutomationCallbacksAsync(string root)
@@ -3661,6 +3744,11 @@ namespace FNSyncPlus.Tests
             var locatedArchive = await new ExperimentalProjectionRecoveryLocator().LocateAsync(failing, "projection-archive-uncertain");
             Assert(locatedArchive == inspectedArchive && !Directory.Exists(Path.Combine(root, "projection-archive-uncertain", "current")),
                 "只读定位器根据未释放锁找到唯一的中断发布记录");
+            bool stableLockRejected = false;
+            try { await new ExperimentalStableLockRecovery().InspectAsync(failing, "projection-archive-uncertain"); }
+            catch (Exception ex) when (ex is InvalidDataException or IOException) { stableLockRejected = true; }
+            Assert(stableLockRejected && (await ExperimentalRemoteLease.InspectAsync(failing, "projection-archive-uncertain")) != null,
+                "存在未完成的物理发布时不能走稳定备份释放锁流程");
             string intentPath = Path.Combine(root, uncertainJournal.Replace('/', Path.DirectorySeparatorChar), "intent.json");
             byte[] validIntent = await File.ReadAllBytesAsync(intentPath);
             var tamperedIntent = System.Text.Json.Nodes.JsonNode.Parse(validIntent)!.AsObject();

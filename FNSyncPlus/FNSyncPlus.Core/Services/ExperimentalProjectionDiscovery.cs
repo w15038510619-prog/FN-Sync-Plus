@@ -25,13 +25,55 @@ public sealed class ExperimentalProjectionDiscovery
     {
         ArgumentNullException.ThrowIfNull(provider);
         if (!PathHelper.IsSafeRelativePath(backupRoot)) throw new ArgumentException("备份目录路径无效");
-        string Canonical(string path) => provider is FnOsPersonalStorageProvider fn ? fn.NormalizeRelativePath(path) : PathHelper.NormalizeRelPath(path);
-        string root = Canonical(backupRoot), projections = $"{root}/.fnsync/projections";
+        string root = Canonical(provider, backupRoot);
         var lease = await ExperimentalRemoteLease.TryAcquireAsync(provider, root, token).ConfigureAwait(false)
             ?? throw new IOException("备份被其他写入者占用或存在未释放的锁");
         Exception? failure = null;
         try
         {
+            return await DiscoverRecordsAsync(provider, root, allowUnpublished, token).ConfigureAwait(false);
+        }
+        catch (Exception ex) { failure = ex; throw; }
+        finally
+        {
+            using var releaseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            try { await lease.ReleaseAsync(releaseTimeout.Token).ConfigureAwait(false); }
+            catch (Exception ex) { throw new IOException("查找发布记录后释放锁失败", failure == null ? ex : new AggregateException(failure, ex)); }
+        }
+    }
+
+    internal async Task<Result> DiscoverUnderHeldLeaseAsync(INasStorageProvider provider, string backupRoot,
+        ExperimentalRemoteLease.Inspection expected, CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        ArgumentNullException.ThrowIfNull(expected);
+        if (!PathHelper.IsSafeRelativePath(backupRoot)) throw new ArgumentException("备份目录路径无效");
+        string root = Canonical(provider, backupRoot);
+        async Task CheckLeaseAsync()
+        {
+            var actual = await ExperimentalRemoteLease.InspectAsync(provider, root, token).ConfigureAwait(false);
+            if (actual == null || !Canonical(provider, actual.DirectoryPath).Equals(Canonical(provider, expected.DirectoryPath), StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(actual.OwnerSha256, expected.OwnerSha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("检查期间未释放锁发生变化");
+        }
+        await CheckLeaseAsync().ConfigureAwait(false);
+        var result = await DiscoverRecordsAsync(provider, root, false, token, expected).ConfigureAwait(false)
+            ?? throw new InvalidDataException("无法唯一确定已发布目录");
+        var latest = await new VersionedManifestStore().LoadForWritingAsync(provider, root, token).ConfigureAwait(false);
+        if (latest == null || latest.Id != result.Plan.VersionId)
+            throw new InvalidDataException("最新清单与当前物理目录版本不一致，拒绝释放锁");
+        await CheckLeaseAsync().ConfigureAwait(false);
+        return result;
+    }
+
+    private static string Canonical(INasStorageProvider provider, string path) =>
+        provider is FnOsPersonalStorageProvider fn ? fn.NormalizeRelativePath(path) : PathHelper.NormalizeRelPath(path);
+
+    private async Task<Result?> DiscoverRecordsAsync(INasStorageProvider provider, string root, bool allowUnpublished, CancellationToken token,
+        ExperimentalRemoteLease.Inspection? heldLease = null)
+    {
+            string Canonical(string path) => ExperimentalProjectionDiscovery.Canonical(provider, path);
+            string projections = $"{root}/.fnsync/projections";
             var versions = new VersionedManifestStore();
             if (await versions.LoadForWritingAsync(provider, root, token).ConfigureAwait(false) == null)
                 throw new InvalidDataException("备份没有已提交版本");
@@ -60,6 +102,8 @@ public sealed class ExperimentalProjectionDiscovery
                         !Canonical(intent.Next.CandidateRoot).Equals($"{candidate}/current", StringComparison.OrdinalIgnoreCase) ||
                         !PathHelper.IsSafeRelativePath(intent.LeaseDirectory) || intent.OwnerSha256?.Length != 64 || !intent.OwnerSha256.All(Uri.IsHexDigit))
                         throw new InvalidDataException("发布意图不完整或不属于候选目录");
+                    if (heldLease != null && Canonical(intent.LeaseDirectory).Equals(Canonical(heldLease.DirectoryPath), StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException("该锁关联物理发布记录，请使用发布恢复流程");
                     byte[] planBytes = JsonSerializer.SerializeToUtf8Bytes(intent.Next);
                     await ExperimentalNextProjection.VerifyRecordAsync(provider, $"{candidate}/receipt.json", planBytes, token).ConfigureAwait(false);
                     await ExperimentalNextProjection.VerifyRecordAsync(provider, $"{journal}/committed.json", planBytes, token).ConfigureAwait(false);
@@ -115,13 +159,5 @@ public sealed class ExperimentalProjectionDiscovery
             if (visited.Count != entries.Count) throw new InvalidDataException("发布链存在分支或孤立记录");
             await ExperimentalFirstProjection.VerifyTreeAsync(provider, $"{root}/current", head.Intent.Next, token).ConfigureAwait(false);
             return new Result(head.Intent.Next, new ExperimentalFirstProjection.Published(head.Intent.Next.VersionId, $"{root}/current", head.Journal));
-        }
-        catch (Exception ex) { failure = ex; throw; }
-        finally
-        {
-            using var releaseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            try { await lease.ReleaseAsync(releaseTimeout.Token).ConfigureAwait(false); }
-            catch (Exception ex) { throw new IOException("查找发布记录后释放锁失败", failure == null ? ex : new AggregateException(failure, ex)); }
-        }
     }
 }
