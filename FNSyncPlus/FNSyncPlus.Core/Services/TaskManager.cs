@@ -819,6 +819,9 @@ namespace FNSyncPlus.Core.Services
             {
                 taskToken.ThrowIfCancellationRequested();
                 task.State = TaskSyncState.Syncing;
+                task.CurrentProgress = 0;
+                task.CurrentFile = string.Empty;
+                task.CurrentSpeedBytesPerSec = 0;
                 task.LastError = null;
                 task.QueuedChangesCount = 0;
                 task.LastDetectedChange = null;

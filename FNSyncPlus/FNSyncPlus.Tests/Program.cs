@@ -2317,6 +2317,13 @@ namespace FNSyncPlus.Tests
                     "隔离任务完成时首次物理目录已发布并可读取");
                 string initialProjectionRoot = Path.Combine(root, task.DestinationFolder, ".fnsync", "projections");
                 int candidatesBefore = Directory.GetDirectories(initialProjectionRoot, "candidate-*").Length;
+                double? secondStartProgress = null;
+                string? secondStartFile = null;
+                manager.TaskStateChanged += t =>
+                {
+                    if (t.TaskId == task.TaskId && t.State == TaskSyncState.Syncing && secondStartProgress == null)
+                    { secondStartProgress = t.CurrentProgress; secondStartFile = t.CurrentFile; }
+                };
                 completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 for (int attempt = 0; attempt < 150 && !completed.Task.IsCompleted; attempt++)
                 {
@@ -2324,6 +2331,8 @@ namespace FNSyncPlus.Tests
                     await Task.WhenAny(completed.Task, Task.Delay(100));
                 }
                 if (!completed.Task.IsCompleted) throw new TimeoutException("隔离任务无变化检查超时");
+                Assert(secondStartProgress == 0 && secondStartFile == string.Empty,
+                    "再次同步开始时清除上次完成的 100% 进度和文件状态");
                 var unchangedVersion = await versions.LoadAsync(provider, task.DestinationFolder);
                 Assert(task.State == TaskSyncState.Completed && unchangedVersion?.Id == first?.Id && task.LastUploadedFiles == 0 &&
                     Directory.GetDirectories(initialProjectionRoot, "candidate-*").Length == candidatesBefore &&

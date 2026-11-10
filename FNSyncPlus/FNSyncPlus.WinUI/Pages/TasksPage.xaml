@@ -233,10 +233,14 @@
                                     </Grid.RowDefinitions>
 
                                     <Grid Grid.Row="0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
                                         <TextBlock Text="{x:Bind CurrentFileText, Mode=OneWay}" FontSize="11" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        <TextBlock Text="{x:Bind CurrentProgressText, Mode=OneWay}" FontSize="11" FontWeight="Bold" Foreground="{ThemeResource AccentFillColorDefaultBrush}" HorizontalAlignment="Right" />
+                                        <TextBlock Grid.Column="1" Text="{x:Bind CurrentProgressText, Mode=OneWay}" FontSize="11" FontWeight="Bold" Foreground="{ThemeResource AccentFillColorDefaultBrush}" Margin="8,0,0,0" />
                                     </Grid>
-                                    <ProgressBar Grid.Row="1" Value="{x:Bind CurrentProgress, Mode=OneWay}" Maximum="100" Height="4" />
+                                    <ProgressBar Grid.Row="1" Value="{x:Bind CurrentProgress, Mode=OneWay}" IsIndeterminate="{x:Bind IsProgressIndeterminate, Mode=OneWay}" Maximum="100" Height="4" />
                                 </Grid>
                             </Grid>
                         </Border>

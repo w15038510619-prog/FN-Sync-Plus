@@ -14,6 +14,7 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         public string TaskId => Model.TaskId;
         public bool CanInspectInterruption => Model.IsExperimentalBackup;
+        public bool IsProgressIndeterminate => Model.IsExperimentalBackup && IsSyncing;
 
         [ObservableProperty]
         private string _taskName;
@@ -95,9 +96,10 @@ namespace FNSyncPlus.WinUI.ViewModels
             State = Model.State;
             CurrentProgress = Model.CurrentProgress;
             CurrentFile = Model.CurrentFile;
-            CurrentFileText = string.IsNullOrEmpty(Model.CurrentFile) ? string.Empty : $"传输: {Model.CurrentFile}";
-            CurrentProgressText = $"{Model.CurrentProgress:F0}%";
             IsSyncing = Model.State == TaskSyncState.Syncing || Model.State == TaskSyncState.Scanning;
+            OnPropertyChanged(nameof(IsProgressIndeterminate));
+            CurrentFileText = string.IsNullOrEmpty(Model.CurrentFile) ? string.Empty : Model.IsExperimentalBackup ? Model.CurrentFile : $"传输: {Model.CurrentFile}";
+            CurrentProgressText = IsProgressIndeterminate ? "正在处理" : $"{Model.CurrentProgress:F0}%";
             IsPaused = Model.State == TaskSyncState.Paused;
             IsConfigurationError = Model.State == TaskSyncState.ConfigurationError;
             CanRunSync = !IsConfigurationError && Model.State != TaskSyncState.Removing && Model.State != TaskSyncState.Paused && !IsSyncing;
@@ -124,6 +126,8 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 FormattedLastSync = "尚未进行初次同步";
             }
+            if (Model.LastFailureTime.HasValue)
+                FormattedLastSync += $" · 上次失败 {Model.LastFailureTime.Value:yyyy-MM-dd HH:mm}";
 
             ScheduleSummaryText = Model.ScheduleSummary;
         }
