@@ -1586,6 +1586,7 @@ namespace FNSyncPlus.Tests
                 await TestTestLabIsolationAsync(root);
                 await TestFirstPhysicalProjectionAsync(root);
                 await TestNextPhysicalProjectionAsync(root);
+                await TestLongDirectoryRenameAsync(root);
                 await TestProjectionInspectionStatesAsync(root);
             }
             finally
@@ -2264,6 +2265,40 @@ namespace FNSyncPlus.Tests
                 File.ReadAllText(Path.Combine(root, "inspect-recovery-race", "current", "file.txt")) == "after interruption" &&
                 await ExperimentalRemoteLease.InspectAsync(concurrentRecovery, "inspect-recovery-race") == null,
                 "并发恢复只有一个执行者，其余请求安全停止");
+        }
+
+        static async Task TestLongDirectoryRenameAsync(string root)
+        {
+            string source = Path.Combine(root, "long-directory-source"), target = "long-directory-target";
+            string before = new string('中', 98) + "ab", after = new string('长', 98) + "cd";
+            Directory.CreateDirectory(Path.Combine(source, before, "空目录"));
+            File.WriteAllText(Path.Combine(source, before, "一.txt"), "first file");
+            File.WriteAllText(Path.Combine(source, before, "二.txt"), "second distinct file");
+            var provider = new FaultInjectingProvider(root);
+            var backup = new ExperimentalVersionedBackup();
+            await backup.CreateNewAsync(provider, source, target);
+            var oldPlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, target);
+            var oldPublication = await new ExperimentalFirstProjection().PublishAsync(provider, target, oldPlan);
+            Directory.Move(Path.Combine(source, before), Path.Combine(source, after));
+            var updated = await backup.RunAsync(provider, source, target);
+            var nextPlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, target);
+            var publication = await new ExperimentalNextProjection().PublishAsync(provider, target, oldPlan, oldPublication, nextPlan);
+            var names = LongNameEngine.CreateForProviderType(provider.ProviderType);
+            string oldPhysical = names.TranslateDirPath(before).StoredRel, newPhysical = names.TranslateDirPath(after).StoredRel;
+            string current = Path.Combine(root, target, "current"), archive = Path.Combine(root, publication.ArchivedRoot.Replace('/', Path.DirectorySeparatorChar));
+            string restoredRoot = Path.Combine(root, "long-directory-restored");
+            var restore = new RestoreEngine(new ManifestManager());
+            var report = await restore.RunRestoreVersionedAsync(provider, target, restoredRoot);
+            var oldFile = updated.Snapshot.Manifest.History.Single(h => h.OriginalRel == $"{before}/一.txt" && h.Reason == "renamed");
+            string historyRoot = Path.Combine(root, "long-directory-history");
+            bool history = await restore.RunRestoreHistoryFileAsync(provider, target, historyRoot, oldFile);
+            Assert(updated.RenamedFiles == 2 && updated.UploadedFiles == 0 &&
+                !Directory.Exists(Path.Combine(current, oldPhysical)) && Directory.Exists(Path.Combine(current, newPhysical, "空目录")) &&
+                File.ReadAllText(Path.Combine(current, newPhysical, "一.txt")) == "first file" &&
+                File.ReadAllText(Path.Combine(archive, oldPhysical, "二.txt")) == "second distinct file" &&
+                report.RestoredFiles == 2 && report.IntegrityVerifiedFiles == 2 && Directory.Exists(Path.Combine(restoredRoot, after, "空目录")) &&
+                history && File.ReadAllText(Path.Combine(historyRoot, before, "一.txt")) == "first file",
+                "超长目录改名后当前树、旧归档、空目录和历史均可恢复");
         }
 
         static async Task TestNextPhysicalProjectionAsync(string root)
