@@ -1,6 +1,7 @@
 using System;
 using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
+using FNSyncPlus.WinUI.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -10,6 +11,7 @@ namespace FNSyncPlus.WinUI.Dialogs
     {
         private readonly SyncTask _task;
         private readonly TaskManager _taskManager;
+        private readonly bool _canTestMirror;
 
         public bool WasConfigSaved { get; private set; }
 
@@ -20,8 +22,11 @@ namespace FNSyncPlus.WinUI.Dialogs
 
             InitializeComponent();
 
-            MirrorStrategyItem.IsEnabled = false;
-            MirrorUnavailableNotice.Visibility = Visibility.Visible;
+            var settings = AppServices.GetService<AppSettings>();
+            _canTestMirror = AppServices.IsIsolatedTestSession && settings.IsVersionedBetaTestProfile &&
+                settings.HasIsolatedTestBoundary && _task.IsExperimentalBackup;
+            MirrorStrategyItem.IsEnabled = _canTestMirror;
+            MirrorUnavailableNotice.Visibility = _canTestMirror ? Visibility.Collapsed : Visibility.Visible;
 
             PrimaryButtonClick += OnPrimaryButtonClick;
 
@@ -61,7 +66,9 @@ namespace FNSyncPlus.WinUI.Dialogs
                 BackupStrategy.Mirror => 2,
                 _ => 0
             };
+            MirrorDeletionConsent.IsChecked = _task.MirrorDeletionEnabled;
             CmbStrategy.SelectedIndex = stratIdx;
+            UpdateMirrorConsentVisibility();
 
             UpdateIntervalPanelVisibility();
         }
@@ -83,6 +90,14 @@ namespace FNSyncPlus.WinUI.Dialogs
             UpdateIntervalPanelVisibility();
         }
 
+        private void CmbStrategy_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateMirrorConsentVisibility();
+
+        private void UpdateMirrorConsentVisibility()
+        {
+            if (MirrorDeletionConsent != null)
+                MirrorDeletionConsent.Visibility = _canTestMirror && CmbStrategy.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
         private void UpdateIntervalPanelVisibility()
         {
             if (PnlInterval == null) return;
@@ -93,8 +108,10 @@ namespace FNSyncPlus.WinUI.Dialogs
 
         private void OnPrimaryButtonClick(ContentDialog sender, ContentDialogButtonClickEventArgs args)
         {
-            if (CmbStrategy.SelectedIndex == 2)
+            if (CmbStrategy.SelectedIndex == 2 && (!_canTestMirror || MirrorDeletionConsent.IsChecked != true))
             {
+                TxtSaveError.Text = "镜像测试需要在授权范围内明确勾选允许移入历史。";
+                TxtSaveError.Visibility = Visibility.Visible;
                 args.Cancel = true;
                 return;
             }
@@ -147,6 +164,7 @@ namespace FNSyncPlus.WinUI.Dialogs
                 2 => BackupStrategy.Mirror,
                 _ => BackupStrategy.Smart
             };
+            edited.MirrorDeletionEnabled = edited.Strategy == BackupStrategy.Mirror && MirrorDeletionConsent.IsChecked == true;
 
             try
             {

@@ -118,7 +118,7 @@
                 <StackPanel Spacing="10">
                     <TextBlock Text="远端重命名与备份策略" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
 
-                    <ComboBox x:Name="CmbStrategy" HorizontalAlignment="Stretch">
+                    <ComboBox x:Name="CmbStrategy" HorizontalAlignment="Stretch" SelectionChanged="CmbStrategy_SelectionChanged">
                         <ComboBoxItem Tag="Smart">
                             <StackPanel Spacing="2">
                                 <TextBlock Text="智能备份 (默认推荐)" FontWeight="SemiBold" FontSize="12" />
@@ -139,6 +139,9 @@
                         </ComboBoxItem>
                     </ComboBox>
                     <TextBlock x:Name="MirrorUnavailableNotice" Visibility="Collapsed" Text="镜像删除仍在隔离验证，请选择智能备份或归档备份。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <CheckBox x:Name="MirrorDeletionConsent" Visibility="Collapsed">
+                        <TextBlock Text="我明确允许把本地已删除的受管理测试文件从当前目录移入历史；额外远端文件或源目录变空时停止。" TextWrapping="Wrap" MaxWidth="520" />
+                    </CheckBox>
                 </StackPanel>
             </Border>
 
