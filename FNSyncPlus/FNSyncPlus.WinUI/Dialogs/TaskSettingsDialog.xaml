@@ -134,7 +134,7 @@
                         <ComboBoxItem x:Name="MirrorStrategyItem" Tag="Mirror">
                             <StackPanel Spacing="2">
                                 <TextBlock Text="镜像备份" FontWeight="SemiBold" FontSize="12" />
-                                <TextBlock Text="NAS 严格镜像本地目录树，远端有效结构与本地完全一致" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="当前树跟随本地变更并保留历史；发现未知远端项目或源目录变空时停止。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                         </ComboBoxItem>
                     </ComboBox>

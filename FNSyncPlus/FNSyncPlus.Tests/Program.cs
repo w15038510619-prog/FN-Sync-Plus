@@ -2416,6 +2416,25 @@ namespace FNSyncPlus.Tests
             var versions = new VersionedManifestStore();
             var first = await versions.LoadAsync(provider, target) ?? throw new InvalidDataException("首次镜像清单不存在");
             File.Delete(Path.Combine(source, "remove.txt")); // Synthetic local fixture only.
+            File.WriteAllText(Path.Combine(source, "uncertain.txt"), "different content");
+            bool ambiguousRejected = false;
+            try { await new ExperimentalVersionedBackup().RunAsync(provider, source, target, strategy: BackupStrategy.Mirror, mirrorDeletionEnabled: true); }
+            catch (InvalidDataException) { ambiguousRejected = true; }
+            Assert(ambiguousRejected && (await versions.LoadAsync(provider, target))?.Id == first.Id &&
+                File.Exists(Path.Combine(root, target, "current", "remove.txt")) && provider.DeleteCalls == 0,
+                "镜像遇到无法确认的新增与消失文件时保留旧版本和当前文件");
+            File.Delete(Path.Combine(source, "uncertain.txt")); // Synthetic local fixture only.
+            File.WriteAllText(Path.Combine(source, "keep.txt"), "changed content requiring upload");
+            provider.CorruptObjectUpload = true;
+            bool uploadRejected = false;
+            try { await new ExperimentalVersionedBackup().RunAsync(provider, source, target, strategy: BackupStrategy.Mirror, mirrorDeletionEnabled: true); }
+            catch (InvalidDataException) { uploadRejected = true; }
+            finally { provider.CorruptObjectUpload = false; }
+            Assert(uploadRejected && (await versions.LoadAsync(provider, target))?.Id == first.Id &&
+                File.ReadAllText(Path.Combine(root, target, "current", "keep.txt")) == "keep original" &&
+                File.Exists(Path.Combine(root, target, "current", "remove.txt")) && provider.DeleteCalls == 0,
+                "镜像上传校验失败时不提交删除，旧当前文件保持完整");
+            File.WriteAllText(Path.Combine(source, "keep.txt"), "keep original");
             var updated = await RunOnce();
             var second = await versions.LoadAsync(provider, target) ?? throw new InvalidDataException("镜像增量清单不存在");
             string current = Path.Combine(root, target, "current");
