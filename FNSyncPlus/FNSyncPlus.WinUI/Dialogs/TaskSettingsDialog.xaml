@@ -130,13 +130,14 @@
                                 <TextBlock Text="只增不减，旧文件全部保留在远端与历史记录中，新旧共存" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                         </ComboBoxItem>
-                        <ComboBoxItem Tag="Mirror">
+                        <ComboBoxItem x:Name="MirrorStrategyItem" Tag="Mirror">
                             <StackPanel Spacing="2">
                                 <TextBlock Text="镜像备份" FontWeight="SemiBold" FontSize="12" />
                                 <TextBlock Text="NAS 严格镜像本地目录树，远端有效结构与本地完全一致" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                         </ComboBoxItem>
                     </ComboBox>
+                    <TextBlock x:Name="MirrorUnavailableNotice" Visibility="Collapsed" Text="新版备份试用暂不支持镜像删除，请选择智能备份或归档备份。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
             </Border>
 

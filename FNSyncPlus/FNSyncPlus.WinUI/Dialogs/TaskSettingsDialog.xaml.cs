@@ -20,6 +20,9 @@ namespace FNSyncPlus.WinUI.Dialogs
 
             InitializeComponent();
 
+            MirrorStrategyItem.IsEnabled = !_task.IsExperimentalBackup;
+            MirrorUnavailableNotice.Visibility = _task.IsExperimentalBackup ? Visibility.Visible : Visibility.Collapsed;
+
             PrimaryButtonClick += OnPrimaryButtonClick;
 
             LoadTaskSettings();
@@ -90,6 +93,11 @@ namespace FNSyncPlus.WinUI.Dialogs
 
         private void OnPrimaryButtonClick(ContentDialog sender, ContentDialogButtonClickEventArgs args)
         {
+            if (_task.IsExperimentalBackup && CmbStrategy.SelectedIndex == 2)
+            {
+                args.Cancel = true;
+                return;
+            }
             string newName = TxtTaskName.Text?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(newName))
             {
