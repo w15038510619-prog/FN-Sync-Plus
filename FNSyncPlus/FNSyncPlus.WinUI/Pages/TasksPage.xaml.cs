@@ -114,7 +114,7 @@ namespace FNSyncPlus.WinUI.Pages
             }
             catch (Exception ex)
             {
-                await new ContentDialog { Title = "中断检查或修复未完成", Content = $"任务保持暂停，现场已保留。\n{ex.Message}",
+                await new ContentDialog { Title = "中断检查或修复未完成", Content = $"请检查任务状态和发布记录，再决定如何处理；不要直接重复修复。\n{ex.Message}",
                     CloseButtonText = "知道了", XamlRoot = XamlRoot }.ShowAsync();
             }
             finally
