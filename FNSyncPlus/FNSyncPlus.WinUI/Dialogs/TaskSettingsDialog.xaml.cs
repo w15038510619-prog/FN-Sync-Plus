@@ -105,10 +105,20 @@ namespace FNSyncPlus.WinUI.Dialogs
                 return;
             }
 
-            _task.TaskName = newName;
+            var edited = new SyncTask
+            {
+                TaskId = _task.TaskId,
+                TaskName = newName,
+                Enabled = _task.Enabled,
+                AutoSyncEnabled = _task.AutoSyncEnabled,
+                RealtimeWatchEnabled = _task.RealtimeWatchEnabled,
+                Mode = _task.Mode,
+                IntervalMinutes = _task.IntervalMinutes,
+                SettlingDelaySeconds = _task.SettlingDelaySeconds
+            };
 
             // 调度模式
-            _task.ScheduleMode = CmbScheduleMode.SelectedIndex switch
+            edited.ScheduleMode = CmbScheduleMode.SelectedIndex switch
             {
                 0 => TaskSyncScheduleMode.SmartAuto,
                 1 => TaskSyncScheduleMode.RealtimeOnly,
@@ -120,17 +130,17 @@ namespace FNSyncPlus.WinUI.Dialogs
             // 周期
             if (CmbInterval.SelectedItem is ComboBoxItem intervalItem && int.TryParse(intervalItem.Tag?.ToString(), out int intervalVal))
             {
-                _task.IntervalMinutes = intervalVal;
+                edited.IntervalMinutes = intervalVal;
             }
 
             // 防抖
             if (CmbSettlingDelay.SelectedItem is ComboBoxItem delayItem && int.TryParse(delayItem.Tag?.ToString(), out int delayVal))
             {
-                _task.SettlingDelaySeconds = delayVal;
+                edited.SettlingDelaySeconds = delayVal;
             }
 
             // 策略
-            _task.Strategy = CmbStrategy.SelectedIndex switch
+            edited.Strategy = CmbStrategy.SelectedIndex switch
             {
                 0 => BackupStrategy.Smart,
                 1 => BackupStrategy.Archive,
@@ -138,8 +148,17 @@ namespace FNSyncPlus.WinUI.Dialogs
                 _ => BackupStrategy.Smart
             };
 
-            _taskManager.UpdateTask(_task);
-            WasConfigSaved = true;
+            try
+            {
+                _taskManager.UpdateTask(edited);
+                WasConfigSaved = true;
+            }
+            catch (Exception ex)
+            {
+                args.Cancel = true;
+                TxtSaveError.Text = $"设置未完全应用，请检查任务状态：{ex.Message}";
+                TxtSaveError.Visibility = Visibility.Visible;
+            }
         }
     }
 }

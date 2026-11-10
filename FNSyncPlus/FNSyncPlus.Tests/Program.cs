@@ -1780,9 +1780,17 @@ namespace FNSyncPlus.Tests
                 Environment.CurrentDirectory = root;
                 using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "removal-logs")));
                 manager.StorageProviderSupplier = () => provider;
+                manager.UpdateTask(new SyncTask { TaskId = first.TaskId, TaskName = first.TaskName, ScheduleMode = TaskSyncScheduleMode.ManualOnly, IntervalMinutes = 7 });
+                Assert(first.IntervalMinutes == 7 && AppSettings.LoadFromPath(settings.CustomConfigPath!).Tasks.First(t => t.TaskId == first.TaskId).IntervalMinutes == 7,
+                    "独立编辑副本保存后更新任务和磁盘配置");
                 manager.TriggerSync(first.TaskId);
                 if (await Task.WhenAny(provider.UploadEntered.Task, Task.Delay(10000)) != provider.UploadEntered.Task)
                     throw new TimeoutException("隔离上传没有进入阻塞测试点");
+                bool updateRejected = false;
+                try { manager.UpdateTask(new SyncTask { TaskId = first.TaskId, TaskName = "不应写入" }); }
+                catch (InvalidOperationException) { updateRejected = true; }
+                Assert(updateRejected && first.TaskName == "运行中" && AppSettings.LoadFromPath(settings.CustomConfigPath!).Tasks.First(t => t.TaskId == first.TaskId).TaskName == "运行中",
+                    "任务正在写入时拒绝修改设置且保留内存和磁盘配置");
                 manager.TriggerSync(second.TaskId);
                 bool removedQueued = await manager.RemoveTaskAsync(second.TaskId);
                 var removing = manager.RemoveTaskAsync(first.TaskId);
@@ -1840,6 +1848,11 @@ namespace FNSyncPlus.Tests
 
                 string validSettingsPath = settings.CustomConfigPath!;
                 settings.CustomConfigPath = Path.Combine(root, "missing-settings-directory", "settings.json");
+                bool updateSaveFailed = false;
+                try { manager.UpdateTask(new SyncTask { TaskId = task.TaskId, TaskName = "不应保存", ScheduleMode = TaskSyncScheduleMode.ManualOnly }); }
+                catch (IOException) { updateSaveFailed = true; }
+                Assert(updateSaveFailed && task.TaskName == "超时保留" && AppSettings.LoadFromPath(validSettingsPath).Tasks.Single().TaskName == "超时保留",
+                    "任务设置保存失败时回滚内存并保留原磁盘配置");
                 bool saveFailed = false;
                 try { await manager.RemoveTaskAsync(task.TaskId); }
                 catch (IOException) { saveFailed = true; }

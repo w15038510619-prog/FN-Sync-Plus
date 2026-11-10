@@ -12,7 +12,8 @@
     mc:Ignorable="d">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="600">
-        <Grid MinWidth="540" MaxWidth="620" RowSpacing="14" Padding="0,4,0,0">
+        <StackPanel MinWidth="540" MaxWidth="620" Spacing="14" Padding="0,4,0,0">
+            <TextBlock x:Name="TxtSaveError" Visibility="Collapsed" TextWrapping="Wrap" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
             <!-- 1. Task Name and Paths Card -->
             <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -148,6 +149,6 @@
                     <TextBlock Text="点击「仅移除任务配置」仅在当前软件中移除该任务的自动化调度，绝对不会删除或修改您的本地源文件或 NAS 已有的任何备份数据。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                 </StackPanel>
             </Border>
-        </Grid>
+        </StackPanel>
     </ScrollViewer>
 </ContentDialog>

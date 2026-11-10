@@ -330,10 +330,14 @@ namespace FNSyncPlus.Core.Services
         {
             lock (_taskLifecycleLock)
             {
-                if (_stopping || _removingTasks.Contains(task.TaskId) || _recoverySessions.ContainsKey(task.TaskId)) return;
+                if (_stopping || _removingTasks.Contains(task.TaskId) || _recoverySessions.ContainsKey(task.TaskId) || _runningCompletions.ContainsKey(task.TaskId))
+                    throw new InvalidOperationException("任务正在同步、停止或恢复，请等待完成后再修改设置。");
                 var existing = _settings.Tasks.FirstOrDefault(t => t.TaskId == task.TaskId);
-                if (existing != null)
+                if (existing == null) throw new InvalidOperationException("任务不存在，请关闭设置后重新查看任务列表。");
+                lock (_settings.Tasks)
                 {
+                    var previous = (existing.TaskName, existing.Enabled, existing.AutoSyncEnabled, existing.RealtimeWatchEnabled,
+                        existing.IntervalMinutes, existing.Mode, existing.ScheduleMode, existing.Strategy, existing.SettlingDelaySeconds);
                     existing.TaskName = task.TaskName;
                     existing.Enabled = task.Enabled;
                     existing.AutoSyncEnabled = task.AutoSyncEnabled;
@@ -343,7 +347,13 @@ namespace FNSyncPlus.Core.Services
                     existing.ScheduleMode = task.ScheduleMode;
                     existing.Strategy = task.Strategy;
                     existing.SettlingDelaySeconds = task.SettlingDelaySeconds;
-                    _settings.Save();
+                    try { _settings.Save(); }
+                    catch
+                    {
+                        (existing.TaskName, existing.Enabled, existing.AutoSyncEnabled, existing.RealtimeWatchEnabled,
+                            existing.IntervalMinutes, existing.Mode, existing.ScheduleMode, existing.Strategy, existing.SettlingDelaySeconds) = previous;
+                        throw;
+                    }
 
                     ApplyTaskAutomation(existing);
                     TaskListChanged?.Invoke();
