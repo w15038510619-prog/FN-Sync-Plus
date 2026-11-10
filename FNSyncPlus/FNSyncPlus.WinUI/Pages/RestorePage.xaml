@@ -107,10 +107,10 @@
                                     <ColumnDefinition Width="100" />
                                     <ColumnDefinition Width="220" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="{Binding OriginalRelPath}" FontSize="12" TextTrimming="CharacterEllipsis" FontWeight="Medium" />
-                                <TextBlock Grid.Column="1" Text="{Binding StoredRelPath}" FontSize="11" FontFamily="Consolas" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="0" Text="{Binding OriginalRelPath}" ToolTipService.ToolTip="{Binding OriginalRelPath}" FontSize="12" TextTrimming="CharacterEllipsis" FontWeight="Medium" />
+                                <TextBlock Grid.Column="1" Text="{Binding StoredRelPath}" ToolTipService.ToolTip="{Binding StoredRelPath}" FontSize="11" FontFamily="Consolas" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextTrimming="CharacterEllipsis" />
                                 <TextBlock Grid.Column="2" Text="{Binding FormattedSize}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                <TextBlock Grid.Column="3" Text="{Binding Sha256}" FontSize="10" FontFamily="Consolas" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="3" Text="{Binding Sha256}" ToolTipService.ToolTip="{Binding Sha256}" FontSize="10" FontFamily="Consolas" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextTrimming="CharacterEllipsis" />
                             </Grid>
                         </DataTemplate>
                     </ListView.ItemTemplate>
