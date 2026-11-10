@@ -99,7 +99,7 @@
                     BorderThickness="1" CornerRadius="8" Padding="14,12">
                 <StackPanel Spacing="10">
                     <TextBlock Text="防写抖动延迟 (Settling Delay)" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                    <TextBlock Text="检测到本地文件正在被保存或持续写入时，等待文件句柄释放且大小平稳后再上传，严禁上传半截损坏文件。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <TextBlock Text="检测到本地文件变化后等待设定时间，并检查文件是否被占用。对于分段写入的应用，请设置足够长的等待时间。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
 
                     <ComboBox x:Name="CmbSettlingDelay" HorizontalAlignment="Stretch">
                         <ComboBoxItem Content="1 秒 (极速响应)" Tag="1" />

@@ -15,26 +15,27 @@ public sealed class ExperimentalVersionedBackup
     public sealed record Result(VersionedManifestStore.Snapshot Snapshot, int UploadedFiles, int UnchangedFiles, int RenamedFiles, int DeletedFiles, int ReusedFiles = 0, bool HasNewVersion = true);
     private sealed record SourceFile(string RelativePath, string FullPath, long Size, long ModifiedTicks, string Sha256);
     private sealed record SourceTree(List<string> Directories, List<(string RelativePath, string FullPath)> Files);
+    private sealed record TreeStamp(string[] Directories, (string RelativePath, long Size, long ModifiedTicks)[] Files);
     private readonly VersionedManifestStore _versions = new();
     private readonly ImmutableContentStore _objects = new();
     public event Action<string>? ProgressChanged;
 
     public Task<Result> RunAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart)
-        => RunCoreAsync(provider, sourceDirectory, target, false, null, token, strategy);
+        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0)
+        => RunCoreAsync(provider, sourceDirectory, target, false, null, token, strategy, settlingDelaySeconds);
 
     /// <summary>Creates a brand-new destination and commits its first complete version; never adopts an existing directory.</summary>
     public async Task<Result> CreateNewAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart)
-        => await CreateNewCoreAsync(provider, sourceDirectory, target, null, token, strategy).ConfigureAwait(false);
+        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0)
+        => await CreateNewCoreAsync(provider, sourceDirectory, target, null, token, strategy, settlingDelaySeconds).ConfigureAwait(false);
 
     /// <summary>Experimental import from an existing independent NAS directory; the existing directory is read-only.</summary>
     public async Task<Result> CreateNewFromExistingAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        string existingRoot, CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart)
-        => await CreateNewCoreAsync(provider, sourceDirectory, target, existingRoot, token, strategy).ConfigureAwait(false);
+        string existingRoot, CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0)
+        => await CreateNewCoreAsync(provider, sourceDirectory, target, existingRoot, token, strategy, settlingDelaySeconds).ConfigureAwait(false);
 
     private async Task<Result> CreateNewCoreAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        string? existingRoot, CancellationToken token, BackupStrategy strategy)
+        string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds)
     {
         ArgumentNullException.ThrowIfNull(provider);
         if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("备份目标必须是安全的相对路径", nameof(target));
@@ -67,7 +68,9 @@ public sealed class ExperimentalVersionedBackup
             var existingDirectory = await provider.GetItemAsync(existingRoot, token).ConfigureAwait(false);
             if (existingDirectory == null || !existingDirectory.IsDirectory) throw new DirectoryNotFoundException("已有文件目录不存在");
         }
-        var preflight = Scan(PathHelper.EnsureLongPathPrefix(sourceDirectory), token);
+        string sourceRoot = PathHelper.EnsureLongPathPrefix(sourceDirectory);
+        await WaitForTreeSettlingAsync(sourceRoot, settlingDelaySeconds, token).ConfigureAwait(false);
+        var preflight = Scan(sourceRoot, token);
         foreach (var file in preflight.Files)
         {
             ProgressChanged?.Invoke($"正在预检本地文件：{file.RelativePath}");
@@ -76,11 +79,11 @@ public sealed class ExperimentalVersionedBackup
         token.ThrowIfCancellationRequested();
         if (await exclusive.TryCreateDirectoryExclusiveAsync(target, token).ConfigureAwait(false) != ExclusiveDirectoryResult.Created)
             throw new IOException("备份目标已存在，拒绝复用或覆盖");
-        return await RunCoreAsync(provider, sourceDirectory, target, true, existingRoot, token, strategy).ConfigureAwait(false);
+        return await RunCoreAsync(provider, sourceDirectory, target, true, existingRoot, token, strategy, 0).ConfigureAwait(false);
     }
 
     private async Task<Result> RunCoreAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        bool creating, string? existingRoot, CancellationToken token, BackupStrategy strategy)
+        bool creating, string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds)
     {
         ArgumentNullException.ThrowIfNull(provider);
         if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("备份目标必须是安全的相对路径", nameof(target));
@@ -89,6 +92,7 @@ public sealed class ExperimentalVersionedBackup
         if (strategy is not (BackupStrategy.Smart or BackupStrategy.Archive))
             throw new NotSupportedException("实验性同步尚不支持镜像删除");
         string sourceRoot = PathHelper.EnsureLongPathPrefix(sourceDirectory);
+        await WaitForTreeSettlingAsync(sourceRoot, settlingDelaySeconds, token).ConfigureAwait(false);
         var initial = await _versions.LoadForWritingAsync(provider, target, token).ConfigureAwait(false);
         if (creating && initial != null) throw new InvalidDataException("新目标已出现版本化清单，拒绝覆盖");
         if (!creating && initial == null) throw new InvalidDataException("目标没有版本化清单，必须先进行安全迁移");
@@ -336,7 +340,7 @@ public sealed class ExperimentalVersionedBackup
             manifest.TargetRoot = PathHelper.NormalizeRelPath(target);
             manifest.BackupPolicy = strategy.ToString();
             token.ThrowIfCancellationRequested();
-            if (oldSnapshot != null && ComparableManifest(manifest).AsSpan().SequenceEqual(ComparableManifest(oldSnapshot.Manifest)))
+            if (oldSnapshot != null && ComparableManifest(manifest, provider).AsSpan().SequenceEqual(ComparableManifest(oldSnapshot.Manifest, provider)))
                 return new Result(oldSnapshot, uploaded, unchanged, renamed, strategy == BackupStrategy.Smart ? deleted.Count : 0, reused, HasNewVersion: false);
             manifest.UpdatedAt = DateTimeOffset.UtcNow;
             token.ThrowIfCancellationRequested();
@@ -367,12 +371,20 @@ public sealed class ExperimentalVersionedBackup
         }
     }
 
-    private static byte[] ComparableManifest(Manifest manifest)
+    private static byte[] ComparableManifest(Manifest manifest, INasStorageProvider provider)
     {
         var copy = JsonSerializer.Deserialize<Manifest>(JsonSerializer.SerializeToUtf8Bytes(manifest))
             ?? throw new InvalidDataException("无法比较版本清单");
         copy.Files = copy.Files.OrderBy(f => f.OriginalRel, StringComparer.Ordinal).ToList();
         copy.Directories = copy.Directories.OrderBy(d => d.OriginalRel, StringComparer.Ordinal).ToList();
+        if (provider is FnOsPersonalStorageProvider fn)
+            copy.TargetRoot = fn.NormalizeRelativePath(copy.TargetRoot);
+        else if (provider.ProviderType == StorageProviderType.FnOsPersonal)
+        {
+            copy.TargetRoot = PathHelper.NormalizeRelPath(copy.TargetRoot);
+            if (copy.TargetRoot.StartsWith("我的文件/", StringComparison.OrdinalIgnoreCase))
+                copy.TargetRoot = copy.TargetRoot["我的文件/".Length..];
+        }
         copy.UpdatedAt = DateTimeOffset.UnixEpoch;
         return JsonSerializer.SerializeToUtf8Bytes(copy);
     }
@@ -413,6 +425,64 @@ public sealed class ExperimentalVersionedBackup
         directories.Sort(StringComparer.OrdinalIgnoreCase);
         files.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.RelativePath, b.RelativePath));
         return new SourceTree(directories, files);
+    }
+
+    private async Task WaitForTreeSettlingAsync(string root, int seconds, CancellationToken token)
+    {
+        if (seconds == 0) return;
+        if (seconds < 0 || seconds > 60) throw new ArgumentOutOfRangeException(nameof(seconds));
+        ProgressChanged?.Invoke($"正在等待源文件稳定 {seconds} 秒");
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var required = TimeSpan.FromSeconds(seconds);
+        var timeout = TimeSpan.FromSeconds(Math.Max(seconds + 10, seconds * 3));
+        var interval = TimeSpan.FromMilliseconds(Math.Min(1000, seconds * 500));
+        TreeStamp? previous = null;
+        TimeSpan stableSince = TimeSpan.Zero;
+        TreeStamp Capture()
+        {
+            var tree = Scan(root, token);
+            var files = tree.Files.Select(file =>
+            {
+                var info = new FileInfo(file.FullPath);
+                info.Refresh();
+                if (!info.Exists) throw new IOException("源文件在稳定性检查期间消失");
+                return (file.RelativePath, info.Length, info.LastWriteTimeUtc.Ticks);
+            }).ToArray();
+            return new TreeStamp(tree.Directories.ToArray(), files);
+        }
+        static bool Same(TreeStamp a, TreeStamp b) =>
+            a.Directories.SequenceEqual(b.Directories, StringComparer.Ordinal) && a.Files.SequenceEqual(b.Files);
+        while (clock.Elapsed < timeout)
+        {
+            token.ThrowIfCancellationRequested();
+            try
+            {
+                var current = Capture();
+                if (previous == null || !Same(previous, current)) stableSince = clock.Elapsed;
+                else if (clock.Elapsed - stableSince >= required)
+                {
+                    // Exclusive writers cause this open to fail; reopen again later rather
+                    // than treating a temporarily readable or missing file as stable.
+                    foreach (var file in current.Files)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        string path = Path.Combine(root, file.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+                        using var read = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    }
+                    if (Same(current, Capture())) return;
+                    stableSince = clock.Elapsed;
+                    current = Capture();
+                }
+                previous = current;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                previous = null;
+                stableSince = clock.Elapsed;
+            }
+            await Task.Delay(interval, token).ConfigureAwait(false);
+        }
+        throw new IOException("源文件持续变化或被占用，未开始提交备份；请稍后重试");
     }
 
     private static async Task<SourceFile> HashSourceAsync(string relative, string fullPath, CancellationToken token)

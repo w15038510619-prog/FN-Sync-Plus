@@ -1597,6 +1597,8 @@ namespace FNSyncPlus.Tests
                 await TestLongDirectoryRenameAsync(root);
                 await TestProjectionInspectionStatesAsync(root);
                 await TestIsolatedRecoverySessionAsync(root);
+                await TestVersionedSettlingAsync(root);
+                await TestVersionedAliasNoOpAsync(root);
             }
             finally
             {
@@ -2001,7 +2003,7 @@ namespace FNSyncPlus.Tests
             var freshSettings = AppSettings.CreateInMemory();
             using var creationManager = new TaskManager(freshSettings, new SmbAuthService(), new LogService(Path.Combine(root, "reattach-create-logs")), experimentalVersionedBackup: true);
             creationManager.AddTask(new SyncTask { TaskName = "待首次备份", SourceFolder = source, DestinationFolder = "reattach-new-pending",
-                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly,
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly, SettlingDelaySeconds = 1,
                 ExperimentalExistingRoot = "reattach-existing" });
             var freshReload = AppSettings.FromJson(freshSettings.ToJson());
             if (!await creationManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("创建任务后未停止");
@@ -2010,10 +2012,15 @@ namespace FNSyncPlus.Tests
             using var freshManager = new TaskManager(freshReload, new SmbAuthService(), new LogService(Path.Combine(root, "reattach-fresh-logs")), experimentalVersionedBackup: true);
             freshManager.StorageProviderSupplier = () => provider;
             var freshDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            freshManager.TaskStateChanged += t => { if (t.TaskId == freshTask.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) freshDone.TrySetResult(); };
+            bool sawConfiguredSettling = false;
+            freshManager.TaskStateChanged += t => {
+                if (t.TaskId != freshTask.TaskId) return;
+                if (t.CurrentFile.Contains("稳定 1 秒", StringComparison.Ordinal)) sawConfiguredSettling = true;
+                if (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error) freshDone.TrySetResult();
+            };
             freshManager.TriggerSync(freshTask.TaskId);
             if (await Task.WhenAny(freshDone.Task, Task.Delay(15000)) != freshDone.Task) throw new TimeoutException("重启首次备份超时");
-            Assert(freshTask.State == TaskSyncState.Completed && !freshTask.ExperimentalPendingInitialization && freshTask.LastUploadedFiles == 0 &&
+            Assert(freshTask.State == TaskSyncState.Completed && sawConfiguredSettling && !freshTask.ExperimentalPendingInitialization && freshTask.LastUploadedFiles == 0 &&
                 freshTask.ExperimentalExistingRoot == "reattach-existing" &&
                 File.ReadAllText(Path.Combine(root, freshTask.DestinationFolder, "current", "sample.txt")) == "updated before restart" &&
                 File.ReadAllText(Path.Combine(existingRoot, "sample.txt")) == "updated before restart",
@@ -2391,6 +2398,61 @@ namespace FNSyncPlus.Tests
                 File.ReadAllText(Path.Combine(root, "inspect-recovery-race", "current", "file.txt")) == "after interruption" &&
                 await ExperimentalRemoteLease.InspectAsync(concurrentRecovery, "inspect-recovery-race") == null,
                 "并发恢复只有一个执行者，其余请求安全停止");
+        }
+
+        static async Task TestVersionedAliasNoOpAsync(string root)
+        {
+            string source = Path.Combine(root, "alias-noop-source"), target = "alias-noop-target";
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "sample.txt"), "same content");
+            var provider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+            var backup = new ExperimentalVersionedBackup();
+            var first = await backup.CreateNewAsync(provider, source, target);
+            var manifest = first.Snapshot.Manifest;
+            manifest.TargetRoot = "我的文件/" + target;
+            var lease = await ExperimentalRemoteLease.TryAcquireAsync(provider, target) ?? throw new IOException("alias test lock unavailable");
+            var alias = await new VersionedManifestStore().SaveAsync(provider, target, manifest, first.Snapshot.Id);
+            await lease.ReleaseAsync();
+            var repeat = await backup.RunAsync(provider, source, target);
+            Assert(!repeat.HasNewVersion && repeat.Snapshot.Id == alias.Id && repeat.UploadedFiles == 0,
+                "飞牛目标路径别名变化但文件未变化时不生成新版本");
+        }
+
+        static async Task TestVersionedSettlingAsync(string root)
+        {
+            string source = Path.Combine(root, "settling-source"), target = "settling-target";
+            Directory.CreateDirectory(source);
+            string file = Path.Combine(source, "changing.txt");
+            File.WriteAllText(file, "before");
+            var provider = new FaultInjectingProvider(root);
+            var change = Task.Run(async () => { await Task.Delay(700); File.WriteAllText(file, "after the write finishes"); });
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            var result = await new ExperimentalVersionedBackup().CreateNewAsync(provider, source, target, settlingDelaySeconds: 1);
+            await change;
+            Assert(elapsed.Elapsed >= TimeSpan.FromMilliseconds(1300) && result.Snapshot.Manifest.Files.Single().Sha256 == HashHelper.ComputeFileSha256(file),
+                "源文件在等待期间变化时重新计时，再提交稳定内容");
+
+            using (var existingHeld = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            using (var existingCancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(1700)))
+            {
+                bool existingCanceled = false;
+                try { await new ExperimentalVersionedBackup().RunAsync(provider, source, target, existingCancel.Token, settlingDelaySeconds: 1); }
+                catch (OperationCanceledException) { existingCanceled = true; }
+                Assert(existingCanceled && (await new VersionedManifestStore().LoadForWritingAsync(provider, target))?.Id == result.Snapshot.Id,
+                    "已有备份等待被占用文件时取消，保留上一份提交");
+            }
+
+            string lockedSource = Path.Combine(root, "settling-locked-source"), lockedTarget = "settling-locked-target";
+            Directory.CreateDirectory(lockedSource);
+            string lockedFile = Path.Combine(lockedSource, "locked.txt");
+            File.WriteAllText(lockedFile, "locked content");
+            using var held = new FileStream(lockedFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(1700));
+            bool canceled = false;
+            try { await new ExperimentalVersionedBackup().CreateNewAsync(provider, lockedSource, lockedTarget, cancel.Token, settlingDelaySeconds: 1); }
+            catch (OperationCanceledException) { canceled = true; }
+            Assert(canceled && !Directory.Exists(Path.Combine(root, lockedTarget)),
+                "文件仍被独占时等待并响应取消，不创建备份目标");
         }
 
         static async Task TestIsolatedRecoverySessionAsync(string root)

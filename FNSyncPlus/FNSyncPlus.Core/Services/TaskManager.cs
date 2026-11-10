@@ -700,6 +700,7 @@ namespace FNSyncPlus.Core.Services
                     }
                     AppendTaskLog(task, "INFO", "隔离试验：正在准备版本化内容及物理候选目录。");
                     var experimental = new ExperimentalVersionedBackup();
+                    int settlingDelay = Math.Clamp(task.SettlingDelaySeconds > 0 ? task.SettlingDelaySeconds : 3, 1, 60);
                     experimental.ProgressChanged += message =>
                     {
                         task.CurrentFile = message;
@@ -707,9 +708,9 @@ namespace FNSyncPlus.Core.Services
                     };
                     var result = task.RequiresNewExperimentalBackup
                         ? string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot)
-                            ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy).ConfigureAwait(false)
-                            : await experimental.CreateNewFromExistingAsync(provider, task.SourceFolder, task.DestinationFolder, task.ExperimentalExistingRoot, taskToken, task.Strategy).ConfigureAwait(false)
-                        : await experimental.RunAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy).ConfigureAwait(false);
+                            ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay).ConfigureAwait(false)
+                            : await experimental.CreateNewFromExistingAsync(provider, task.SourceFolder, task.DestinationFolder, task.ExperimentalExistingRoot, taskToken, task.Strategy, settlingDelay).ConfigureAwait(false)
+                        : await experimental.RunAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay).ConfigureAwait(false);
                     task.RequiresNewExperimentalBackup = false;
                     reusedFiles = result.ReusedFiles;
                     bool hasPrevious = _isolatedProjections.TryGetValue(task.TaskId, out var previousProjection);
