@@ -19,7 +19,7 @@
         <!-- 1. HEADER -->
         <StackPanel Grid.Row="0" Spacing="2">
             <TextBlock Text="异机无损恢复中心" FontSize="20" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-            <TextBlock Text="无需原电脑本地数据库，自动从飞牛 NAS 备份根目录检索所有备份包，逐一通过 SHA-256 完整性强校验还原" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <TextBlock Text="无需原电脑本地数据库；选择备份目录或其上一级目录，恢复时逐一校验 SHA-256。" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
         </StackPanel>
 
         <!-- 2. SCAN NAS ROOT & SELECT PACKAGE -->
@@ -36,10 +36,12 @@
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <TextBlock Text="NAS 备份位置:" FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center" Margin="0,0,12,0" />
                     <TextBox Grid.Column="1" Text="{x:Bind ViewModel.NasScanRoot, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" FontFamily="Consolas, Segoe UI" FontSize="12" VerticalAlignment="Center" />
-                    <Button Grid.Column="2" Command="{x:Bind ViewModel.ScanPackagesCommand}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" Style="{ThemeResource AccentButtonStyle}" Margin="10,0,0,0">
+                    <Button Grid.Column="2" Click="BtnBrowseNasRestore_Click" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" Content="选择目录" Margin="10,0,0,0" />
+                    <Button Grid.Column="3" Command="{x:Bind ViewModel.ScanPackagesCommand}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" Style="{ThemeResource AccentButtonStyle}" Margin="10,0,0,0">
                         <StackPanel Orientation="Horizontal" Spacing="6">
                             <FontIcon Glyph="&#xE721;" FontSize="12" />
                             <TextBlock Text="检索备份包" FontSize="12" />
