@@ -2042,6 +2042,8 @@ namespace FNSyncPlus.Tests
 
             Guid profileId = Guid.NewGuid();
             var betaProfile = AppSettings.LoadVersionedBetaTestProfile(profileId);
+            Assert(betaProfile.ReadVersionedLegacySettings() == null && !File.Exists(betaProfile.VersionedLegacySettingsPath),
+                "没有旧配置时新版迁移查看返回空结果且不创建旧配置");
             string oldConfig = Path.Combine(root, "original-profile.json");
             File.WriteAllText(oldConfig, "original settings must remain unchanged");
             betaProfile.CustomConfigPath = oldConfig; // A profile must not be redirected onto the old configuration.
@@ -2119,6 +2121,16 @@ namespace FNSyncPlus.Tests
             oldSettings.Tasks.Add(oldTask);
             string original = oldSettings.ToJson();
             File.WriteAllText(oldPath, original);
+            var preview = beta.ReadVersionedLegacySettings();
+            Assert(preview?.Tasks.Single().DestinationFolder == "我的文件/protected" && File.ReadAllText(oldPath) == original,
+                "新版迁移查看只读取旧任务，不自动修改旧配置");
+            bool busyLegacyRejected = false;
+            using (var busyLegacy = new FileStream(oldPath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
+            {
+                try { beta.ReadVersionedLegacySettings(); }
+                catch (InvalidOperationException) { busyLegacyRejected = true; }
+            }
+            Assert(busyLegacyRejected && File.ReadAllText(oldPath) == original, "旧配置正被写入时不读取可能不完整的数据");
             using var manager = new TaskManager(beta, new SmbAuthService(), new LogService(Path.Combine(root, "legacy-target-guard-logs")), experimentalVersionedBackup: true);
             int refused = 0;
             foreach (string target in new[] { "protected", "protected/child", "我的文件/protected/child/grandchild" })

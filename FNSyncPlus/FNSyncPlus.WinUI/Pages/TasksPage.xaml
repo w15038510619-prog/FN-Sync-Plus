@@ -34,6 +34,7 @@
 
             <!-- Command Buttons -->
             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Button x:Name="BtnViewLegacyTasks" Click="BtnViewLegacyTasks_Click" Content="查看旧任务" Visibility="Collapsed" />
                 <Button Click="BtnAddFolder_Click" Style="{ThemeResource AccentButtonStyle}">
                     <StackPanel Orientation="Horizontal" Spacing="6">
                         <FontIcon Glyph="&#xE710;" FontSize="12" />

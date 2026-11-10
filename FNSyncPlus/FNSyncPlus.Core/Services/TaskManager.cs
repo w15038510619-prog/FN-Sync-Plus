@@ -162,18 +162,8 @@ namespace FNSyncPlus.Core.Services
         private void EnsureSeparateFromLegacyTasks(SyncTask task)
         {
             if (!_settings.IsVersionedBetaProfile) return;
-            string path = _settings.VersionedLegacySettingsPath ?? throw new InvalidOperationException("旧配置检查路径缺失");
-            AppSettings legacy;
-            try
-            {
-                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var reader = new StreamReader(stream);
-                legacy = AppSettings.FromJson(reader.ReadToEnd());
-            }
-            catch (FileNotFoundException) { return; }
-            catch (DirectoryNotFoundException) { return; }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException or System.Text.Json.JsonException)
-            { throw new InvalidOperationException("无法安全读取旧程序配置，已停止新版任务；请先检查旧配置。", ex); }
+            var legacy = _settings.ReadVersionedLegacySettings();
+            if (legacy == null) return;
             if (!string.IsNullOrWhiteSpace(legacy.LegacySourceFolder) || !string.IsNullOrWhiteSpace(legacy.LegacyTargetShare))
                 throw new InvalidOperationException("旧程序存在尚未确认的单任务配置，不能判断目标是否重叠。");
             if (!PathHelper.IsSafeRelativePath(task.DestinationFolder)) throw new InvalidOperationException("新版备份目标路径无效");

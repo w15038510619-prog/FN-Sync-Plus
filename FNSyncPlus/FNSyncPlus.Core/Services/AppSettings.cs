@@ -101,6 +101,23 @@ namespace FNSyncPlus.Core.Services
             return settings;
         }
 
+        /// <summary>Reads the previous app configuration without migrating or saving it.</summary>
+        public AppSettings? ReadVersionedLegacySettings()
+        {
+            if (!IsVersionedBetaProfile || VersionedLegacySettingsPath == null)
+                throw new InvalidOperationException("只有独立新版配置可以查看旧程序配置。");
+            try
+            {
+                using var stream = new FileStream(VersionedLegacySettingsPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+                using var reader = new StreamReader(stream);
+                return FromJson(reader.ReadToEnd());
+            }
+            catch (FileNotFoundException) { return null; }
+            catch (DirectoryNotFoundException) { return null; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException or JsonException)
+            { throw new InvalidOperationException("无法安全读取旧程序配置，原文件未修改。", ex); }
+        }
+
         public static AppSettings LoadIsolatedTestSession(Guid id)
         {
             if (id == Guid.Empty) throw new ArgumentException("隔离会话标识无效", nameof(id));
