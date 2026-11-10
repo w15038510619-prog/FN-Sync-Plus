@@ -71,7 +71,11 @@ namespace FNSyncPlus.Core.Services
         [JsonIgnore]
         private string? IsolatedTestRemoteRoot { get; set; }
 
+        [JsonIgnore]
+        private bool RequiresIsolatedTestBoundary { get; set; }
+
         public static AppSettings CreateInMemory() => new AppSettings { IsInMemoryOnly = true };
+        public static AppSettings CreateUnboundedIsolatedSession() => new AppSettings { IsInMemoryOnly = true, RequiresIsolatedTestBoundary = true };
         public static AppSettings CreateForTest(string testFilePath) => new AppSettings { CustomConfigPath = testFilePath };
 
         public static AppSettings LoadVersionedBetaProfile() => LoadVersionedProfileAt(
@@ -162,8 +166,21 @@ namespace FNSyncPlus.Core.Services
             foreach (var task in Tasks) EnsureIsolatedTestTask(task);
         }
 
+        public void EnsureIsolatedTestParent(string remoteParent)
+        {
+            if (IsolatedTestRemoteRoot == null || !PathHelper.IsSafeRelativePath(remoteParent))
+                throw new InvalidOperationException("隔离测试需要指定授权的飞牛测试父目录");
+            string normalized = PathHelper.NormalizeRelPath(remoteParent);
+            if (normalized.StartsWith("我的文件/", StringComparison.Ordinal)) normalized = normalized["我的文件/".Length..];
+            if (!normalized.Equals(IsolatedTestRemoteRoot, StringComparison.OrdinalIgnoreCase) &&
+                !normalized.StartsWith(IsolatedTestRemoteRoot + "/", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("测试父目录超出授权沙盒，已阻止执行");
+        }
+
         public void EnsureIsolatedTestTask(SyncTask task)
         {
+            if (RequiresIsolatedTestBoundary && IsolatedTestRemoteRoot == null)
+                throw new InvalidOperationException("隔离测试尚未指定远端父目录，请重新启动并指定授权的测试目录后创建任务");
             if (IsolatedSessionPath == null && IsolatedTestRemoteRoot == null) return;
             if (IsolatedTestRemoteRoot == null) throw new InvalidOperationException("隔离测试尚未指定远端父目录");
             string localRoot = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests");

@@ -138,9 +138,9 @@
                             </StackPanel>
                         </ComboBoxItem>
                     </ComboBox>
-                    <TextBlock x:Name="MirrorUnavailableNotice" Visibility="Collapsed" Text="镜像删除仍在隔离验证，请选择智能备份或归档备份。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="MirrorUnavailableNotice" Visibility="Collapsed" Text="当前任务不支持镜像备份，请选择智能备份或归档备份。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     <CheckBox x:Name="MirrorDeletionConsent" Visibility="Collapsed" Checked="MirrorDeletionConsent_Checked">
-                        <TextBlock Text="我明确允许把本地已删除的受管理测试文件从当前目录移入历史；仅限手动测试，额外远端文件或源目录变空时停止。" TextWrapping="Wrap" MaxWidth="520" />
+                        <TextBlock Text="我明确允许将本地已删除的受管理文件从当前目录移入历史；仅限手动同步，发现额外远端文件或源目录变空时停止。" TextWrapping="Wrap" MaxWidth="520" />
                     </CheckBox>
                     <TextBlock x:Name="MirrorConsentError" Visibility="Collapsed" Text="请先明确勾选允许移入历史。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
                 </StackPanel>

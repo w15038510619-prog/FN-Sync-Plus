@@ -716,11 +716,12 @@ namespace FNSyncPlus.Core.Services
             }
             if (task.Strategy == BackupStrategy.Mirror &&
                 (!task.IsExperimentalBackup || !task.MirrorDeletionEnabled || task.ScheduleMode != TaskSyncScheduleMode.ManualOnly || !(_settings.IsInMemoryOnly ||
-                    (_settings.IsVersionedBetaTestProfile && _settings.HasIsolatedTestBoundary))))
+                    (_settings.IsVersionedBetaTestProfile && _settings.HasIsolatedTestBoundary) ||
+                    (_settings.IsVersionedBetaProfile && !_settings.IsVersionedBetaTestProfile))))
             {
                 task.State = TaskSyncState.ConfigurationError;
-                task.LastSyncStatus = "镜像删除未启用或超出测试范围";
-                task.LastError = "镜像删除需要明确启用，当前仅允许在隔离测试范围以手动模式验证。";
+                task.LastSyncStatus = "镜像未授权或不支持当前设置";
+                task.LastError = "镜像备份需要新版备份任务、明确授权并使用仅手动模式。";
                 AppendTaskLog(task, "ERROR", task.LastError);
                 TaskStateChanged?.Invoke(task);
                 return;

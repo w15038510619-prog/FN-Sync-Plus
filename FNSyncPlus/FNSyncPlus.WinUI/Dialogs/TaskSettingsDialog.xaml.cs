@@ -23,8 +23,8 @@ namespace FNSyncPlus.WinUI.Dialogs
             InitializeComponent();
 
             var settings = AppServices.GetService<AppSettings>();
-            _canTestMirror = AppServices.IsIsolatedTestSession && settings.IsVersionedBetaTestProfile &&
-                settings.HasIsolatedTestBoundary && _task.IsExperimentalBackup;
+            _canTestMirror = _task.IsExperimentalBackup && (AppServices.IsVersionedBetaSession ||
+                (AppServices.IsIsolatedTestSession && settings.IsVersionedBetaTestProfile && settings.HasIsolatedTestBoundary));
             MirrorStrategyItem.IsEnabled = _canTestMirror;
             MirrorUnavailableNotice.Visibility = _canTestMirror ? Visibility.Collapsed : Visibility.Visible;
 
@@ -116,7 +116,7 @@ namespace FNSyncPlus.WinUI.Dialogs
         {
             if (CmbStrategy.SelectedIndex == 2 && (!_canTestMirror || MirrorDeletionConsent.IsChecked != true))
             {
-                TxtSaveError.Text = "镜像测试需要在授权范围内明确勾选允许移入历史。";
+                TxtSaveError.Text = "镜像备份需要明确勾选允许移入历史。";
                 TxtSaveError.Visibility = Visibility.Visible;
                 if (_canTestMirror) MirrorConsentError.Visibility = Visibility.Visible;
                 args.Cancel = true;
@@ -174,7 +174,7 @@ namespace FNSyncPlus.WinUI.Dialogs
             edited.MirrorDeletionEnabled = edited.Strategy == BackupStrategy.Mirror && MirrorDeletionConsent.IsChecked == true;
             if (edited.Strategy == BackupStrategy.Mirror && edited.ScheduleMode != TaskSyncScheduleMode.ManualOnly)
             {
-                TxtSaveError.Text = "隔离镜像测试目前只支持仅手动模式。";
+                TxtSaveError.Text = "镜像备份目前只支持仅手动模式。";
                 TxtSaveError.Visibility = Visibility.Visible;
                 args.Cancel = true;
                 return;

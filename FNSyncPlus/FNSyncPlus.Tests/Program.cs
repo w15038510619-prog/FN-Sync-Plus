@@ -217,6 +217,35 @@ namespace FNSyncPlus.Tests
                     catch (InvalidOperationException) { conflictingProfilesRejected++; }
                 }
                 Assert(conflictingProfilesRejected == 3, "互相冲突的启动配置参数被拒绝");
+                var unboundedSession = AppSettings.CreateUnboundedIsolatedSession();
+                using (var unboundedManager = new TaskManager(unboundedSession, new SmbAuthService(),
+                    new LogService(Path.Combine(root, "unbounded-session-logs")), experimentalVersionedBackup: true))
+                {
+                    bool blockedUnboundedTask = false;
+                    try
+                    {
+                        unboundedManager.AddTask(new SyncTask { TaskName = "未指定测试边界", SourceFolder = root,
+                            DestinationFolder = "unbounded-test-target", ProviderType = StorageProviderType.FnOsPersonal });
+                    }
+                    catch (InvalidOperationException) { blockedUnboundedTask = true; }
+                    Assert(blockedUnboundedTask && unboundedSession.Tasks.Count == 0 &&
+                        !Directory.Exists(Path.Combine(root, "unbounded-test-target")), "空隔离窗口未指定授权边界时不能创建任务");
+                }
+                bool unboundedLabRejected = false;
+                try { unboundedSession.EnsureIsolatedTestParent("Codex_FN_Test_example"); }
+                catch (InvalidOperationException) { unboundedLabRejected = true; }
+                var boundedLab = AppSettings.LoadIsolatedTestSession(Guid.NewGuid());
+                string labBoundary = "Codex_FN_Test_" + Guid.NewGuid().ToString("N");
+                boundedLab.SetIsolatedTestBoundary(labBoundary);
+                boundedLab.EnsureIsolatedTestParent(labBoundary);
+                boundedLab.EnsureIsolatedTestParent("我的文件/" + labBoundary + "/child");
+                int rejectedLabParents = 0;
+                foreach (string labParent in new[] { labBoundary + "-other", labBoundary + "/../outside", "unrelated" })
+                {
+                    try { boundedLab.EnsureIsolatedTestParent(labParent); }
+                    catch (InvalidOperationException) { rejectedLabParents++; }
+                }
+                Assert(unboundedLabRejected && rejectedLabParents == 3, "隔离测试实验室只接受已授权沙盒或其子目录");
                 string config = Path.Combine(root, "settings.json");
                 var settings = AppSettings.CreateForTest(config);
                 settings.Tasks.Add(new SyncTask { TaskName = "失败测试", TaskId = "task_fail_legitimate", SourceFolder = @"C:\Fake" });
@@ -2666,18 +2695,28 @@ namespace FNSyncPlus.Tests
 
             var ordinary = AppSettings.LoadVersionedBetaTestProfile(Guid.NewGuid());
             typeof(AppSettings).GetProperty(nameof(AppSettings.IsVersionedBetaTestProfile))!.SetValue(ordinary, false);
-            var outside = new SyncTask { TaskName = "非隔离镜像", SourceFolder = source, DestinationFolder = "mirror-outside-test",
+            string betaMirrorSource = Path.Combine(root, "mirror-beta-source");
+            Directory.CreateDirectory(betaMirrorSource);
+            File.WriteAllText(Path.Combine(betaMirrorSource, "sample.txt"), "beta mirror fixture");
+            var outside = new SyncTask { TaskName = "新版配置镜像", SourceFolder = betaMirrorSource, DestinationFolder = "mirror-outside-test",
                 ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly,
-                Strategy = BackupStrategy.Mirror, MirrorDeletionEnabled = true };
+                Strategy = BackupStrategy.Mirror, MirrorDeletionEnabled = false };
             using var outsideManager = new TaskManager(ordinary, new SmbAuthService(), new LogService(Path.Combine(root, "mirror-outside-logs")), experimentalVersionedBackup: true);
             outsideManager.StorageProviderSupplier = () => provider;
             outsideManager.AddTask(outside);
             var outsideDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            outsideManager.TaskStateChanged += t => { if (t.TaskId == outside.TaskId && t.State == TaskSyncState.ConfigurationError) outsideDone.TrySetResult(); };
+            outsideManager.TaskStateChanged += t => { if (t.TaskId == outside.TaskId && t.State is TaskSyncState.ConfigurationError or TaskSyncState.Completed or TaskSyncState.Error) outsideDone.TrySetResult(); };
             outsideManager.TriggerSync(outside.TaskId);
-            if (await Task.WhenAny(outsideDone.Task, Task.Delay(10000)) != outsideDone.Task) throw new TimeoutException("非隔离镜像拒绝测试超时");
-            Assert(outside.LastSyncStatus == "镜像删除未启用或超出测试范围" && !Directory.Exists(Path.Combine(root, outside.DestinationFolder)),
-                "镜像原型即使启用也不会在非隔离配置运行");
+            if (await Task.WhenAny(outsideDone.Task, Task.Delay(10000)) != outsideDone.Task) throw new TimeoutException("新版镜像拒绝测试超时");
+            Assert(outside.State == TaskSyncState.ConfigurationError && !Directory.Exists(Path.Combine(root, outside.DestinationFolder)),
+                "新版配置未授权镜像时不创建备份目标");
+            await Task.Delay(300);
+            outside.MirrorDeletionEnabled = true;
+            outsideDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            outsideManager.TriggerSync(outside.TaskId);
+            if (await Task.WhenAny(outsideDone.Task, Task.Delay(15000)) != outsideDone.Task) throw new TimeoutException("新版镜像授权测试超时");
+            Assert(outside.State == TaskSyncState.Completed && File.ReadAllText(Path.Combine(root, outside.DestinationFolder, "current", "sample.txt")) == "beta mirror fixture" && provider.DeleteCalls == 0,
+                "新版配置仅手动镜像经授权后可发布，且不调用删除接口");
             if (!await outsideManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("非隔离镜像测试未停止");
 
             var legacySettings = AppSettings.CreateInMemory();
@@ -2690,7 +2729,7 @@ namespace FNSyncPlus.Tests
             legacyManager.TaskStateChanged += t => { if (t.TaskId == legacyTask.TaskId && t.State == TaskSyncState.ConfigurationError) legacyDone.TrySetResult(); };
             legacyManager.TriggerSync(legacyTask.TaskId);
             if (await Task.WhenAny(legacyDone.Task, Task.Delay(10000)) != legacyDone.Task) throw new TimeoutException("旧引擎镜像拒绝测试超时");
-            Assert(legacyTask.LastSyncStatus == "镜像删除未启用或超出测试范围" && !Directory.Exists(legacyTask.DestinationFolder),
+            Assert(legacyTask.LastSyncStatus == "镜像未授权或不支持当前设置" && !Directory.Exists(legacyTask.DestinationFolder),
                 "旧引擎即使设置授权标记也不能执行未经验证的镜像");
             if (!await legacyManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("旧引擎镜像测试未停止");
 
@@ -2705,7 +2744,7 @@ namespace FNSyncPlus.Tests
             automaticManager.TaskStateChanged += t => { if (t.TaskId == automaticTask.TaskId && t.State == TaskSyncState.ConfigurationError) automaticDone.TrySetResult(); };
             automaticManager.TriggerSync(automaticTask.TaskId);
             if (await Task.WhenAny(automaticDone.Task, Task.Delay(10000)) != automaticDone.Task) throw new TimeoutException("自动镜像拒绝测试超时");
-            Assert(automaticTask.LastSyncStatus == "镜像删除未启用或超出测试范围" && !Directory.Exists(Path.Combine(root, automaticTask.DestinationFolder)),
+            Assert(automaticTask.LastSyncStatus == "镜像未授权或不支持当前设置" && !Directory.Exists(Path.Combine(root, automaticTask.DestinationFolder)),
                 "镜像原型即使启用授权也拒绝自动调度");
             if (!await automaticManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("自动镜像测试未停止");
 

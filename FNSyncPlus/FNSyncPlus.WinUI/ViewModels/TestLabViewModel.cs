@@ -6,6 +6,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using FNSyncPlus.Core.Services;
 using FNSyncPlus.Core.Storage;
+using FNSyncPlus.WinUI.Services;
 
 namespace FNSyncPlus.WinUI.ViewModels
 {
@@ -123,11 +124,15 @@ namespace FNSyncPlus.WinUI.ViewModels
                         StatusText = "测试失败：请先明确填写已授权的个人空间测试父目录。";
                         return;
                     }
+                    if (AppServices.IsIsolatedTestSession)
+                        AppServices.GetService<AppSettings>().EnsureIsolatedTestParent(TargetNasShare);
                     StatusText = "正在执行真实飞牛 NAS「我的文件」端到端自动化测试 (包含分块流式传输、增量跳过与哈希校验)...";
                     report = await _engine.RunNasFnOsPersonalTestAsync(fnProvider, progress, includeLargeFile: false, authorizedTestParent: TargetNasShare);
                 }
                 else if (SelectedModeIndex == 2)
                 {
+                    if (AppServices.IsIsolatedTestSession)
+                        throw new InvalidOperationException("隔离测试会话不允许在 SMB 共享上运行真实测试");
                     string target = TargetNasShare;
                     if (string.IsNullOrWhiteSpace(target))
                     {

@@ -48,7 +48,7 @@ namespace FNSyncPlus.WinUI.Services
                 settings = AppSettings.LoadIsolatedTestSession(id);
                 settings.SetIsolatedTestBoundary(remoteRoot);
             }
-            else settings = IsIsolatedTestSession ? AppSettings.CreateInMemory()
+            else settings = IsIsolatedTestSession ? AppSettings.CreateUnboundedIsolatedSession()
                 : IsVersionedBetaSession ? AppSettings.LoadVersionedBetaProfile() : AppSettings.Load();
             if (IsVersionedBetaSession)
             {
