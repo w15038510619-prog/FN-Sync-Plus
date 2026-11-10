@@ -7,12 +7,12 @@ using FNSyncPlus.Core.Utils;
 namespace FNSyncPlus.Core.Services;
 
 /// <summary>
-/// Isolated incremental backup experiment for migrated versioned backups. It is not connected to
-/// tasks or the UI. Mirror deletion and the physical active directory are not implemented.
+/// Versioned backup experiment used by isolated tasks. Physical publication is coordinated
+/// separately; mirror deletion remains disabled.
 /// </summary>
 public sealed class ExperimentalVersionedBackup
 {
-    public sealed record Result(VersionedManifestStore.Snapshot Snapshot, int UploadedFiles, int UnchangedFiles, int RenamedFiles, int DeletedFiles, int ReusedFiles = 0, bool HasNewVersion = true);
+    public sealed record Result(VersionedManifestStore.Snapshot Snapshot, int UploadedFiles, int UnchangedFiles, int RenamedFiles, int DeletedFiles, int ReusedFiles = 0, bool HasNewVersion = true, bool ResumedInitialization = false);
     private sealed record SourceFile(string RelativePath, string FullPath, long Size, long ModifiedTicks, string Sha256);
     private sealed record SourceTree(List<string> Directories, List<(string RelativePath, string FullPath)> Files);
     private sealed record TreeStamp(string[] Directories, (string RelativePath, long Size, long ModifiedTicks)[] Files);
@@ -24,18 +24,18 @@ public sealed class ExperimentalVersionedBackup
         CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0)
         => RunCoreAsync(provider, sourceDirectory, target, false, null, token, strategy, settlingDelaySeconds);
 
-    /// <summary>Creates a brand-new destination and commits its first complete version; never adopts an existing directory.</summary>
+    /// <summary>Creates a destination, or resumes only one with a matching initialization record.</summary>
     public async Task<Result> CreateNewAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0)
-        => await CreateNewCoreAsync(provider, sourceDirectory, target, null, token, strategy, settlingDelaySeconds).ConfigureAwait(false);
+        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0, string? initializationId = null)
+        => await CreateNewCoreAsync(provider, sourceDirectory, target, null, token, strategy, settlingDelaySeconds, initializationId).ConfigureAwait(false);
 
     /// <summary>Experimental import from an existing independent NAS directory; the existing directory is read-only.</summary>
     public async Task<Result> CreateNewFromExistingAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        string existingRoot, CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0)
-        => await CreateNewCoreAsync(provider, sourceDirectory, target, existingRoot, token, strategy, settlingDelaySeconds).ConfigureAwait(false);
+        string existingRoot, CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0, string? initializationId = null)
+        => await CreateNewCoreAsync(provider, sourceDirectory, target, existingRoot, token, strategy, settlingDelaySeconds, initializationId).ConfigureAwait(false);
 
     private async Task<Result> CreateNewCoreAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds)
+        string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds, string? initializationId)
     {
         ArgumentNullException.ThrowIfNull(provider);
         if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("备份目标必须是安全的相对路径", nameof(target));
@@ -45,6 +45,8 @@ public sealed class ExperimentalVersionedBackup
             throw new NotSupportedException("实验性同步尚不支持镜像删除");
         if (provider is not IExclusiveDirectoryProvider exclusive)
             throw new NotSupportedException("存储不支持独占创建新的备份目录");
+        if (initializationId != null && (!Guid.TryParseExact(initializationId, "N", out var ownerId) || ownerId == Guid.Empty))
+            throw new ArgumentException("首次备份归属标识无效", nameof(initializationId));
         if (existingRoot != null)
         {
             if (provider is not IExperimentalContentReuseProvider) throw new NotSupportedException("存储不支持已验证的服务端复制");
@@ -77,13 +79,36 @@ public sealed class ExperimentalVersionedBackup
             await HashSourceAsync(file.RelativePath, file.FullPath, token).ConfigureAwait(false);
         }
         token.ThrowIfCancellationRequested();
-        if (await exclusive.TryCreateDirectoryExclusiveAsync(target, token).ConfigureAwait(false) != ExclusiveDirectoryResult.Created)
-            throw new IOException("备份目标已存在，拒绝复用或覆盖");
-        return await RunCoreAsync(provider, sourceDirectory, target, true, existingRoot, token, strategy, 0).ConfigureAwait(false);
+        string canonicalTarget = provider is FnOsPersonalStorageProvider fn ? fn.NormalizeRelativePath(target) : PathHelper.NormalizeRelPath(target);
+        if (!PathHelper.IsSafeRelativePath(canonicalTarget)) throw new ArgumentException("备份目标不能是个人空间根目录");
+        byte[]? ownership = initializationId == null ? null : JsonSerializer.SerializeToUtf8Bytes(new {
+            schema = 1, id = initializationId, source = PathHelper.NormalizeLocalPath(sourceDirectory),
+            target = canonicalTarget, existing = existingRoot, strategy = (int)strategy
+        });
+        string? ownershipPath = initializationId == null ? null : $"{canonicalTarget}/.fnsync-init-{initializationId}.json";
+        var created = await exclusive.TryCreateDirectoryExclusiveAsync(target, token).ConfigureAwait(false);
+        if (created == ExclusiveDirectoryResult.Created)
+        {
+            if (ownership != null)
+                await ExperimentalFirstProjection.WriteRecordAsync(provider, ownershipPath!, ownership, token).ConfigureAwait(false);
+        }
+        else
+        {
+            if (ownership == null) throw new IOException("备份目标已存在，拒绝复用或覆盖");
+            byte[] recorded = await ExperimentalProjectionRecoveryInspector.ReadBoundedAsync(provider, ownershipPath!, 512 * 1024, token).ConfigureAwait(false);
+            if (!ownership.AsSpan().SequenceEqual(recorded)) throw new InvalidDataException("首次备份归属记录不匹配，拒绝接管目标");
+        }
+        ProgressChanged?.Invoke(ownership != null ? "已核验首次备份目标归属，准备同步" : "已创建首次备份目标，准备同步");
+        var committed = await _versions.LoadForWritingAsync(provider, canonicalTarget, token).ConfigureAwait(false);
+        if (created == ExclusiveDirectoryResult.Created && committed != null)
+            throw new InvalidDataException("新目标出现了已有版本，拒绝接管");
+        var result = await RunCoreAsync(provider, sourceDirectory, target, committed == null, existingRoot, token, strategy, 0, ownershipPath, ownership).ConfigureAwait(false);
+        return result with { ResumedInitialization = created != ExclusiveDirectoryResult.Created };
     }
 
     private async Task<Result> RunCoreAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        bool creating, string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds)
+        bool creating, string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds,
+        string? ownershipPath = null, byte[]? ownership = null)
     {
         ArgumentNullException.ThrowIfNull(provider);
         if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("备份目标必须是安全的相对路径", nameof(target));
@@ -103,6 +128,11 @@ public sealed class ExperimentalVersionedBackup
         Exception? primaryFailure = null;
         try
         {
+            if (ownership != null)
+            {
+                byte[] recorded = await ExperimentalProjectionRecoveryInspector.ReadBoundedAsync(provider, ownershipPath!, 512 * 1024, token).ConfigureAwait(false);
+                if (!ownership.AsSpan().SequenceEqual(recorded)) throw new InvalidDataException("获取锁后首次备份归属记录发生变化，拒绝写入");
+            }
             var oldSnapshot = await _versions.LoadForWritingAsync(provider, target, token).ConfigureAwait(false);
             if (!string.Equals(initial?.Id, oldSnapshot?.Id, StringComparison.Ordinal))
                 throw new IOException("获取锁期间备份版本发生变化，请重新扫描");

@@ -101,6 +101,9 @@ namespace FNSyncPlus.Core.Services
                 throw new InvalidOperationException("版本化备份只能用于隔离测试或独立新版试验配置");
             foreach (var task in settings.Tasks)
             {
+                if (task.ExperimentalInitializationId != null &&
+                    (!Guid.TryParseExact(task.ExperimentalInitializationId, "N", out var initializationId) || initializationId == Guid.Empty))
+                    throw new InvalidOperationException("首次备份归属标识无效，已停止任务。");
                 if (settings.IsVersionedBetaProfile && (task.ProviderType != StorageProviderType.FnOsPersonal ||
                     !string.Equals(task.BackupStorageFormat, IsolatedVersionedFormat, StringComparison.Ordinal)))
                     throw new InvalidOperationException("新版配置包含未明确迁移的旧任务，已阻止自动启动。");
@@ -203,7 +206,7 @@ namespace FNSyncPlus.Core.Services
             if (_settings.IsVersionedBetaProfile && (!UseExperimentalVersionedBackup || task.ProviderType != StorageProviderType.FnOsPersonal))
                 throw new InvalidOperationException("新版试验配置仅接受飞牛版本化备份任务。");
             EnsureSeparateFromLegacyTasks(task);
-            if (task.BackupStorageFormat != null)
+            if (task.BackupStorageFormat != null || task.ExperimentalInitializationId != null)
                 throw new InvalidOperationException("不能把已有备份格式的任务作为新任务添加");
             task.IsExperimentalBackup = UseExperimentalVersionedBackup && task.ProviderType == StorageProviderType.FnOsPersonal;
             task.RequiresNewExperimentalBackup = task.IsExperimentalBackup;
@@ -234,9 +237,10 @@ namespace FNSyncPlus.Core.Services
                             throw new InvalidOperationException($"无法添加任务【{task.TaskName}】：NAS 目标备份目录与已有任务【{existing.TaskName}】重叠！\n不同任务必须享有独立的存储子目录。\n{destReason}");
                     }
                     task.BackupStorageFormat = task.IsExperimentalBackup ? IsolatedVersionedFormat : null;
+                    task.ExperimentalInitializationId = task.IsExperimentalBackup ? Guid.NewGuid().ToString("N") : null;
                     _settings.Tasks.Add(task);
                     try { _settings.Save(); }
-                    catch { _settings.Tasks.Remove(task); task.BackupStorageFormat = null; throw; }
+                    catch { _settings.Tasks.Remove(task); task.BackupStorageFormat = null; task.ExperimentalInitializationId = null; throw; }
                 }
                 ApplyTaskAutomation(task);
             }
@@ -805,8 +809,8 @@ namespace FNSyncPlus.Core.Services
                     bool initializing = task.RequiresNewExperimentalBackup;
                     var result = initializing
                         ? string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot)
-                            ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay).ConfigureAwait(false)
-                            : await experimental.CreateNewFromExistingAsync(provider, task.SourceFolder, task.DestinationFolder, task.ExperimentalExistingRoot, taskToken, task.Strategy, settlingDelay).ConfigureAwait(false)
+                            ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId).ConfigureAwait(false)
+                            : await experimental.CreateNewFromExistingAsync(provider, task.SourceFolder, task.DestinationFolder, task.ExperimentalExistingRoot, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId).ConfigureAwait(false)
                         : await experimental.RunAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay).ConfigureAwait(false);
                     task.RequiresNewExperimentalBackup = false;
                     if (initializing)
@@ -816,6 +820,13 @@ namespace FNSyncPlus.Core.Services
                         _settings.Save(); // A committed first version can now be reattached after restart.
                     }
                     reusedFiles = result.ReusedFiles;
+                    if (result.ResumedInitialization && !_isolatedProjections.ContainsKey(task.TaskId))
+                    {
+                        var existingPublication = await new ExperimentalProjectionDiscovery()
+                            .DiscoverFirstPublicationAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false);
+                        if (existingPublication != null)
+                            _isolatedProjections[task.TaskId] = new IsolatedProjectionState(existingPublication.Plan, existingPublication.Publication);
+                    }
                     bool hasPrevious = _isolatedProjections.TryGetValue(task.TaskId, out var previousProjection);
                     if (hasPrevious && previousProjection!.Plan.VersionId == result.Snapshot.Id)
                     {

@@ -196,6 +196,11 @@ namespace FNSyncPlus.Core.Models
         [JsonInclude]
         public bool ExperimentalFirstPublicationPending { get; internal set; }
 
+        [JsonPropertyName("experimental_initialization_id")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        [JsonInclude]
+        public string? ExperimentalInitializationId { get; internal set; }
+
         [JsonIgnore]
         public bool RequiresNewExperimentalBackup { get; internal set; }
 

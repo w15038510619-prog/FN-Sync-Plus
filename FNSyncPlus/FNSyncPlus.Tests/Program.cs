@@ -2258,12 +2258,12 @@ namespace FNSyncPlus.Tests
             using var occupiedManager = new TaskManager(occupiedReload, new SmbAuthService(), new LogService(Path.Combine(root, "reattach-occupied-logs")), experimentalVersionedBackup: true);
             occupiedManager.StorageProviderSupplier = () => provider;
             var occupiedDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            occupiedManager.TaskStateChanged += t => { if (t.TaskId == occupiedTask.TaskId && t.State == TaskSyncState.Error) occupiedDone.TrySetResult(); };
+            occupiedManager.TaskStateChanged += t => { if (t.TaskId == occupiedTask.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) occupiedDone.TrySetResult(); };
             occupiedManager.TriggerSync(occupiedTask.TaskId);
             if (await Task.WhenAny(occupiedDone.Task, Task.Delay(10000)) != occupiedDone.Task) throw new TimeoutException("已存在目标检查超时");
-            Assert(occupiedTask.State == TaskSyncState.Error && occupiedTask.ExperimentalPendingInitialization &&
+            Assert(occupiedTask.State == TaskSyncState.Completed && !occupiedTask.ExperimentalPendingInitialization && occupiedTask.LastUploadedFiles == 0 &&
                 File.ReadAllText(Path.Combine(root, occupiedTask.DestinationFolder, "current", "sample.txt")) == "updated before restart",
-                "重启前待创建任务遇到已存在目标时拒绝覆盖并保留数据");
+                "旧配置指向已由本任务发布的目标时核验并安全接续");
 
             var firstSessionId = Guid.NewGuid();
             string firstRemoteRoot = "Codex_FN_Test_" + Guid.NewGuid().ToString("N");
@@ -2311,6 +2311,66 @@ namespace FNSyncPlus.Tests
             catch (InvalidDataException) { refusedForeignCurrent = true; }
             Assert(refusedForeignCurrent && File.ReadAllText(Path.Combine(root, foreignTarget, "current", "keep.txt")) == "foreign data",
                 "首次发布续接遇到无法确认的当前目录时拒绝覆盖");
+
+            Guid ownedProfileId = Guid.NewGuid();
+            var ownedSettings = AppSettings.LoadVersionedBetaTestProfile(ownedProfileId);
+            var ownedTask = new SyncTask { TaskName = "首次对象中断", SourceFolder = source, DestinationFolder = "owned-first-interruption",
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly, SettlingDelaySeconds = 1 };
+            using var ownedManager = new TaskManager(ownedSettings, new SmbAuthService(), new LogService(Path.Combine(root, "owned-first-fail-logs")), experimentalVersionedBackup: true);
+            ownedManager.StorageProviderSupplier = () => provider;
+            ownedManager.AddTask(ownedTask);
+            provider.CorruptObjectUpload = true;
+            var ownedFail = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            ownedManager.TaskStateChanged += t => { if (t.TaskId == ownedTask.TaskId && t.State == TaskSyncState.Error) ownedFail.TrySetResult(); };
+            ownedManager.TriggerSync(ownedTask.TaskId);
+            if (await Task.WhenAny(ownedFail.Task, Task.Delay(15000)) != ownedFail.Task) throw new TimeoutException("首次对象故障注入超时");
+            provider.CorruptObjectUpload = false;
+            string ownedId = ownedTask.ExperimentalInitializationId ?? throw new InvalidDataException("未保存首次归属标识");
+            string ownerFile = Path.Combine(root, ownedTask.DestinationFolder, ".fnsync-init-" + ownedId + ".json");
+            var ownedReload = AppSettings.LoadVersionedBetaTestProfile(ownedProfileId);
+            Assert(File.Exists(ownerFile) && ownedReload.Tasks.Single().ExperimentalPendingInitialization &&
+                ownedReload.Tasks.Single().ExperimentalInitializationId == ownedId &&
+                await new VersionedManifestStore().LoadAsync(provider, ownedTask.DestinationFolder) == null,
+                "首次对象写入失败时保留已验证的任务归属记录和待初始化配置");
+            if (!await ownedManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("首次对象失败后未停止");
+            using var ownedResume = new TaskManager(ownedReload, new SmbAuthService(), new LogService(Path.Combine(root, "owned-first-resume-logs")), experimentalVersionedBackup: true);
+            ownedResume.StorageProviderSupplier = () => provider;
+            var ownedReloadTask = ownedReload.Tasks.Single();
+            var ownedDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            ownedResume.TaskStateChanged += t => { if (t.TaskId == ownedReloadTask.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) ownedDone.TrySetResult(); };
+            ownedResume.TriggerSync(ownedReloadTask.TaskId);
+            if (await Task.WhenAny(ownedDone.Task, Task.Delay(15000)) != ownedDone.Task) throw new TimeoutException("首次对象失败后续接超时");
+            Assert(ownedReloadTask.State == TaskSyncState.Completed && !ownedReloadTask.ExperimentalPendingInitialization &&
+                File.ReadAllText(Path.Combine(root, ownedTask.DestinationFolder, "current", "sample.txt")) == "updated before restart" && File.Exists(ownerFile),
+                "已验证归属的首次未提交备份重启后可安全续接");
+            var ownedSnapshot = await new VersionedManifestStore().LoadAsync(provider, ownedTask.DestinationFolder);
+            bool wrongOwnerRejected = false;
+            try { await backup.CreateNewAsync(provider, source, ownedTask.DestinationFolder, initializationId: Guid.NewGuid().ToString("N")); }
+            catch (Exception ex) when (ex is IOException or InvalidDataException) { wrongOwnerRejected = true; }
+            Assert(wrongOwnerRejected && (await new VersionedManifestStore().LoadAsync(provider, ownedTask.DestinationFolder))?.Id == ownedSnapshot?.Id,
+                "不同归属标识不能认领已有目标或改变已提交版本");
+            string otherOwnedSource = Path.Combine(root, "owned-other-source");
+            Directory.CreateDirectory(otherOwnedSource);
+            File.WriteAllText(Path.Combine(otherOwnedSource, "sample.txt"), "different source");
+            bool wrongSourceRejected = false;
+            try { await backup.CreateNewAsync(provider, otherOwnedSource, ownedTask.DestinationFolder, initializationId: ownedId); }
+            catch (InvalidDataException) { wrongSourceRejected = true; }
+            Assert(wrongSourceRejected && (await new VersionedManifestStore().LoadAsync(provider, ownedTask.DestinationFolder))?.Id == ownedSnapshot?.Id,
+                "归属标识匹配但源目录改变时拒绝认领目标");
+            bool emptyOwnerRejected = false;
+            try { await backup.CreateNewAsync(provider, source, "empty-owner-target", initializationId: Guid.Empty.ToString("N")); }
+            catch (ArgumentException) { emptyOwnerRejected = true; }
+            Assert(emptyOwnerRejected && !Directory.Exists(Path.Combine(root, "empty-owner-target")), "空归属标识不能创建或认领备份目标");
+            var tamperedBackup = new ExperimentalVersionedBackup();
+            tamperedBackup.ProgressChanged += message => {
+                if (message == "已核验首次备份目标归属，准备同步") File.WriteAllText(ownerFile, "tampered");
+            };
+            bool changedOwnerRejected = false;
+            try { await tamperedBackup.CreateNewAsync(provider, source, ownedTask.DestinationFolder, initializationId: ownedId); }
+            catch (InvalidDataException) { changedOwnerRejected = true; }
+            Assert(changedOwnerRejected && (await new VersionedManifestStore().LoadAsync(provider, ownedTask.DestinationFolder))?.Id == ownedSnapshot?.Id &&
+                await ExperimentalRemoteLease.InspectAsync(provider, ownedTask.DestinationFolder) == null,
+                "归属记录在获取锁前变化时拒绝写入并释放锁");
         }
 
         static async Task TestReconnectSchedulingAsync(string root)
