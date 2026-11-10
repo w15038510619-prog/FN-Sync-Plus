@@ -45,7 +45,7 @@ namespace FNSyncPlus.WinUI
         {
             try
             {
-                _singleInstance = new SingleInstanceCoordinator(@"Global\FNSyncPlus.SingleInstance.v1");
+                _singleInstance = new SingleInstanceCoordinator(SingleInstanceCoordinator.DesktopInstanceName);
                 if (!_singleInstance.IsPrimary)
                 {
                     bool notified = _singleInstance.NotifyExisting(TimeSpan.FromSeconds(5));

@@ -1741,6 +1741,19 @@ namespace FNSyncPlus.Tests
 
         static async Task TestSingleInstanceAsync()
         {
+            string legacyName = @"Global\FNSyncPlus.Test." + Guid.NewGuid().ToString("N");
+            using (var legacy = new Mutex(true, legacyName, out bool legacyCreated))
+            {
+                using var newer = new SingleInstanceCoordinator(legacyName);
+                Assert(legacyCreated && !newer.IsPrimary && !newer.NotifyExisting(TimeSpan.FromMilliseconds(200)),
+                    "旧版程序持有运行标记时新版不会启动第二套服务");
+                legacy.ReleaseMutex();
+            }
+            string reverseName = @"Global\FNSyncPlus.Test." + Guid.NewGuid().ToString("N");
+            using (var newer = new SingleInstanceCoordinator(reverseName))
+            using (var legacy = new Mutex(true, reverseName, out bool legacyCreated))
+                Assert(newer.IsPrimary && !legacyCreated, "新版运行时旧版也无法注册第二个实例");
+
             string name = @"Global\FNSyncPlus.Test." + Guid.NewGuid().ToString("N");
             using (var primary = new SingleInstanceCoordinator(name))
             using (var duplicate = new SingleInstanceCoordinator(name))

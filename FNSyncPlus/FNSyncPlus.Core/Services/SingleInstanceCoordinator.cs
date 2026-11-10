@@ -6,6 +6,8 @@ namespace FNSyncPlus.Core.Services;
 /// <summary>Uses named Windows objects so independently installed copies share one instance.</summary>
 public sealed class SingleInstanceCoordinator : IDisposable
 {
+    // Keep the legacy WPF application's mutex name so both desktop versions exclude each other.
+    public const string DesktopInstanceName = @"Global\FNSyncPlus_SingleInstance_Mutex_2026";
     private readonly Mutex _marker;
     private readonly EventWaitHandle? _activation;
     private RegisteredWaitHandle? _listener;
