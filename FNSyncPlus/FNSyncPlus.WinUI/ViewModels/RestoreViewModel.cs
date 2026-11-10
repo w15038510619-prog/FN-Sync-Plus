@@ -61,7 +61,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private RestoreHistoryDisplayItem? _selectedHistory;
 
         [ObservableProperty]
-        private string _localRestoreTarget = @"D:\Restored_Files";
+        private string _localRestoreTarget = string.Empty;
 
         [ObservableProperty]
         private int _conflictPolicyIndex = 0; // 0=Skip, 1=Overwrite, 2=Timestamp
@@ -255,7 +255,9 @@ namespace FNSyncPlus.WinUI.ViewModels
         [RelayCommand]
         public async Task ExecuteRestoreAsync()
         {
-            if (!CanConfigureRestore || SelectedPackage == null || string.IsNullOrWhiteSpace(LocalRestoreTarget)) return;
+            if (!CanConfigureRestore) return;
+            if (SelectedPackage == null) { RestoreStatusText = "请先检索并选择备份。"; return; }
+            if (string.IsNullOrWhiteSpace(LocalRestoreTarget)) { RestoreStatusText = "请选择还原到本地的目标文件夹。"; return; }
 
             IsRestoring = true;
             RestoreProgress = 0;
@@ -425,7 +427,9 @@ namespace FNSyncPlus.WinUI.ViewModels
         [RelayCommand]
         public async Task RestoreHistoryAsync()
         {
-            if (!CanConfigureRestore || SelectedPackage == null || SelectedHistory == null || string.IsNullOrWhiteSpace(LocalRestoreTarget)) return;
+            if (!CanConfigureRestore) return;
+            if (SelectedPackage == null || SelectedHistory == null) { RestoreStatusText = "请先选择要恢复的历史版本。"; return; }
+            if (string.IsNullOrWhiteSpace(LocalRestoreTarget)) { RestoreStatusText = "请选择还原到本地的目标文件夹。"; return; }
             if (_connectionService.CurrentStorageProvider is not FnOsPersonalStorageProvider provider)
             {
                 RestoreStatusText = "当前存储类型尚不支持从此界面恢复历史版本。";

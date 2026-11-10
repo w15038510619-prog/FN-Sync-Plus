@@ -254,8 +254,11 @@ namespace FNSyncPlus.Core.Services
 
             try
             {
+                string rootPath = nasBackupRootRel.TrimEnd('/', '\\');
+                string rootName = string.IsNullOrEmpty(rootPath) || rootPath == "我的文件"
+                    ? "个人空间根备份" : rootPath.Split('/', '\\').Last();
                 var rootPackage = await DiscoverProviderPackageAsync(storageProvider, nasBackupRootRel,
-                    "个人空间根备份", cancellationToken).ConfigureAwait(false);
+                    rootName, cancellationToken).ConfigureAwait(false);
                 if (rootPackage != null) result.Add(rootPackage);
                 if (rootPackage?.HasDamagedVersionRecords == true)
                     ReportDiscoveryIssue(warnings, "版本化清单包含损坏记录，可能已回退到较早版本", new InvalidDataException("请核对备份版本"));

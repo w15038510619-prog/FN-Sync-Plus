@@ -1102,6 +1102,8 @@ namespace FNSyncPlus.Tests
                 var packageWarnings = new List<string>();
                 var packageList = await historyEngine.DiscoverBackupPackagesAsync(versionProvider, batchFixture.folder, warnings: packageWarnings);
                 var versionedPackage = packageList.Single(p => p.NasFolderUnc == batchFixture.folder);
+                Assert(versionedPackage.PackageName == batchFixture.folder.TrimEnd('/', '\\').Split('/', '\\').Last(),
+                    "直接扫描备份目录时显示实际目录名");
                 var packageManifest = await historyEngine.ReadPackageManifestAsync(versionProvider, versionedPackage);
                 Assert(versionedPackage.VersionId == editedBatch.Snapshot.Id && packageManifest.Files.Count == 2 &&
                     packageManifest.History.Any(h => h.OriginalRel == longOriginal && h.Reason == "superseded"),
