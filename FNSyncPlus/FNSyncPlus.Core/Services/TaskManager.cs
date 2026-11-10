@@ -17,6 +17,7 @@ namespace FNSyncPlus.Core.Services
     /// </summary>
     public class TaskManager : IDisposable
     {
+        private const string IsolatedVersionedFormat = "isolated-versioned-v1";
         private readonly AppSettings _settings;
         private readonly LongNameEngine _longNameEngine;
         private readonly ManifestManager _manifestManager;
@@ -98,12 +99,20 @@ namespace FNSyncPlus.Core.Services
             _logService = logService ?? LogService.Default;
             if (experimentalVersionedBackup && !settings.IsInMemoryOnly)
                 throw new InvalidOperationException("实验性备份只能用于内存隔离测试会话");
+            foreach (var task in settings.Tasks)
+            {
+                if (task.BackupStorageFormat != null &&
+                    (!experimentalVersionedBackup || task.ProviderType != StorageProviderType.FnOsPersonal ||
+                     !string.Equals(task.BackupStorageFormat, IsolatedVersionedFormat, StringComparison.Ordinal)))
+                    throw new InvalidOperationException("任务包含不支持的备份格式，已阻止旧同步引擎运行；请保留配置并使用对应版本处理。");
+            }
             _useExperimentalVersionedBackup = experimentalVersionedBackup;
             if (experimentalVersionedBackup)
             {
                 foreach (var task in settings.Tasks.Where(t => t.ProviderType == StorageProviderType.FnOsPersonal))
                 {
                     task.IsExperimentalBackup = true;
+                    task.BackupStorageFormat = IsolatedVersionedFormat;
                     task.RequiresNewExperimentalBackup = task.ExperimentalPendingInitialization;
                 }
             }
@@ -127,6 +136,8 @@ namespace FNSyncPlus.Core.Services
         {
             if (task == null) throw new ArgumentNullException(nameof(task));
             _settings.EnsureIsolatedTestTask(task);
+            if (task.BackupStorageFormat != null)
+                throw new InvalidOperationException("不能把已有备份格式的任务作为新任务添加");
             task.IsExperimentalBackup = UseExperimentalVersionedBackup && task.ProviderType == StorageProviderType.FnOsPersonal;
             task.RequiresNewExperimentalBackup = task.IsExperimentalBackup;
             task.ExperimentalPendingInitialization = task.IsExperimentalBackup;
@@ -166,9 +177,10 @@ namespace FNSyncPlus.Core.Services
                         if (PathHelper.ArePathsSameOrNested(task.DestinationFolder, existing.DestinationFolder, out string destReason))
                             throw new InvalidOperationException($"无法添加任务【{task.TaskName}】：NAS 目标备份目录与已有任务【{existing.TaskName}】重叠！\n不同任务必须享有独立的存储子目录。\n{destReason}");
                     }
+                    task.BackupStorageFormat = task.IsExperimentalBackup ? IsolatedVersionedFormat : null;
                     _settings.Tasks.Add(task);
                     try { _settings.Save(); }
-                    catch { _settings.Tasks.Remove(task); throw; }
+                    catch { _settings.Tasks.Remove(task); task.BackupStorageFormat = null; throw; }
                 }
                 ApplyTaskAutomation(task);
             }
@@ -608,6 +620,18 @@ namespace FNSyncPlus.Core.Services
         private async Task ExecuteSingleTaskSyncAsync(SyncTask task, CancellationToken taskToken)
         {
             taskToken.ThrowIfCancellationRequested();
+            if (task.IsExperimentalBackup
+                ? !UseExperimentalVersionedBackup || task.ProviderType != StorageProviderType.FnOsPersonal ||
+                  !string.Equals(task.BackupStorageFormat, IsolatedVersionedFormat, StringComparison.Ordinal)
+                : task.BackupStorageFormat != null)
+            {
+                task.State = TaskSyncState.ConfigurationError;
+                task.LastSyncStatus = "备份格式不受支持";
+                task.LastError = "任务的备份格式与当前同步引擎不匹配，已阻止同步。";
+                AppendTaskLog(task, "ERROR", task.LastError);
+                TaskStateChanged?.Invoke(task);
+                return;
+            }
             try { _settings.EnsureIsolatedTestTask(task); }
             catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or NotSupportedException)
             {

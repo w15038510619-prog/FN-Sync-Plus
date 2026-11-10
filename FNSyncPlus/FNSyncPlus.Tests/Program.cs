@@ -1950,6 +1950,31 @@ namespace FNSyncPlus.Tests
             try { nonisolated.AddTask(new SyncTask { SourceFolder = source, DestinationFolder = "not-used", ExperimentalExistingRoot = "existing" }); }
             catch (InvalidOperationException) { refusedReuse = true; }
             Assert(refusedReuse, "正式任务不能启用隔离目录复用参数");
+
+            var markedSettings = AppSettings.CreateInMemory();
+            using (var markerManager = new TaskManager(markedSettings, new SmbAuthService(), new LogService(Path.Combine(root, "format-marker-logs")), experimentalVersionedBackup: true))
+                markerManager.AddTask(new SyncTask { SourceFolder = source, DestinationFolder = "marked-target", ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly });
+            string serialized = markedSettings.ToJson();
+            var markedReload = AppSettings.FromJson(serialized);
+            Assert(markedReload.Tasks.Single().BackupStorageFormat == "isolated-versioned-v1", "隔离版本任务的格式标记在配置往返后保留");
+            bool refusedLegacyEngine = false;
+            try { using var unsafeManager = new TaskManager(markedReload, new SmbAuthService(), new LogService(Path.Combine(root, "format-refuse-logs"))); }
+            catch (InvalidOperationException) { refusedLegacyEngine = true; }
+            Assert(refusedLegacyEngine, "旧同步引擎拒绝接管带版本格式标记的任务");
+            var injectedTask = markedReload.Tasks.Single();
+            var injectedDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            nonisolated.TaskStateChanged += t => { if (t.TaskId == injectedTask.TaskId && t.State == TaskSyncState.ConfigurationError) injectedDone.TrySetResult(); };
+            persistedSettings.Tasks.Add(injectedTask);
+            nonisolated.TriggerSync(injectedTask.TaskId);
+            if (await Task.WhenAny(injectedDone.Task, Task.Delay(5000)) != injectedDone.Task) throw new TimeoutException("运行时备份格式检查超时");
+            Assert(injectedTask.LastSyncStatus == "备份格式不受支持", "运行期间注入版本任务也不能进入旧同步引擎");
+            persistedSettings.Tasks.Remove(injectedTask);
+            var unknownReload = AppSettings.FromJson(serialized.Replace("isolated-versioned-v1", "future-format-v2", StringComparison.Ordinal));
+            unknownReload.IsInMemoryOnly = true;
+            bool refusedUnknownFormat = false;
+            try { using var unknownManager = new TaskManager(unknownReload, new SmbAuthService(), new LogService(Path.Combine(root, "format-unknown-logs")), experimentalVersionedBackup: true); }
+            catch (InvalidOperationException) { refusedUnknownFormat = true; }
+            Assert(refusedUnknownFormat, "隔离引擎拒绝未知版本格式，不启动同步");
         }
 
         static async Task TestIsolatedTaskReattachmentAsync(string root)

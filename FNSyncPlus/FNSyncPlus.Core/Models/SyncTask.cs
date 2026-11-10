@@ -178,6 +178,12 @@ namespace FNSyncPlus.Core.Models
         [JsonIgnore]
         public bool IsExperimentalBackup { get; internal set; }
 
+        // Persisted independently of runtime flags so a versioned task cannot fall back to the legacy engine.
+        [JsonPropertyName("backup_storage_format")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        [JsonInclude]
+        public string? BackupStorageFormat { get; internal set; }
+
         /// <summary>Only for an explicitly selected source in an isolated experiment.</summary>
         [JsonPropertyName("experimental_existing_root")]
         public string? ExperimentalExistingRoot { get; set; }
