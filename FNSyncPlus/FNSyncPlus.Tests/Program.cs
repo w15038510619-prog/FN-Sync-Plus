@@ -1701,6 +1701,7 @@ namespace FNSyncPlus.Tests
                 await TestTaskRemovalWhileRunningAsync(root);
                 await TestTaskRemovalFailureAsync(root);
                 await TestIsolatedVersionedTaskAsync(root);
+                await TestScheduledTimeAfterManualSyncAsync(root);
                 await TestExperimentalMirrorAsync(root);
                 await TestVersionedDeviceBindingAsync(root);
                 await TestLegacyTargetProtectionAsync(root);
@@ -2060,6 +2061,30 @@ namespace FNSyncPlus.Tests
                 provider.ContinueUpload.TrySetResult();
                 Environment.CurrentDirectory = oldDirectory;
             }
+        }
+
+        static async Task TestScheduledTimeAfterManualSyncAsync(string root)
+        {
+            string source = Path.Combine(root, "scheduled-time-source");
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "sample.txt"), "scheduled time test");
+            var provider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+            var settings = AppSettings.CreateInMemory();
+            var task = new SyncTask { TaskName = "下次定时检查", SourceFolder = source, DestinationFolder = "scheduled-time-target",
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.PeriodicOnly,
+                IntervalMinutes = 5, SettlingDelaySeconds = 1 };
+            using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "scheduled-time-logs")),
+                experimentalVersionedBackup: true);
+            manager.StorageProviderSupplier = () => provider;
+            manager.AddTask(task);
+            var planned = task.NextScheduledTime;
+            var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            manager.TaskStateChanged += t => { if (t.TaskId == task.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) completed.TrySetResult(); };
+            manager.TriggerSync(task.TaskId);
+            if (await Task.WhenAny(completed.Task, Task.Delay(15000)) != completed.Task) throw new TimeoutException("定时任务手动同步超时");
+            Assert(task.State == TaskSyncState.Completed && planned.HasValue && task.NextScheduledTime == planned,
+                "手动同步完成后下次检查时间仍与原定时器一致");
+            if (!await manager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("定时任务未停止");
         }
 
         static async Task TestIsolatedVersionedTaskAsync(string root)

@@ -959,10 +959,6 @@ namespace FNSyncPlus.Core.Services
                 {
                     task.State = TaskSyncState.Completed;
                     task.LastSuccessTime = DateTime.Now;
-                    if (task.ScheduleMode == TaskSyncScheduleMode.SmartAuto || task.ScheduleMode == TaskSyncScheduleMode.PeriodicOnly)
-                    {
-                        task.NextScheduledTime = DateTime.Now.AddMinutes(task.IntervalMinutes);
-                    }
                     task.CurrentProgress = 100.0;
                     string trialLabel = _settings.IsVersionedBetaProfile && !_settings.IsVersionedBetaTestProfile ? "新版备份试用" : "隔离试验";
                     task.CurrentFile = task.IsExperimentalBackup ? $"{trialLabel}已提交：复用 {reusedFiles}，上传 {report.UploadedFiles}；物理目录已发布" : "所有文件均已同步更新至最新状态";
