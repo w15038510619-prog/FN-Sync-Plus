@@ -286,9 +286,9 @@ namespace FNSyncPlus.Core.Services
             {
                 if (_stopping || _removingTasks.Contains(taskId) || _runningCompletions.ContainsKey(taskId)) return;
                 var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-                if (task == null || !task.Enabled || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing)
+                if (task == null || !task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing)
                 {
-                    if (task != null && task.State == TaskSyncState.Paused)
+                    if (task != null && (task.IsUserPaused || task.State == TaskSyncState.Paused))
                     {
                         AppendTaskLog(task, "INFO", "任务处于暂停状态，已忽略触发。");
                     }
@@ -330,7 +330,7 @@ namespace FNSyncPlus.Core.Services
         {
             SyncTask[] tasks;
             lock (_taskLifecycleLock) tasks = _settings.Tasks.ToArray();
-            foreach (var task in tasks.Where(t => t.Enabled && t.State != TaskSyncState.Paused))
+            foreach (var task in tasks.Where(t => t.Enabled && !t.IsUserPaused && t.State != TaskSyncState.Paused))
             {
                 TriggerSync(task.TaskId);
             }
@@ -401,7 +401,7 @@ namespace FNSyncPlus.Core.Services
                         lock (_taskLifecycleLock)
                         {
                             task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-                            if (_stopping || task == null || _removingTasks.Contains(taskId) || !task.Enabled || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing || task.State == TaskSyncState.ConfigurationError) continue;
+                            if (_stopping || task == null || _removingTasks.Contains(taskId) || !task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing || task.State == TaskSyncState.ConfigurationError) continue;
                         }
 
                         // 等待获取全局并发信号量槽位
@@ -412,7 +412,7 @@ namespace FNSyncPlus.Core.Services
                         lock (_taskLifecycleLock)
                         {
                             if (_stopping || !_settings.Tasks.Contains(task) || _removingTasks.Contains(taskId) ||
-                                _runningCompletions.ContainsKey(taskId) || !task.Enabled ||
+                                _runningCompletions.ContainsKey(taskId) || !task.Enabled || task.IsUserPaused ||
                                 task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing ||
                                 task.State == TaskSyncState.ConfigurationError)
                             {
@@ -434,14 +434,22 @@ namespace FNSyncPlus.Core.Services
                             }
                             finally
                             {
+                                bool notifyPaused = false;
                                 lock (_taskLifecycleLock)
                                 {
                                     _runningCts.TryRemove(taskId, out _);
                                     _runningCompletions.Remove(taskId);
+                                    if (task.IsUserPaused && !_removingTasks.Contains(taskId) && task.State != TaskSyncState.Paused)
+                                    {
+                                        task.State = TaskSyncState.Paused;
+                                        task.LastSyncStatus = "已暂停";
+                                        notifyPaused = true;
+                                    }
                                 }
                                 taskCts.Dispose();
                                 try { _concurrencySemaphore.Release(); }
                                 finally { completion.TrySetResult(); }
+                                if (notifyPaused) TaskStateChanged?.Invoke(task);
                             }
                         });
                     }
@@ -742,7 +750,7 @@ namespace FNSyncPlus.Core.Services
                     {
                         _ = Task.Delay(5000).ContinueWith(_ =>
                         {
-                            if (task.Enabled && !task.IsRunning && task.State != TaskSyncState.Paused)
+                            if (task.Enabled && !task.IsUserPaused && !task.IsRunning && task.State != TaskSyncState.Paused)
                             {
                                 AppendTaskLog(task, "INFO", "软件启动，执行智能自动备份初始补偿检查...");
                                 TriggerSync(task.TaskId);
@@ -802,7 +810,7 @@ namespace FNSyncPlus.Core.Services
                     {
                         lock (_taskLifecycleLock)
                         {
-                            if (!task.Enabled || task.State == TaskSyncState.Paused ||
+                            if (!task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused ||
                                 task.State == TaskSyncState.Removing || _removingTasks.Contains(task.TaskId)) return;
                             if (_runningCompletions.ContainsKey(task.TaskId))
                             {
@@ -1064,7 +1072,7 @@ namespace FNSyncPlus.Core.Services
                     lock (_taskLifecycleLock)
                     {
                         if (_stopping || !_isNasOnline) break;
-                        if (!_settings.Tasks.Contains(task) || !task.Enabled || task.State == TaskSyncState.Paused) continue;
+                        if (!_settings.Tasks.Contains(task) || !task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused) continue;
                         if (task.State == TaskSyncState.OfflineWaiting)
                         {
                             task.State = TaskSyncState.Idle;
@@ -1080,7 +1088,7 @@ namespace FNSyncPlus.Core.Services
                                 lock (_taskLifecycleLock)
                                 {
                                     if (!_managerCts.IsCancellationRequested && _isNasOnline && task.Enabled &&
-                                        task.State != TaskSyncState.Paused && task.ScheduleMode != TaskSyncScheduleMode.ManualOnly)
+                                        !task.IsUserPaused && task.State != TaskSyncState.Paused && task.ScheduleMode != TaskSyncScheduleMode.ManualOnly)
                                         TriggerSync(task.TaskId);
                                 }
                             }, TaskScheduler.Default);

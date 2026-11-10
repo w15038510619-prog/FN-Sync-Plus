@@ -2057,6 +2057,15 @@ namespace FNSyncPlus.Tests
             Assert(restoredTask.IsUserPaused && restoredTask.State == TaskSyncState.Paused && !restoredTask.IsWatching &&
                 !restoredTask.NextScheduledTime.HasValue && !Directory.Exists(target),
                 "用户暂停状态持久化，重启及连接恢复均不会启动任务");
+            // A finishing operation can briefly overwrite the display state after a pause.
+            restoredTask.State = TaskSyncState.Completed;
+            restarted.TriggerSync(restoredTask.TaskId);
+            restarted.SetNasOnlineState(false);
+            restarted.SetNasOnlineState(true);
+            await Task.Delay(300);
+            Assert(restoredTask.IsUserPaused && !Directory.Exists(target),
+                "暂停标记生效时即使显示状态变化也不会重新入队");
+            restoredTask.State = TaskSyncState.Paused;
             loaded.CustomConfigPath = Path.Combine(root, "missing-pause-settings-dir", "settings.json");
             bool failedSave = false;
             try { restarted.ResumeTask(restoredTask.TaskId); }
@@ -2392,6 +2401,9 @@ namespace FNSyncPlus.Tests
             Assert(inspectedArchive.Stage == ExperimentalProjectionRecoveryInspector.Stage.OldArchived && inspectedArchive.VersionId == uncertainNext.Snapshot.Id &&
                 !Directory.Exists(Path.Combine(root, "projection-archive-uncertain", "current")),
                 "只读检查识别旧目录已归档、新目录待发布且不改变现状");
+            var locatedArchive = await new ExperimentalProjectionRecoveryLocator().LocateAsync(failing, "projection-archive-uncertain");
+            Assert(locatedArchive == inspectedArchive && !Directory.Exists(Path.Combine(root, "projection-archive-uncertain", "current")),
+                "只读定位器根据未释放锁找到唯一的中断发布记录");
             string intentPath = Path.Combine(root, uncertainJournal.Replace('/', Path.DirectorySeparatorChar), "intent.json");
             byte[] validIntent = await File.ReadAllBytesAsync(intentPath);
             var tamperedIntent = System.Text.Json.Nodes.JsonNode.Parse(validIntent)!.AsObject();
@@ -2400,8 +2412,11 @@ namespace FNSyncPlus.Tests
             bool ownerMismatchRejected = false;
             try { await new ExperimentalProjectionRecoveryInspector().InspectAsync(failing, "projection-archive-uncertain", uncertainJournal); }
             catch (InvalidDataException) { ownerMismatchRejected = true; }
+            bool locatorMismatchRejected = false;
+            try { await new ExperimentalProjectionRecoveryLocator().LocateAsync(failing, "projection-archive-uncertain"); }
+            catch (InvalidDataException) { locatorMismatchRejected = true; }
             await File.WriteAllBytesAsync(intentPath, validIntent);
-            Assert(ownerMismatchRejected && !Directory.Exists(Path.Combine(root, "projection-archive-uncertain", "current")),
+            Assert(ownerMismatchRejected && locatorMismatchRejected && !Directory.Exists(Path.Combine(root, "projection-archive-uncertain", "current")),
                 "恢复检查拒绝与未释放锁持有者不匹配的意图");
             failing.FailAfterArchiveMove = false;
             var recoveredArchive = await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(failing,
@@ -2412,6 +2427,8 @@ namespace FNSyncPlus.Tests
                 File.ReadAllText(Path.Combine(uncertainArchive, "current", "new.txt")) == "third content",
                 "确认写入者停止后恢复归档中断并保留新旧内容");
             if (releasedArchiveLease != null) await releasedArchiveLease.ReleaseAsync();
+            Assert(await new ExperimentalProjectionRecoveryLocator().LocateAsync(failing, "projection-archive-uncertain") == null,
+                "不存在遗留锁时不提示有可恢复的中断发布");
             var moveFailing = new FaultInjectingProvider(root);
             await backup.CreateNewAsync(moveFailing, source, "projection-move-uncertain");
             var moveOld = await new ExperimentalPhysicalSnapshot().PrepareAsync(moveFailing, "projection-move-uncertain");
