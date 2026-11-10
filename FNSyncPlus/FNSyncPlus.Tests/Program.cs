@@ -227,6 +227,35 @@ namespace FNSyncPlus.Tests
                 catch (InvalidOperationException) { betaOutsideRejected = true; }
                 Assert(betaBounded.IsVersionedBetaTestProfile && betaBounded.HasIsolatedTestBoundary && betaOutsideRejected,
                     "新版隔离界面会话限制复用来源和目标均位于授权测试目录");
+                string junctionId = Guid.NewGuid().ToString("N");
+                string junctionBase = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", "BoundaryJunction_" + junctionId);
+                string junctionOutside = Path.Combine(Path.GetTempPath(), "FNSync_Outside_" + junctionId);
+                string junctionChild = Path.Combine(junctionOutside, "child");
+                string junctionPath = Path.Combine(junctionBase, "link");
+                Directory.CreateDirectory(junctionBase);
+                Directory.CreateDirectory(junctionChild);
+                try
+                {
+                    var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe")) { UseShellExecute = false, CreateNoWindow = true,
+                        RedirectStandardOutput = true, RedirectStandardError = true };
+                    foreach (string arg in new[] { "/d", "/c", "mklink", "/J", junctionPath, junctionOutside }) start.ArgumentList.Add(arg);
+                    using var process = System.Diagnostics.Process.Start(start) ?? throw new IOException("无法启动联接测试");
+                    if (!process.WaitForExit(10000)) { process.Kill(); throw new TimeoutException("联接测试创建超时"); }
+                    if (process.ExitCode != 0) throw new IOException("无法创建测试联接");
+                    var linkedTask = new SyncTask { SourceFolder = Path.Combine(junctionPath, "child"),
+                        DestinationFolder = "Codex_FN_Test_allowed/backup", ProviderType = StorageProviderType.FnOsPersonal };
+                    bool junctionRejected = false;
+                    try { betaBounded.EnsureIsolatedTestTask(linkedTask); }
+                    catch (InvalidOperationException) { junctionRejected = true; }
+                    Assert(junctionRejected && Directory.Exists(junctionChild), "隔离源目录经过联接指向测试范围外时拒绝执行");
+                }
+                finally
+                {
+                    if (Directory.Exists(junctionPath)) Directory.Delete(junctionPath);
+                    if (Directory.Exists(junctionBase)) Directory.Delete(junctionBase);
+                    if (Directory.Exists(junctionChild)) Directory.Delete(junctionChild);
+                    if (Directory.Exists(junctionOutside)) Directory.Delete(junctionOutside);
+                }
                 Assert(PathHelper.EnsureLongPathPrefix(@"C:/folder/file.txt") == @"\\?\C:\folder\file.txt" &&
                     PathHelper.EnsureLongPathPrefix(@"C:/") == @"\\?\C:\" &&
                     PathHelper.EnsureLongPathPrefix(@"C:\\\") == @"\\?\C:\" &&

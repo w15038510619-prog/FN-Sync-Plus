@@ -144,7 +144,8 @@ namespace FNSyncPlus.Core.Services
             if (IsolatedSessionPath == null && IsolatedTestRemoteRoot == null) return;
             if (IsolatedTestRemoteRoot == null) throw new InvalidOperationException("隔离测试尚未指定远端父目录");
             string localRoot = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests");
-            string relative = Path.GetRelativePath(localRoot, Path.GetFullPath(task.SourceFolder));
+            string fullSource = Path.GetFullPath(task.SourceFolder);
+            string relative = Path.GetRelativePath(localRoot, fullSource);
             bool WithinRemote(string path)
             {
                 string normalized = PathHelper.NormalizeRelPath(path);
@@ -154,6 +155,15 @@ namespace FNSyncPlus.Core.Services
             if (task.ProviderType != StorageProviderType.FnOsPersonal || !PathHelper.IsSafeRelativePath(relative) ||
                 !WithinRemote(task.DestinationFolder) || (!string.IsNullOrEmpty(task.ExperimentalExistingRoot) && !WithinRemote(task.ExperimentalExistingRoot)))
                 throw new InvalidOperationException("隔离会话中的任务超出指定测试目录，已阻止执行");
+            // A lexical path within the test folder can still traverse a junction to private data.
+            try
+            {
+                for (var directory = new DirectoryInfo(fullSource); directory != null; directory = directory.Parent)
+                    if (directory.Exists && (directory.Attributes & FileAttributes.ReparsePoint) != 0)
+                        throw new InvalidOperationException("隔离测试源路径包含链接或联接点，已阻止执行");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            { throw new InvalidOperationException("无法确认隔离测试源路径，已阻止执行", ex); }
         }
 
         /// <summary>Reads only already-trusted SHA-256 certificate fingerprints; never migrates or writes the source settings.</summary>
