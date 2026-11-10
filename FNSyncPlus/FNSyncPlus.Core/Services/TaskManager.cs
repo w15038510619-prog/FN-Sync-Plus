@@ -1036,10 +1036,14 @@ namespace FNSyncPlus.Core.Services
                     {
                         _ = Task.Delay(5000).ContinueWith(_ =>
                         {
-                            if (task.Enabled && !task.IsUserPaused && !task.IsRunning && task.State != TaskSyncState.Paused)
+                            lock (_taskLifecycleLock)
                             {
-                                AppendTaskLog(task, "INFO", "软件启动，执行智能自动备份初始补偿检查...");
-                                TriggerSync(task.TaskId);
+                                if (!_stopping && _settings.Tasks.Contains(task) && task.ScheduleMode == TaskSyncScheduleMode.SmartAuto &&
+                                    task.Enabled && !task.IsUserPaused && !task.IsRunning && task.State != TaskSyncState.Paused)
+                                {
+                                    AppendTaskLog(task, "INFO", "软件启动，执行智能自动备份初始补偿检查...");
+                                    TriggerSync(task.TaskId);
+                                }
                             }
                         });
                     }
@@ -1096,7 +1100,10 @@ namespace FNSyncPlus.Core.Services
                     {
                         lock (_taskLifecycleLock)
                         {
-                            if (!task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused ||
+                            if (_stopping || !_settings.Tasks.Contains(task) ||
+                                task.ScheduleMode is not (TaskSyncScheduleMode.SmartAuto or TaskSyncScheduleMode.RealtimeOnly) ||
+                                !_watcherDebounceTimers.TryGetValue(task.TaskId, out var activeTimer) || !ReferenceEquals(activeTimer, debounceTimer) ||
+                                !task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused ||
                                 task.State == TaskSyncState.Removing || _removingTasks.Contains(task.TaskId)) return;
                             if (_runningCompletions.ContainsKey(task.TaskId))
                             {
@@ -1181,18 +1188,26 @@ namespace FNSyncPlus.Core.Services
             if (task.AutoSyncEnabled && task.IntervalMinutes > 0)
             {
                 task.NextScheduledTime = DateTime.Now.AddMinutes(task.IntervalMinutes);
-                var timer = new Timer(_ =>
+                Timer? timer = null;
+                timer = new Timer(_ =>
                 {
-                    task.NextScheduledTime = DateTime.Now.AddMinutes(task.IntervalMinutes);
-                    TaskStateChanged?.Invoke(task);
-
-                    if (task.Enabled && !task.IsRunning)
+                    lock (_taskLifecycleLock)
                     {
-                        string msg = task.ScheduleMode == TaskSyncScheduleMode.SmartAuto
-                            ? "执行智能自动备份例行补偿检查..."
-                            : "执行例行定时增量备份检查...";
-                        AppendTaskLog(task, "INFO", msg);
-                        TriggerSync(task.TaskId);
+                        if (_stopping || !_settings.Tasks.Contains(task) || _removingTasks.Contains(task.TaskId) ||
+                            task.ScheduleMode is not (TaskSyncScheduleMode.SmartAuto or TaskSyncScheduleMode.PeriodicOnly) ||
+                            !_intervalTimers.TryGetValue(task.TaskId, out var activeTimer) || !ReferenceEquals(activeTimer, timer) ||
+                            !task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused) return;
+                        task.NextScheduledTime = DateTime.Now.AddMinutes(task.IntervalMinutes);
+                        TaskStateChanged?.Invoke(task);
+
+                        if (!task.IsRunning)
+                        {
+                            string msg = task.ScheduleMode == TaskSyncScheduleMode.SmartAuto
+                                ? "执行智能自动备份例行补偿检查..."
+                                : "执行例行定时增量备份检查...";
+                            AppendTaskLog(task, "INFO", msg);
+                            TriggerSync(task.TaskId);
+                        }
                     }
                 }, null, TimeSpan.FromMinutes(task.IntervalMinutes), TimeSpan.FromMinutes(task.IntervalMinutes));
 

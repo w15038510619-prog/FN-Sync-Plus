@@ -1702,6 +1702,8 @@ namespace FNSyncPlus.Tests
                 await TestTaskRemovalFailureAsync(root);
                 await TestIsolatedVersionedTaskAsync(root);
                 await TestScheduledTimeAfterManualSyncAsync(root);
+                await TestStartupModeSwitchAsync(root);
+                await TestStaleAutomationCallbacksAsync(root);
                 await TestExperimentalMirrorAsync(root);
                 await TestVersionedDeviceBindingAsync(root);
                 await TestLegacyTargetProtectionAsync(root);
@@ -2061,6 +2063,77 @@ namespace FNSyncPlus.Tests
                 provider.ContinueUpload.TrySetResult();
                 Environment.CurrentDirectory = oldDirectory;
             }
+        }
+
+        static async Task TestStaleAutomationCallbacksAsync(string root)
+        {
+            var settings = AppSettings.CreateInMemory();
+            var tasks = new List<SyncTask>();
+            using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "stale-callback-logs")));
+            foreach (var mode in new[] { TaskSyncScheduleMode.RealtimeOnly, TaskSyncScheduleMode.PeriodicOnly })
+            {
+                string source = Path.Combine(root, $"stale-callback-{mode}-source");
+                Directory.CreateDirectory(source);
+                File.WriteAllText(Path.Combine(source, "sample.txt"), "stale callback test");
+                var task = new SyncTask { TaskName = mode.ToString(), SourceFolder = source,
+                    DestinationFolder = Path.Combine(root, $"stale-callback-{mode}-target"),
+                    ProviderType = StorageProviderType.LocalFileSystem, ScheduleMode = mode, IntervalMinutes = 5 };
+                manager.AddTask(task);
+                tasks.Add(task);
+            }
+            var unexpectedQueue = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            manager.TaskStateChanged += t => { if (tasks.Contains(t) && t.State == TaskSyncState.Queued) unexpectedQueue.TrySetResult(); };
+            var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+            var gate = typeof(TaskManager).GetField("_taskLifecycleLock", flags)!.GetValue(manager)!;
+            var watchers = (System.Collections.Concurrent.ConcurrentDictionary<string, System.Threading.Timer>)typeof(TaskManager).GetField("_watcherDebounceTimers", flags)!.GetValue(manager)!;
+            var intervals = (System.Collections.Concurrent.ConcurrentDictionary<string, System.Threading.Timer>)typeof(TaskManager).GetField("_intervalTimers", flags)!.GetValue(manager)!;
+            lock (gate)
+            {
+                watchers[tasks[0].TaskId].Change(0, Timeout.Infinite);
+                intervals[tasks[1].TaskId].Change(0, Timeout.Infinite);
+                Thread.Sleep(500); // Let timer callbacks reach the lifecycle gate before changing mode.
+                foreach (var task in tasks)
+                    manager.UpdateTask(new SyncTask { TaskId = task.TaskId, TaskName = task.TaskName,
+                        SourceFolder = task.SourceFolder, DestinationFolder = task.DestinationFolder,
+                        ProviderType = StorageProviderType.LocalFileSystem, ScheduleMode = TaskSyncScheduleMode.ManualOnly });
+            }
+            await Task.WhenAny(unexpectedQueue.Task, Task.Delay(2000));
+            Assert(!unexpectedQueue.Task.IsCompleted && tasks.All(t => !t.NextScheduledTime.HasValue && !Directory.Exists(t.DestinationFolder)),
+                "切换手动后已排队的旧监听和定时回调不会触发同步或重设下次时间");
+            if (!await manager.ShutdownAsync(TimeSpan.FromSeconds(10))) throw new TimeoutException("旧回调测试未停止");
+        }
+
+        static async Task TestStartupModeSwitchAsync(string root)
+        {
+            var settings = AppSettings.CreateInMemory();
+            var tasks = new List<SyncTask>();
+            foreach (string label in new[] { "manual", "periodic" })
+            {
+                string source = Path.Combine(root, $"startup-switch-{label}-source");
+                Directory.CreateDirectory(source);
+                File.WriteAllText(Path.Combine(source, "sample.txt"), "startup mode test");
+                var task = new SyncTask { TaskName = label, SourceFolder = source,
+                    DestinationFolder = Path.Combine(root, $"startup-switch-{label}-target"),
+                    ProviderType = StorageProviderType.LocalFileSystem, ScheduleMode = TaskSyncScheduleMode.SmartAuto };
+                tasks.Add(task);
+                settings.Tasks.Add(task);
+            }
+            using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "startup-switch-logs")));
+            var unexpectedQueue = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            manager.TaskStateChanged += t => { if (tasks.Contains(t) && t.State == TaskSyncState.Queued) unexpectedQueue.TrySetResult(); };
+            for (int i = 0; i < tasks.Count; i++)
+            {
+                var task = tasks[i];
+                manager.UpdateTask(new SyncTask { TaskId = task.TaskId, TaskName = task.TaskName,
+                    SourceFolder = task.SourceFolder, DestinationFolder = task.DestinationFolder,
+                    ProviderType = StorageProviderType.LocalFileSystem,
+                    ScheduleMode = i == 0 ? TaskSyncScheduleMode.ManualOnly : TaskSyncScheduleMode.PeriodicOnly,
+                    IntervalMinutes = 5 });
+            }
+            await Task.WhenAny(unexpectedQueue.Task, Task.Delay(7000));
+            Assert(!unexpectedQueue.Task.IsCompleted && tasks.All(t => !Directory.Exists(t.DestinationFolder)),
+                "启动补偿等待期间切换为手动或仅定时不会擅自排队同步");
+            if (!await manager.ShutdownAsync(TimeSpan.FromSeconds(10))) throw new TimeoutException("启动模式切换测试未停止");
         }
 
         static async Task TestScheduledTimeAfterManualSyncAsync(string root)
