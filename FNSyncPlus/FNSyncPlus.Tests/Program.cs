@@ -43,6 +43,27 @@ namespace FNSyncPlus.Tests
         {
             Console.OutputEncoding = Encoding.UTF8;
 
+            if (args.Length == 2 && args[0] == "--single-instance-probe")
+            {
+                using var probe = new SingleInstanceCoordinator(args[1]);
+                return !probe.IsPrimary && probe.NotifyExisting(TimeSpan.FromSeconds(5)) ? 0 : 1;
+            }
+            if (args.Length == 2 && args[0] == "--single-instance-owner")
+            {
+                using var owner = new SingleInstanceCoordinator(args[1]);
+                if (!owner.IsPrimary) return 1;
+                Console.WriteLine("READY");
+                Console.Out.Flush();
+                await Task.Delay(Timeout.Infinite);
+                return 0;
+            }
+            if (args.Contains("--single-instance-regressions"))
+            {
+                await TestSingleInstanceAsync();
+                Console.WriteLine($"PASS: {_passed}, FAIL: {_failed}, SKIP: {_skipped}");
+                return _failed == 0 ? 0 : 1;
+            }
+
             if (args.Contains("--integrity-regressions"))
             {
                 await TestIntegrityRegressionsAsync();
@@ -180,6 +201,7 @@ namespace FNSyncPlus.Tests
             string root = Directory.CreateTempSubdirectory("FNSync_integrity_").FullName;
             try
             {
+                await TestSingleInstanceAsync();
                 string config = Path.Combine(root, "settings.json");
                 var settings = AppSettings.CreateForTest(config);
                 settings.Tasks.Add(new SyncTask { TaskName = "失败测试", TaskId = "task_fail_legitimate", SourceFolder = @"C:\Fake" });
@@ -1698,6 +1720,65 @@ namespace FNSyncPlus.Tests
             {
                 Directory.Delete(root, true);
             }
+        }
+
+        static System.Diagnostics.Process StartSingleInstanceProbe(string mode, string name)
+        {
+            string executable = Environment.ProcessPath ?? throw new InvalidOperationException("无法确定测试进程路径");
+            var info = new System.Diagnostics.ProcessStartInfo(executable)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+                info.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+            info.ArgumentList.Add(mode);
+            info.ArgumentList.Add(name);
+            return System.Diagnostics.Process.Start(info) ?? throw new InvalidOperationException("无法启动隔离测试进程");
+        }
+
+        static async Task TestSingleInstanceAsync()
+        {
+            string name = @"Global\FNSyncPlus.Test." + Guid.NewGuid().ToString("N");
+            using (var primary = new SingleInstanceCoordinator(name))
+            using (var duplicate = new SingleInstanceCoordinator(name))
+            {
+                bool buffered = duplicate.NotifyExisting(TimeSpan.FromSeconds(2));
+                var activations = new SemaphoreSlim(0);
+                primary.StartListening(() => activations.Release());
+                bool delivered = await activations.WaitAsync(TimeSpan.FromSeconds(5));
+                Assert(primary.IsPrimary && !duplicate.IsPrimary && buffered && delivered,
+                    "重复启动被阻止，主窗口启动前的唤醒请求也会保留");
+                using var child = StartSingleInstanceProbe("--single-instance-probe", name);
+                using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                try { await child.WaitForExitAsync(cancellation.Token); }
+                catch (OperationCanceledException) { child.Kill(); throw new TimeoutException("单实例子进程未退出"); }
+                bool childDelivered = await activations.WaitAsync(TimeSpan.FromSeconds(5));
+                Assert(child.ExitCode == 0 && childDelivered, "不同进程使用相同运行标记，第二个进程唤醒主实例并退出");
+            }
+            using (var restarted = new SingleInstanceCoordinator(name))
+                Assert(restarted.IsPrimary, "主实例退出后可以重新启动");
+
+            string crashName = @"Global\FNSyncPlus.Test." + Guid.NewGuid().ToString("N");
+            using var ownerProcess = StartSingleInstanceProbe("--single-instance-owner", crashName);
+            try
+            {
+                string? ready = await ownerProcess.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                if (ready != "READY") throw new InvalidOperationException("隔离测试进程未持有运行标记");
+                ownerProcess.Kill(); // Only the isolated helper started above; simulates a crash.
+                await ownerProcess.WaitForExitAsync();
+                bool released = false;
+                for (int attempt = 0; attempt < 40 && !released; attempt++)
+                {
+                    using var afterCrash = new SingleInstanceCoordinator(crashName);
+                    released = afterCrash.IsPrimary;
+                    if (!released) await Task.Delay(50);
+                }
+                Assert(released, "进程异常退出后系统释放标记，软件可重新启动");
+            }
+            finally { if (!ownerProcess.HasExited) ownerProcess.Kill(); }
         }
 
         static async Task TestTaskAdditionSafetyAsync(string root)

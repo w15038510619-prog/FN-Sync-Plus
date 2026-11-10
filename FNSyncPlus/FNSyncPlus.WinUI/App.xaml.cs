@@ -1,6 +1,8 @@
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
+using FNSyncPlus.Core.Services;
 using FNSyncPlus.WinUI.Services;
 using Microsoft.UI.Xaml;
 
@@ -9,6 +11,7 @@ namespace FNSyncPlus.WinUI
     public partial class App : Application
     {
         private Window? _window;
+        private SingleInstanceCoordinator? _singleInstance;
         public static MainWindow? MainWindowInstance { get; private set; }
         public static IntPtr MainWindowHandle => MainWindowInstance != null ? Helpers.WindowHelper.GetHandle(MainWindowInstance) : IntPtr.Zero;
 
@@ -42,6 +45,17 @@ namespace FNSyncPlus.WinUI
         {
             try
             {
+                _singleInstance = new SingleInstanceCoordinator(@"Global\FNSyncPlus.SingleInstance.v1");
+                if (!_singleInstance.IsPrimary)
+                {
+                    bool notified = _singleInstance.NotifyExisting(TimeSpan.FromSeconds(5));
+                    _singleInstance.Dispose();
+                    _singleInstance = null;
+                    if (!notified) ShowStartupMessage("程序已经运行，但无法唤醒原窗口。请从系统托盘打开，或退出旧实例后重试。");
+                    Exit();
+                    return;
+                }
+
                 // 初始化依赖注入容器与底层 Core 业务引擎
                 AppServices.Initialize();
 
@@ -72,6 +86,18 @@ namespace FNSyncPlus.WinUI
                 Helpers.UIThreadHelper.Initialize(win.DispatcherQueue);
 
                 win.Activate();
+                _singleInstance.StartListening(() =>
+                {
+                    try
+                    {
+                        win.DispatcherQueue.TryEnqueue(() =>
+                        {
+                            try { win.ShowFromTray(); }
+                            catch (Exception ex) { LogCrashException(ex, "App.SingleInstanceActivation"); }
+                        });
+                    }
+                    catch (Exception ex) { LogCrashException(ex, "App.SingleInstanceDispatch"); }
+                });
                 if (AppServices.IsIsolatedTestSession || AppServices.IsVersionedBetaSession)
                     _ = AppServices.ConnectIsolatedSessionAsync();
                 if (Array.Exists(cmdArgs, arg => arg.Equals("--minimize", StringComparison.OrdinalIgnoreCase)))
@@ -80,9 +106,21 @@ namespace FNSyncPlus.WinUI
             catch (Exception ex)
             {
                 LogCrashException(ex, "App.OnLaunched");
-                throw;
+                ShowStartupMessage("软件启动失败或无法确认是否已经运行。请检查系统托盘和日志后重试。");
+                Exit();
             }
         }
+
+        internal void ReleaseSingleInstance()
+        {
+            _singleInstance?.Dispose();
+            _singleInstance = null;
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int MessageBoxW(IntPtr owner, string text, string caption, uint type);
+
+        private static void ShowStartupMessage(string message) => MessageBoxW(IntPtr.Zero, message, "飞牛同步增强版", 0x30);
 
         public static void LogCrashException(Exception ex, string context)
         {

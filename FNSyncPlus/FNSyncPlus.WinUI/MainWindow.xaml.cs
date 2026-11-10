@@ -265,8 +265,12 @@ namespace FNSyncPlus.WinUI
 
         private void OnWindowClosed(object sender, WindowEventArgs args)
         {
-            _trayIcon?.Dispose();
-            AppServices.GetService<TaskManager>().Dispose();
+            try
+            {
+                _trayIcon?.Dispose();
+                AppServices.GetService<TaskManager>().Dispose();
+            }
+            finally { ((App)Application.Current).ReleaseSingleInstance(); }
         }
 
         private void NavView_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
