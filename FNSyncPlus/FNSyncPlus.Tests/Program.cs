@@ -3058,9 +3058,54 @@ namespace FNSyncPlus.Tests
                 await new VersionedManifestStore().LoadAsync(provider, ownedTask.DestinationFolder) == null,
                 "首次对象写入失败时保留已验证的任务归属记录和待初始化配置");
             if (!await ownedManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("首次对象失败后未停止");
+            var initialLease = await ExperimentalRemoteLease.TryAcquireAsync(provider, ownedTask.DestinationFolder)
+                ?? throw new InvalidDataException("首次备份测试锁未能获取");
+            var initialRecovery = new ExperimentalInitializationLockRecovery();
+            var initialInspection = await initialRecovery.InspectAsync(provider, ownedReload.Tasks.Single())
+                ?? throw new InvalidDataException("未发现首次备份遗留锁");
+            bool initialNoConsent = false, initialWrongOwner = false, initialCurrentRejected = false;
+            bool initialProjectionRejected = false, initialInvalidCommitRejected = false;
+            try { await initialRecovery.ReleaseAfterOwnerStoppedAsync(provider, ownedReload.Tasks.Single(), initialInspection, ""); }
+            catch (InvalidOperationException) { initialNoConsent = true; }
+            string savedSource = ownedReload.Tasks.Single().SourceFolder;
+            ownedReload.Tasks.Single().SourceFolder = savedSource + "-different";
+            try { await initialRecovery.InspectAsync(provider, ownedReload.Tasks.Single()); }
+            catch (Exception ex) when (ex is IOException or InvalidDataException) { initialWrongOwner = true; }
+            ownedReload.Tasks.Single().SourceFolder = savedSource;
+            string unexpectedCurrent = Path.Combine(root, ownedTask.DestinationFolder, "current");
+            Directory.CreateDirectory(unexpectedCurrent);
+            try { await initialRecovery.ReleaseAfterOwnerStoppedAsync(provider, ownedReload.Tasks.Single(), initialInspection, ExperimentalProjectionRecovery.RequiredAcknowledgement); }
+            catch (InvalidDataException) { initialCurrentRejected = true; }
+            Directory.Delete(unexpectedCurrent);
+            string unexpectedProjection = Path.Combine(root, ownedTask.DestinationFolder, ".fnsync", "projections");
+            Directory.CreateDirectory(unexpectedProjection);
+            try { await initialRecovery.InspectAsync(provider, ownedReload.Tasks.Single()); }
+            catch (InvalidDataException) { initialProjectionRejected = true; }
+            Directory.Delete(unexpectedProjection);
+            string versionDir = Path.Combine(root, ownedTask.DestinationFolder, ".fnsync", "manifest-versions");
+            Directory.CreateDirectory(versionDir);
+            string invalidReceipt = Path.Combine(versionDir, $"commit-{1:D20}-{Guid.NewGuid():N}.json");
+            File.WriteAllText(invalidReceipt, "invalid");
+            try { await initialRecovery.InspectAsync(provider, ownedReload.Tasks.Single()); }
+            catch (InvalidDataException) { initialInvalidCommitRejected = true; }
+            File.Delete(invalidReceipt);
+            Assert(initialNoConsent && initialWrongOwner && initialCurrentRejected && initialProjectionRejected && initialInvalidCommitRejected &&
+                await ExperimentalRemoteLease.InspectAsync(provider, ownedTask.DestinationFolder) != null,
+                "首次备份遗留锁缺少确认、归属不符或存在当前目录、发布或损坏提交时不释放");
+            ownedReload.IsInMemoryOnly = true;
             using var ownedResume = new TaskManager(ownedReload, new SmbAuthService(), new LogService(Path.Combine(root, "owned-first-resume-logs")), experimentalVersionedBackup: true);
             ownedResume.StorageProviderSupplier = () => provider;
             var ownedReloadTask = ownedReload.Tasks.Single();
+            await using (var session = await ownedResume.BeginIsolatedRecoveryAsync(ownedReloadTask.TaskId, TimeSpan.FromSeconds(5))
+                ?? throw new TimeoutException("首次备份恢复会话未开始"))
+            {
+                var foundInitialLock = await session.InspectInitializationLockAsync();
+                Assert(foundInitialLock == initialInspection && ownedReloadTask.IsUserPaused, "首次备份遗留锁通过暂停会话只读核验归属");
+                await session.ReleaseInitializationLockAsync(foundInitialLock!, ExperimentalProjectionRecovery.RequiredAcknowledgement);
+            }
+            Assert(ownedReloadTask.IsUserPaused && await ExperimentalRemoteLease.InspectAsync(provider, ownedTask.DestinationFolder) == null,
+                "确认停止写入后释放首次备份遗留锁，任务仍暂停");
+            ownedResume.ResumeTask(ownedReloadTask.TaskId);
             var ownedDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             ownedResume.TaskStateChanged += t => { if (t.TaskId == ownedReloadTask.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) ownedDone.TrySetResult(); };
             ownedResume.TriggerSync(ownedReloadTask.TaskId);

@@ -88,10 +88,7 @@ public sealed class ExperimentalVersionedBackup
         token.ThrowIfCancellationRequested();
         string canonicalTarget = provider is FnOsPersonalStorageProvider fn ? fn.NormalizeRelativePath(target) : PathHelper.NormalizeRelPath(target);
         if (!PathHelper.IsSafeRelativePath(canonicalTarget)) throw new ArgumentException("备份目标不能是个人空间根目录");
-        byte[]? ownership = initializationId == null ? null : JsonSerializer.SerializeToUtf8Bytes(new {
-            schema = 1, id = initializationId, source = PathHelper.NormalizeLocalPath(sourceDirectory),
-            target = canonicalTarget, existing = existingRoot, strategy = (int)strategy
-        });
+        byte[]? ownership = initializationId == null ? null : InitializationOwnership(sourceDirectory, canonicalTarget, existingRoot, strategy, initializationId);
         string? ownershipPath = initializationId == null ? null : $"{canonicalTarget}/.fnsync-init-{initializationId}.json";
         var created = await exclusive.TryCreateDirectoryExclusiveAsync(target, token).ConfigureAwait(false);
         if (created == ExclusiveDirectoryResult.Created)
@@ -112,6 +109,9 @@ public sealed class ExperimentalVersionedBackup
         var result = await RunCoreAsync(provider, sourceDirectory, target, committed == null, existingRoot, token, strategy, 0, mirrorDeletionEnabled, ownershipPath, ownership).ConfigureAwait(false);
         return result with { ResumedInitialization = created != ExclusiveDirectoryResult.Created };
     }
+
+    internal static byte[] InitializationOwnership(string source, string target, string? existing, BackupStrategy strategy, string id) =>
+        JsonSerializer.SerializeToUtf8Bytes(new { schema = 1, id, source = PathHelper.NormalizeLocalPath(source), target, existing, strategy = (int)strategy });
 
     private async Task<Result> RunCoreAsync(INasStorageProvider provider, string sourceDirectory, string target,
         bool creating, string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds, bool mirrorDeletionEnabled,

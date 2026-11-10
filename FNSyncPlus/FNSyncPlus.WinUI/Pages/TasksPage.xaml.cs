@@ -137,7 +137,29 @@ namespace FNSyncPlus.WinUI.Pages
                 try { inspection = await session.InspectAsync(); }
                 catch (InvalidDataException)
                 {
-                    var stable = await session.InspectStableLockAsync();
+                    ExperimentalStableLockRecovery.Inspection? stable;
+                    try { stable = await session.InspectStableLockAsync(); }
+                    catch (InvalidDataException) when (item.Model.ExperimentalPendingInitialization)
+                    {
+                        var initial = await session.InspectInitializationLockAsync();
+                        if (initial == null) throw;
+                        var initialConfirm = new ContentDialog
+                        {
+                            Title = "确认继续首次备份",
+                            Content = "已核验该任务的首次备份归属，尚无已提交的清单或发布目录。\n\n本机此任务已暂停并停止写入。请先确认原同步程序和所有其他可能写入此备份的设备都已停止；软件无法替你判断其他设备是否停止。\n\n确认后会记录检查结果并释放锁，不删除文件。任务保持暂停，手动恢复后可重新同步。",
+                            PrimaryButtonText = "已确认全部停止，释放锁",
+                            CloseButtonText = "取消",
+                            DefaultButton = ContentDialogButton.Close,
+                            XamlRoot = XamlRoot
+                        };
+                        if (await initialConfirm.ShowAsync() == ContentDialogResult.Primary)
+                        {
+                            await session.ReleaseInitializationLockAsync(initial, ExperimentalProjectionRecovery.RequiredAcknowledgement);
+                            await new ContentDialog { Title = "锁已释放", Content = "任务仍保持暂停。请检查后手动恢复并重新同步。",
+                                CloseButtonText = "知道了", XamlRoot = XamlRoot }.ShowAsync();
+                        }
+                        return;
+                    }
                     if (stable == null) throw;
                     var stableConfirm = new ContentDialog
                     {
