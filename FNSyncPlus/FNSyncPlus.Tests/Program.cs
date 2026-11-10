@@ -1677,6 +1677,7 @@ namespace FNSyncPlus.Tests
                 await TestTaskRemovalWhileRunningAsync(root);
                 await TestTaskRemovalFailureAsync(root);
                 await TestIsolatedVersionedTaskAsync(root);
+                await TestVersionedDeviceBindingAsync(root);
                 await TestLegacyTargetProtectionAsync(root);
                 await TestIsolatedTaskReattachmentAsync(root);
                 await TestReconnectSchedulingAsync(root);
@@ -2180,6 +2181,63 @@ namespace FNSyncPlus.Tests
             try { AppSettings.LoadVersionedBetaTestProfile(profileId); }
             catch (System.Text.Json.JsonException) { refusedBrokenProfile = true; }
             Assert(refusedBrokenProfile && File.ReadAllText(betaPath) == "broken beta settings", "新版配置损坏时停止且不重置原文件");
+        }
+
+        static async Task TestVersionedDeviceBindingAsync(string root)
+        {
+            string source = Path.Combine(root, "device-binding-source");
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "sample.txt"), "source data");
+            await using var api = new FnOsApiClient();
+            api.SetAuthenticatedForTesting("fixture-user", 1000, 1);
+            await using var provider = new FnOsPersonalStorageProvider(api);
+            var providerType = typeof(FnOsPersonalStorageProvider);
+            providerType.GetField("_serverHost", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(provider, "fixture-device");
+            providerType.GetField("_serverPort", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(provider, 5667);
+            Assert(provider.MatchesServerAddress("https://FIXTURE-device:5667/") && provider.MatchesServerAddress("fixture-device") &&
+                !provider.MatchesServerAddress("other-device") && !provider.MatchesServerAddress("fixture-device:5668") &&
+                !provider.MatchesServerAddress("http://fixture-device:5667"), "飞牛任务设备地址按主机和加密端口保守匹配");
+            var settings = AppSettings.CreateInMemory();
+            var task = new SyncTask { TaskName = "设备绑定", SourceFolder = source, DestinationFolder = "device-binding-target",
+                NasUsername = "fixture-user", NasDeviceId = "other-device", ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "device-binding-logs")), experimentalVersionedBackup: true);
+            manager.StorageProviderSupplier = () => provider;
+            manager.AddTask(task);
+            var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            manager.TaskStateChanged += t => { if (t.TaskId == task.TaskId && t.State == TaskSyncState.ConfigurationError) done.TrySetResult(); };
+            manager.TriggerSync(task.TaskId);
+            if (await Task.WhenAny(done.Task, Task.Delay(10000)) != done.Task) throw new TimeoutException("设备绑定拒绝检查超时");
+            Assert(task.LastSyncStatus == "NAS 设备地址不匹配" && !Directory.Exists(Path.Combine(root, task.DestinationFolder)),
+                "同用户名连接到其他飞牛设备时停止备份且不创建目标");
+            await Task.Delay(300);
+            await using (var recovery = await manager.BeginIsolatedRecoveryAsync(task.TaskId, TimeSpan.FromSeconds(5)))
+            {
+                bool refused = false;
+                try { await recovery!.InspectAsync(); }
+                catch (InvalidOperationException) { refused = true; }
+                Assert(refused, "恢复检查也拒绝不匹配的飞牛设备");
+            }
+            if (!await manager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("设备绑定测试未停止");
+            var ordinaryBeta = AppSettings.LoadVersionedBetaTestProfile(Guid.NewGuid());
+            typeof(AppSettings).GetProperty(nameof(AppSettings.IsVersionedBetaTestProfile))!.SetValue(ordinaryBeta, false);
+            var missingAccount = new SyncTask { TaskName = "缺少账号", SourceFolder = source, DestinationFolder = "device-binding-missing-account",
+                NasDeviceId = "fixture-device", ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            using var ordinaryManager = new TaskManager(ordinaryBeta, new SmbAuthService(), new LogService(Path.Combine(root, "device-binding-ordinary-logs")), experimentalVersionedBackup: true);
+            ordinaryManager.StorageProviderSupplier = () => provider;
+            ordinaryManager.AddTask(missingAccount);
+            var missingDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            ordinaryManager.TaskStateChanged += t => { if (t.TaskId == missingAccount.TaskId && t.State == TaskSyncState.ConfigurationError) missingDone.TrySetResult(); };
+            ordinaryManager.TriggerSync(missingAccount.TaskId);
+            if (await Task.WhenAny(missingDone.Task, Task.Delay(10000)) != missingDone.Task) throw new TimeoutException("缺少账号检查超时");
+            Assert(missingAccount.LastSyncStatus == "NAS 账号不匹配", "新版任务缺少账号信息时停止备份");
+            await Task.Delay(300);
+            missingAccount.NasUsername = "fixture-user";
+            missingAccount.NasDeviceId = "";
+            missingDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            ordinaryManager.TriggerSync(missingAccount.TaskId);
+            if (await Task.WhenAny(missingDone.Task, Task.Delay(10000)) != missingDone.Task) throw new TimeoutException("缺少设备地址检查超时");
+            Assert(missingAccount.LastSyncStatus == "NAS 设备地址不匹配", "新版任务缺少设备地址时停止备份");
+            if (!await ordinaryManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("缺少账号测试未停止");
         }
 
         static async Task TestLegacyTargetProtectionAsync(string root)

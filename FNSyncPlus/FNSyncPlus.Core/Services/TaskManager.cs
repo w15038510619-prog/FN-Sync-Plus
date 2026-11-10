@@ -569,9 +569,14 @@ namespace FNSyncPlus.Core.Services
                 var provider = _owner.StorageProviderSupplier?.Invoke();
                 if (provider == null || !provider.IsAuthenticated || provider.ProviderType != StorageProviderType.FnOsPersonal)
                     throw new InvalidOperationException("飞牛未连接，不能检查中断状态");
-                if (provider is FnOsPersonalStorageProvider fn && !string.IsNullOrWhiteSpace(_task.NasUsername) &&
-                    !string.Equals(_task.NasUsername, fn.CurrentUsername, StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException("当前飞牛账号与任务账号不一致");
+                if (provider is FnOsPersonalStorageProvider fn &&
+                    ((!string.IsNullOrWhiteSpace(_task.NasUsername) && !string.Equals(_task.NasUsername, fn.CurrentUsername, StringComparison.OrdinalIgnoreCase)) ||
+                     (string.IsNullOrWhiteSpace(_task.NasUsername) && _owner._settings.IsVersionedBetaProfile && !_owner._settings.IsVersionedBetaTestProfile)))
+                    throw new InvalidOperationException("当前飞牛账号与任务账号不一致或任务缺少账号信息");
+                if (provider is FnOsPersonalStorageProvider device &&
+                    ((!string.IsNullOrWhiteSpace(_task.NasDeviceId) && !device.MatchesServerAddress(_task.NasDeviceId)) ||
+                     (string.IsNullOrWhiteSpace(_task.NasDeviceId) && _owner._settings.IsVersionedBetaProfile && !_owner._settings.IsVersionedBetaTestProfile)))
+                    throw new InvalidOperationException("当前飞牛地址与任务设备不一致或任务缺少设备地址，已停止恢复检查。");
                 return provider;
             }
 
@@ -741,12 +746,25 @@ namespace FNSyncPlus.Core.Services
                 TaskStateChanged?.Invoke(task);
                 return;
             }
-            if (provider is FnOsPersonalStorageProvider fn && !string.IsNullOrWhiteSpace(task.NasUsername) &&
-                !string.Equals(task.NasUsername, fn.CurrentUsername, StringComparison.OrdinalIgnoreCase))
+            if (provider is FnOsPersonalStorageProvider fn &&
+                ((!string.IsNullOrWhiteSpace(task.NasUsername) && !string.Equals(task.NasUsername, fn.CurrentUsername, StringComparison.OrdinalIgnoreCase)) ||
+                 (task.IsExperimentalBackup && string.IsNullOrWhiteSpace(task.NasUsername) && _settings.IsVersionedBetaProfile && !_settings.IsVersionedBetaTestProfile)))
             {
                 task.State = TaskSyncState.ConfigurationError;
                 task.LastSyncStatus = "NAS 账号不匹配";
-                task.LastError = "当前连接的账号与任务账号不一致，本次未执行备份";
+                task.LastError = "当前连接的账号与任务账号不一致或任务缺少账号信息，本次未执行备份";
+                AppendTaskLog(task, "ERROR", task.LastError);
+                _settings.Save();
+                TaskStateChanged?.Invoke(task);
+                return;
+            }
+            if (task.IsExperimentalBackup && provider is FnOsPersonalStorageProvider device &&
+                ((!string.IsNullOrWhiteSpace(task.NasDeviceId) && !device.MatchesServerAddress(task.NasDeviceId)) ||
+                 (string.IsNullOrWhiteSpace(task.NasDeviceId) && _settings.IsVersionedBetaProfile && !_settings.IsVersionedBetaTestProfile)))
+            {
+                task.State = TaskSyncState.ConfigurationError;
+                task.LastSyncStatus = "NAS 设备地址不匹配";
+                task.LastError = "当前飞牛地址与任务设备不一致或任务缺少设备地址，本次未执行备份";
                 AppendTaskLog(task, "ERROR", task.LastError);
                 _settings.Save();
                 TaskStateChanged?.Invoke(task);

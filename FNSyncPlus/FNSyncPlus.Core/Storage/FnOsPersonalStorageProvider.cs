@@ -39,6 +39,14 @@ namespace FNSyncPlus.Core.Storage
         public int? CurrentVolumeId => _apiClient.CurrentVolumeId;
         public string? CurrentUsername => _apiClient.AuthenticatedUser;
 
+        // Address comparison is conservative: aliases for the same device must be reconfigured explicitly.
+        public bool MatchesServerAddress(string server)
+        {
+            if (string.IsNullOrWhiteSpace(server) || string.IsNullOrWhiteSpace(_serverHost)) return false;
+            ParseServerAddress(server, out string host, out int port, out bool useSsl);
+            return useSsl && port == _serverPort && string.Equals(host, _serverHost, StringComparison.OrdinalIgnoreCase);
+        }
+
         public FnOsPersonalStorageProvider(string? pinnedCertSha256 = null)
         {
             _apiClient = new FnOsApiClient(pinnedCertSha256);
