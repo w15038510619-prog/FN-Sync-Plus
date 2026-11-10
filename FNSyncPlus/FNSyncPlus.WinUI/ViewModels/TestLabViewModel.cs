@@ -125,14 +125,26 @@ namespace FNSyncPlus.WinUI.ViewModels
                         return;
                     }
                     if (AppServices.IsIsolatedTestSession)
-                        AppServices.GetService<AppSettings>().EnsureIsolatedTestParent(TargetNasShare);
+                    {
+                        try { AppServices.GetService<AppSettings>().EnsureIsolatedTestParent(TargetNasShare); }
+                        catch (InvalidOperationException ex)
+                        {
+                            StatusText = $"测试未执行：{ex.Message}";
+                            ExecutionLogs.Add(StatusText);
+                            return;
+                        }
+                    }
                     StatusText = "正在执行真实飞牛 NAS「我的文件」端到端自动化测试 (包含分块流式传输、增量跳过与哈希校验)...";
                     report = await _engine.RunNasFnOsPersonalTestAsync(fnProvider, progress, includeLargeFile: false, authorizedTestParent: TargetNasShare);
                 }
                 else if (SelectedModeIndex == 2)
                 {
                     if (AppServices.IsIsolatedTestSession)
-                        throw new InvalidOperationException("隔离测试会话不允许在 SMB 共享上运行真实测试");
+                    {
+                        StatusText = "测试未执行：隔离测试会话不允许在 SMB 共享上运行真实测试。";
+                        ExecutionLogs.Add(StatusText);
+                        return;
+                    }
                     string target = TargetNasShare;
                     if (string.IsNullOrWhiteSpace(target))
                     {
