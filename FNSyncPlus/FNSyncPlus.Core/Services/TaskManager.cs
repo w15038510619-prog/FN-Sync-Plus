@@ -67,8 +67,8 @@ namespace FNSyncPlus.Core.Services
             get => _useExperimentalVersionedBackup;
             set
             {
-                if (value && !_settings.IsInMemoryOnly)
-                    throw new InvalidOperationException("实验性备份只能用于内存隔离测试会话");
+                if (value && !_settings.IsInMemoryOnly && !_settings.IsVersionedBetaProfile)
+                    throw new InvalidOperationException("版本化备份只能用于隔离测试或独立新版试验配置");
                 _useExperimentalVersionedBackup = value;
             }
         }
@@ -97,10 +97,13 @@ namespace FNSyncPlus.Core.Services
             _manifestManager = manifestManager;
             _smbService = smbService;
             _logService = logService ?? LogService.Default;
-            if (experimentalVersionedBackup && !settings.IsInMemoryOnly)
-                throw new InvalidOperationException("实验性备份只能用于内存隔离测试会话");
+            if (experimentalVersionedBackup && !settings.IsInMemoryOnly && !settings.IsVersionedBetaProfile)
+                throw new InvalidOperationException("版本化备份只能用于隔离测试或独立新版试验配置");
             foreach (var task in settings.Tasks)
             {
+                if (settings.IsVersionedBetaProfile && (task.ProviderType != StorageProviderType.FnOsPersonal ||
+                    !string.Equals(task.BackupStorageFormat, IsolatedVersionedFormat, StringComparison.Ordinal)))
+                    throw new InvalidOperationException("新版配置包含未明确迁移的旧任务，已阻止自动启动。");
                 if (task.BackupStorageFormat != null &&
                     (!experimentalVersionedBackup || task.ProviderType != StorageProviderType.FnOsPersonal ||
                      !string.Equals(task.BackupStorageFormat, IsolatedVersionedFormat, StringComparison.Ordinal)))
@@ -136,6 +139,8 @@ namespace FNSyncPlus.Core.Services
         {
             if (task == null) throw new ArgumentNullException(nameof(task));
             _settings.EnsureIsolatedTestTask(task);
+            if (_settings.IsVersionedBetaProfile && (!UseExperimentalVersionedBackup || task.ProviderType != StorageProviderType.FnOsPersonal))
+                throw new InvalidOperationException("新版试验配置仅接受飞牛版本化备份任务。");
             if (task.BackupStorageFormat != null)
                 throw new InvalidOperationException("不能把已有备份格式的任务作为新任务添加");
             task.IsExperimentalBackup = UseExperimentalVersionedBackup && task.ProviderType == StorageProviderType.FnOsPersonal;
@@ -620,10 +625,10 @@ namespace FNSyncPlus.Core.Services
         private async Task ExecuteSingleTaskSyncAsync(SyncTask task, CancellationToken taskToken)
         {
             taskToken.ThrowIfCancellationRequested();
-            if (task.IsExperimentalBackup
+            if ((_settings.IsVersionedBetaProfile && !task.IsExperimentalBackup) || (task.IsExperimentalBackup
                 ? !UseExperimentalVersionedBackup || task.ProviderType != StorageProviderType.FnOsPersonal ||
                   !string.Equals(task.BackupStorageFormat, IsolatedVersionedFormat, StringComparison.Ordinal)
-                : task.BackupStorageFormat != null)
+                : task.BackupStorageFormat != null))
             {
                 task.State = TaskSyncState.ConfigurationError;
                 task.LastSyncStatus = "备份格式不受支持";

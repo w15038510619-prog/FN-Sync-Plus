@@ -52,11 +52,40 @@ namespace FNSyncPlus.Core.Services
         [JsonIgnore]
         public string? IsolatedSessionPath { get; private set; }
 
+        // The beta profile has its own file and credentials; old app versions use a different path.
+        [JsonIgnore]
+        public string? VersionedBetaProfilePath { get; private set; }
+
+        [JsonIgnore]
+        public bool IsVersionedBetaProfile => VersionedBetaProfilePath != null;
+
         [JsonIgnore]
         private string? IsolatedTestRemoteRoot { get; set; }
 
         public static AppSettings CreateInMemory() => new AppSettings { IsInMemoryOnly = true };
         public static AppSettings CreateForTest(string testFilePath) => new AppSettings { CustomConfigPath = testFilePath };
+
+        public static AppSettings LoadVersionedBetaProfile() => LoadVersionedProfileAt(
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "versioned-beta"));
+
+        // This isolated test path is never selected by ordinary application startup.
+        public static AppSettings LoadVersionedBetaTestProfile(Guid id)
+        {
+            if (id == Guid.Empty) throw new ArgumentException("测试配置标识无效", nameof(id));
+            return LoadVersionedProfileAt(Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"VersionedProfile_{id:N}"));
+        }
+
+        private static AppSettings LoadVersionedProfileAt(string folder)
+        {
+            Directory.CreateDirectory(folder);
+            string path = Path.Combine(folder, "settings.json");
+            var settings = File.Exists(path) ? FromJson(File.ReadAllText(path)) : new AppSettings();
+            if (!string.IsNullOrEmpty(settings.LegacySourceFolder) || !string.IsNullOrEmpty(settings.LegacyTargetShare))
+                throw new InvalidDataException("新版配置包含旧式单任务字段，必须先明确迁移。");
+            settings.VersionedBetaProfilePath = path;
+            settings.IsolatedCredentialPath = Path.Combine(folder, "credentials.dat");
+            return settings;
+        }
 
         public static AppSettings LoadIsolatedTestSession(Guid id)
         {
@@ -223,7 +252,7 @@ namespace FNSyncPlus.Core.Services
 
             lock (Tasks)
             {
-                string path = IsolatedSessionPath ?? (!string.IsNullOrEmpty(CustomConfigPath) ? CustomConfigPath : GetConfigFilePath());
+                string path = VersionedBetaProfilePath ?? IsolatedSessionPath ?? (!string.IsNullOrEmpty(CustomConfigPath) ? CustomConfigPath : GetConfigFilePath());
                 string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
                 try
                 {
@@ -235,7 +264,7 @@ namespace FNSyncPlus.Core.Services
                 {
                     if (File.Exists(temp)) File.Delete(temp);
                 }
-                if (IsolatedSessionPath == null && string.IsNullOrEmpty(CustomConfigPath))
+                if (VersionedBetaProfilePath == null && IsolatedSessionPath == null && string.IsNullOrEmpty(CustomConfigPath))
                     ApplyStartupRegistry(StartWithWindows);
             }
         }

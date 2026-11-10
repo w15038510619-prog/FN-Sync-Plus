@@ -2007,6 +2007,72 @@ namespace FNSyncPlus.Tests
             try { using var unknownManager = new TaskManager(unknownReload, new SmbAuthService(), new LogService(Path.Combine(root, "format-unknown-logs")), experimentalVersionedBackup: true); }
             catch (InvalidOperationException) { refusedUnknownFormat = true; }
             Assert(refusedUnknownFormat, "隔离引擎拒绝未知版本格式，不启动同步");
+
+            Guid profileId = Guid.NewGuid();
+            var betaProfile = AppSettings.LoadVersionedBetaTestProfile(profileId);
+            string oldConfig = Path.Combine(root, "original-profile.json");
+            File.WriteAllText(oldConfig, "original settings must remain unchanged");
+            betaProfile.CustomConfigPath = oldConfig; // A profile must not be redirected onto the old configuration.
+            using (var profileManager = new TaskManager(betaProfile, new SmbAuthService(), new LogService(Path.Combine(root, "beta-profile-logs")), experimentalVersionedBackup: true))
+            {
+                profileManager.StorageProviderSupplier = () => provider;
+                var profileTask = new SyncTask { TaskName = "新版测试任务", SourceFolder = source, DestinationFolder = "beta-profile-target",
+                    ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly, SettlingDelaySeconds = 1 };
+                profileManager.AddTask(profileTask);
+                var profileDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                profileManager.TaskStateChanged += t => { if (t.TaskId == profileTask.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) profileDone.TrySetResult(); };
+                profileManager.TriggerSync(profileTask.TaskId);
+                if (await Task.WhenAny(profileDone.Task, Task.Delay(15000)) != profileDone.Task) throw new TimeoutException("新版配置首次备份超时");
+                Assert(profileTask.State == TaskSyncState.Completed && File.Exists(Path.Combine(root, profileTask.DestinationFolder, "current", "sample.txt")),
+                    "独立新版配置可以完成首次版本化备份");
+                var unmarked = new SyncTask { TaskName = "运行时旧任务", SourceFolder = source, DestinationFolder = "beta-unmarked-target",
+                    ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+                var unmarkedDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                profileManager.TaskStateChanged += t => { if (t.TaskId == unmarked.TaskId && t.State == TaskSyncState.ConfigurationError) unmarkedDone.TrySetResult(); };
+                betaProfile.Tasks.Add(unmarked);
+                profileManager.TriggerSync(unmarked.TaskId);
+                if (await Task.WhenAny(unmarkedDone.Task, Task.Delay(5000)) != unmarkedDone.Task) throw new TimeoutException("新版配置运行时旧任务检查超时");
+                Assert(unmarked.LastSyncStatus == "备份格式不受支持", "新版配置运行期间也拒绝未经迁移的任务进入旧引擎");
+                betaProfile.Tasks.Remove(unmarked);
+                if (!await profileManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("新版测试配置任务未停止");
+            }
+            var betaReload = AppSettings.LoadVersionedBetaTestProfile(profileId);
+            Assert(betaReload.IsVersionedBetaProfile && betaReload.Tasks.Single().BackupStorageFormat == "isolated-versioned-v1" &&
+                File.ReadAllText(oldConfig) == "original settings must remain unchanged" &&
+                betaReload.IsolatedCredentialPath == Path.Combine(Path.GetDirectoryName(betaReload.VersionedBetaProfilePath!)!, "credentials.dat"),
+                "新版配置单独保存版本任务和凭据路径，不覆盖旧配置");
+            using (var profileReloadManager = new TaskManager(betaReload, new SmbAuthService(), new LogService(Path.Combine(root, "beta-reload-logs")), experimentalVersionedBackup: true))
+            {
+                profileReloadManager.StorageProviderSupplier = () => provider;
+                var profileTask = profileReloadManager.Tasks.Single();
+                var reloadDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                profileReloadManager.TaskStateChanged += t => { if (t.TaskId == profileTask.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) reloadDone.TrySetResult(); };
+                profileReloadManager.TriggerSync(profileTask.TaskId);
+                if (await Task.WhenAny(reloadDone.Task, Task.Delay(15000)) != reloadDone.Task) throw new TimeoutException("新版配置重启续接超时");
+                Assert(profileTask.IsExperimentalBackup && profileTask.State == TaskSyncState.Completed && profileTask.LastUploadedFiles == 0,
+                    "新版配置重启后续接版本任务且不重复上传");
+                if (!await profileReloadManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("新版配置续接后未停止");
+            }
+            betaReload.Tasks.Add(new SyncTask { TaskName = "未经迁移的旧任务", SourceFolder = source, DestinationFolder = "legacy-target", ScheduleMode = TaskSyncScheduleMode.ManualOnly });
+            betaReload.Save();
+            var mixedProfile = AppSettings.LoadVersionedBetaTestProfile(profileId);
+            bool refusedMixedProfile = false;
+            try { using var mixedManager = new TaskManager(mixedProfile, new SmbAuthService(), new LogService(Path.Combine(root, "beta-mixed-logs")), experimentalVersionedBackup: true); }
+            catch (InvalidOperationException) { refusedMixedProfile = true; }
+            Assert(refusedMixedProfile && mixedProfile.Tasks.Count == 2 && File.ReadAllText(oldConfig) == "original settings must remain unchanged",
+                "新版配置拒绝未经迁移的旧任务且保留全部配置");
+            string betaPath = betaReload.VersionedBetaProfilePath!;
+            const string oldSingleTaskJson = "{\"SourceFolder\":\"legacy-source\",\"TargetShare\":\"legacy-target\"}";
+            File.WriteAllText(betaPath, oldSingleTaskJson);
+            bool refusedOldSingleTask = false;
+            try { AppSettings.LoadVersionedBetaTestProfile(profileId); }
+            catch (InvalidDataException) { refusedOldSingleTask = true; }
+            Assert(refusedOldSingleTask && File.ReadAllText(betaPath) == oldSingleTaskJson, "新版配置拒绝旧式单任务字段且保留原文");
+            File.WriteAllText(betaPath, "broken beta settings");
+            bool refusedBrokenProfile = false;
+            try { AppSettings.LoadVersionedBetaTestProfile(profileId); }
+            catch (System.Text.Json.JsonException) { refusedBrokenProfile = true; }
+            Assert(refusedBrokenProfile && File.ReadAllText(betaPath) == "broken beta settings", "新版配置损坏时停止且不重置原文件");
         }
 
         static async Task TestIsolatedTaskReattachmentAsync(string root)
