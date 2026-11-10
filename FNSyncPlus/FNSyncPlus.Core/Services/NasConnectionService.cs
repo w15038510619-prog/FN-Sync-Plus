@@ -248,6 +248,13 @@ namespace FNSyncPlus.Core.Services
                 State = NasConnectionState.AuthenticationFailed;
                 return (false, LastError);
             }
+            if (providerType == StorageProviderType.FnOsPersonal && server.Trim().StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            {
+                LastError = "飞牛连接必须使用 HTTPS 加密；请将地址改为 https:// 或省略协议前缀。";
+                State = NasConnectionState.AuthenticationFailed;
+                _taskManager.SetNasOnlineState(false);
+                return (false, LastError);
+            }
 
             if (!await _connectionLock.WaitAsync(0).ConfigureAwait(false))
             {

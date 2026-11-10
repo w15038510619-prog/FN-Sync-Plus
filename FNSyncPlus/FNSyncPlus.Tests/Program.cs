@@ -350,6 +350,23 @@ namespace FNSyncPlus.Tests
                 Assert(!new FnOsFileListResponse { Files = new() }.IsSuccess, "fnOS 文件列表批次未收到完成标记前不能视为成功");
                 Assert(new FnOsFileListResponse { Result = "succ" }.IsSuccess, "fnOS 空目录允许成功响应省略 files");
                 Assert(!new FnOsFileListResponse().IsSuccess && !new FnOsFileListResponse { Result = "fail", Files = new() }.IsSuccess, "fnOS 文件列表拒绝空响应或明确失败");
+                await using (var insecureApi = new FnOsApiClient())
+                {
+                    bool refusedPlaintext = false;
+                    try { await insecureApi.ConnectAsync("127.0.0.1", 1, useSsl: false); }
+                    catch (InvalidOperationException) { refusedPlaintext = true; }
+                    Assert(refusedPlaintext && !insecureApi.IsConnected, "飞牛底层客户端在建立连接前拒绝明文传输");
+                }
+                var tlsSettings = AppSettings.CreateInMemory();
+                var tlsSmb = new SmbAuthService();
+                using (var tlsManager = new TaskManager(tlsSettings, tlsSmb, new LogService(Path.Combine(root, "tls-guard-logs"))))
+                {
+                    var tlsConnection = new NasConnectionService(tlsSmb, tlsSettings, tlsManager);
+                    var insecureAttempt = await tlsConnection.ConnectAsync("http://127.0.0.1:1", "test-user", "test-password", rememberCredentials: false);
+                    Assert(!insecureAttempt.Success && insecureAttempt.Message.Contains("HTTPS", StringComparison.Ordinal) &&
+                        tlsConnection.CurrentStorageProvider == null && string.IsNullOrEmpty(tlsSettings.NasServer),
+                        "飞牛界面连接在探测或发送凭据前拒绝明文地址");
+                }
                 await using (var rpcClient = new FnOsApiClient())
                 {
                     var type = typeof(FnOsApiClient);

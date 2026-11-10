@@ -198,6 +198,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
         /// </summary>
         public async Task ConnectAsync(string host, int port, bool useSsl, CancellationToken ct = default)
         {
+            if (!useSsl) throw new InvalidOperationException("飞牛连接必须使用 HTTPS 加密；请将地址改为 https:// 或省略协议前缀。");
             await StopHeartbeatAsync().ConfigureAwait(false);
             _receiveCts?.Cancel();
             if (_receiveLoopTask != null)
