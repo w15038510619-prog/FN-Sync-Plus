@@ -46,6 +46,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         public event Action<SyncTaskItemViewModel>? RequestTaskDetails;
         public event Action<SyncTaskItemViewModel>? RequestEditSettings;
         public event Action<SyncTaskItemViewModel>? RequestConfirmDelete;
+        public event Action<SyncTaskItemViewModel>? RequestInspectInterruption;
         public event Action<string>? RequestOperationError;
 
         public TasksViewModel(TaskManager taskManager, AppSettings settings)
@@ -70,6 +71,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 itemVm.RequestViewDetails += t => RequestTaskDetails?.Invoke(t);
                 itemVm.RequestEditSettings += t => RequestEditSettings?.Invoke(t);
                 itemVm.RequestDelete += t => RequestConfirmDelete?.Invoke(t);
+                itemVm.RequestInspectInterruption += t => RequestInspectInterruption?.Invoke(t);
                 itemVm.RequestOperationError += message => RequestOperationError?.Invoke(message);
                 Tasks.Add(itemVm);
             }

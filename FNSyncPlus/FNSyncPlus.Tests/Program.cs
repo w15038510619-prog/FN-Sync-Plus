@@ -1588,6 +1588,7 @@ namespace FNSyncPlus.Tests
                 await TestNextPhysicalProjectionAsync(root);
                 await TestLongDirectoryRenameAsync(root);
                 await TestProjectionInspectionStatesAsync(root);
+                await TestIsolatedRecoverySessionAsync(root);
             }
             finally
             {
@@ -2274,6 +2275,73 @@ namespace FNSyncPlus.Tests
                 File.ReadAllText(Path.Combine(root, "inspect-recovery-race", "current", "file.txt")) == "after interruption" &&
                 await ExperimentalRemoteLease.InspectAsync(concurrentRecovery, "inspect-recovery-race") == null,
                 "并发恢复只有一个执行者，其余请求安全停止");
+        }
+
+        static async Task TestIsolatedRecoverySessionAsync(string root)
+        {
+            string source = Path.Combine(root, "recovery-session-source"), target = "recovery-session-target";
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "old.txt"), "recoverable");
+            var provider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+            var backup = new ExperimentalVersionedBackup();
+            await backup.CreateNewAsync(provider, source, target);
+            var previous = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, target);
+            var published = await new ExperimentalFirstProjection().PublishAsync(provider, target, previous);
+            File.Move(Path.Combine(source, "old.txt"), Path.Combine(source, "new.txt"));
+            await backup.RunAsync(provider, source, target);
+            var next = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, target);
+            provider.FailAfterArchiveMove = true;
+            try { await new ExperimentalNextProjection().PublishAsync(provider, target, previous, published, next); }
+            catch (IOException) { }
+            provider.FailAfterArchiveMove = false;
+            var settings = AppSettings.CreateInMemory();
+            var task = new SyncTask { TaskName = "隔离恢复", SourceFolder = source, DestinationFolder = target,
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            settings.Tasks.Add(task);
+            using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "recovery-session-logs")), experimentalVersionedBackup: true);
+            manager.StorageProviderSupplier = () => provider;
+            var session = await manager.BeginIsolatedRecoveryAsync(task.TaskId, TimeSpan.FromSeconds(5))
+                ?? throw new TimeoutException("隔离恢复会话未启动");
+            var inspection = await session.InspectAsync();
+            bool resumeBlocked = false;
+            try { manager.ResumeTask(task.TaskId); }
+            catch (InvalidOperationException) { resumeBlocked = true; }
+            bool removed = await manager.RemoveTaskAsync(task.TaskId);
+            manager.TriggerSync(task.TaskId);
+            bool acknowledgementRejected = false;
+            try { await session.RecoverAsync(inspection!, ""); }
+            catch (InvalidOperationException) { acknowledgementRejected = true; }
+            Assert(inspection?.Stage == ExperimentalProjectionRecoveryInspector.Stage.OldArchived && resumeBlocked && !removed && acknowledgementRejected &&
+                task.IsUserPaused && !Directory.Exists(Path.Combine(root, target, "current")),
+                "恢复检查期间阻止任务运行、恢复或移除，并要求明确确认");
+            await session.RecoverAsync(inspection!, ExperimentalProjectionRecovery.RequiredAcknowledgement);
+            Assert(File.ReadAllText(Path.Combine(root, target, "current", "new.txt")) == "recoverable" &&
+                await ExperimentalRemoteLease.InspectAsync(provider, target) == null && task.IsUserPaused,
+                "隔离恢复完成后仍保持暂停，当前目录和旧归档均保留");
+            bool prematureShutdown = await manager.ShutdownAsync(TimeSpan.FromMilliseconds(300));
+            await session.DisposeAsync();
+            bool stopped = await manager.ShutdownAsync(TimeSpan.FromSeconds(5));
+            Assert(!prematureShutdown && stopped, "退出等待恢复会话结束，不提前释放资源");
+
+            string blockedSource = Path.Combine(root, "recovery-stop-source");
+            Directory.CreateDirectory(blockedSource);
+            File.WriteAllText(Path.Combine(blockedSource, "held.txt"), "hold the writer");
+            var blockedProvider = new FaultInjectingProvider(root) { ClaimFnOs = true, BlockUploadContains = "/.fnsync/objects/obj-" };
+            var blockedSettings = AppSettings.CreateInMemory();
+            using var blockedManager = new TaskManager(blockedSettings, new SmbAuthService(), new LogService(Path.Combine(root, "recovery-stop-logs")));
+            blockedManager.UseExperimentalVersionedBackup = true;
+            blockedManager.StorageProviderSupplier = () => blockedProvider;
+            var blockedTask = new SyncTask { TaskName = "等待写入停止", SourceFolder = blockedSource, DestinationFolder = "recovery-stop-target",
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            blockedManager.AddTask(blockedTask);
+            blockedManager.TriggerSync(blockedTask.TaskId);
+            if (await Task.WhenAny(blockedProvider.UploadEntered.Task, Task.Delay(10000)) != blockedProvider.UploadEntered.Task)
+                throw new TimeoutException("恢复等待测试未进入上传");
+            var timedOut = await blockedManager.BeginIsolatedRecoveryAsync(blockedTask.TaskId, TimeSpan.FromMilliseconds(300));
+            Assert(timedOut == null && blockedTask.IsUserPaused && blockedTask.State == TaskSyncState.Paused,
+                "写入者未停止时恢复检查超时并保持任务暂停");
+            blockedProvider.ContinueUpload.TrySetResult();
+            if (!await blockedManager.ShutdownAsync(TimeSpan.FromSeconds(10))) throw new TimeoutException("等待写入停止测试未退出");
         }
 
         static async Task TestLongDirectoryRenameAsync(string root)

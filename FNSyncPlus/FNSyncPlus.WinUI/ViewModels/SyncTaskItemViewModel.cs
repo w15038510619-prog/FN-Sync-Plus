@@ -13,6 +13,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         public SyncTask Model { get; }
 
         public string TaskId => Model.TaskId;
+        public bool CanInspectInterruption => Model.IsExperimentalBackup;
 
         [ObservableProperty]
         private string _taskName;
@@ -72,6 +73,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         public event Action<SyncTaskItemViewModel>? RequestEditSettings;
         public event Action<string>? RequestOperationError;
         public event Action<SyncTaskItemViewModel>? RequestDelete;
+        public event Action<SyncTaskItemViewModel>? RequestInspectInterruption;
 
         public SyncTaskItemViewModel(SyncTask task, TaskManager taskManager)
         {
@@ -181,6 +183,12 @@ namespace FNSyncPlus.WinUI.ViewModels
         private void DeleteTask()
         {
             RequestDelete?.Invoke(this);
+        }
+
+        [RelayCommand]
+        private void InspectInterruption()
+        {
+            if (CanInspectInterruption) RequestInspectInterruption?.Invoke(this);
         }
     }
 }

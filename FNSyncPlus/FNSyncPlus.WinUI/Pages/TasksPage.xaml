@@ -186,6 +186,8 @@
                                                             <FontIcon Glyph="&#xE713;" />
                                                         </MenuFlyoutItem.Icon>
                                                     </MenuFlyoutItem>
+                                                    <MenuFlyoutItem Text="检查中断的备份（隔离试验）" Command="{x:Bind InspectInterruptionCommand}"
+                                                        Visibility="{x:Bind CanInspectInterruption, Converter={StaticResource BoolToVisibilityConverter}}" />
                                                     <MenuFlyoutSeparator />
                                                     <MenuFlyoutItem Text="仅移除任务配置" Command="{x:Bind DeleteTaskCommand}">
                                                         <MenuFlyoutItem.Icon>

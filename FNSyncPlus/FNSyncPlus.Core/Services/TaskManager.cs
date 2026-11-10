@@ -27,6 +27,7 @@ namespace FNSyncPlus.Core.Services
         private readonly ConcurrentDictionary<string, CancellationTokenSource> _runningCts = new();
         private readonly object _taskLifecycleLock = new();
         private readonly Dictionary<string, TaskCompletionSource> _runningCompletions = new();
+        private readonly Dictionary<string, TaskCompletionSource> _recoverySessions = new();
         private readonly HashSet<string> _removingTasks = new();
         private readonly ConcurrentDictionary<string, FileSystemWatcher> _watchers = new();
         private readonly ConcurrentDictionary<string, Timer> _watcherDebounceTimers = new();
@@ -173,7 +174,7 @@ namespace FNSyncPlus.Core.Services
             lock (_taskLifecycleLock)
             {
                 task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-                if (task == null || !_removingTasks.Add(taskId)) return false;
+                if (task == null || _recoverySessions.ContainsKey(taskId) || !_removingTasks.Add(taskId)) return false;
                 task.State = TaskSyncState.Removing;
                 task.LastSyncStatus = "正在停止同步并移除任务配置...";
                 _runningCts.TryGetValue(taskId, out cts);
@@ -252,7 +253,7 @@ namespace FNSyncPlus.Core.Services
         {
             lock (_taskLifecycleLock)
             {
-                if (_stopping || _removingTasks.Contains(task.TaskId)) return;
+                if (_stopping || _removingTasks.Contains(task.TaskId) || _recoverySessions.ContainsKey(task.TaskId)) return;
                 var existing = _settings.Tasks.FirstOrDefault(t => t.TaskId == task.TaskId);
                 if (existing != null)
                 {
@@ -284,7 +285,7 @@ namespace FNSyncPlus.Core.Services
         {
             lock (_taskLifecycleLock)
             {
-                if (_stopping || _removingTasks.Contains(taskId) || _runningCompletions.ContainsKey(taskId)) return;
+                if (_stopping || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId) || _runningCompletions.ContainsKey(taskId)) return;
                 var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
                 if (task == null || !task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing)
                 {
@@ -359,6 +360,7 @@ namespace FNSyncPlus.Core.Services
         {
             lock (_taskLifecycleLock)
             {
+                if (_recoverySessions.ContainsKey(taskId)) throw new InvalidOperationException("正在检查或恢复该任务，请等待操作结束");
                 if (_stopping || _removingTasks.Contains(taskId) || _runningCompletions.ContainsKey(taskId)) return;
                 var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
                 if (task == null) return;
@@ -387,6 +389,129 @@ namespace FNSyncPlus.Core.Services
             }
         }
 
+        /// <summary>
+        /// Pauses an isolated task, waits for its writer to stop, and blocks scheduling,
+        /// removal and resume until the returned recovery session is disposed.
+        /// </summary>
+        public async Task<IsolatedRecoverySession?> BeginIsolatedRecoveryAsync(string taskId, TimeSpan timeout)
+        {
+            if (timeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
+            SyncTask task;
+            Task? running;
+            var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (_taskLifecycleLock)
+            {
+                task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId)
+                    ?? throw new InvalidOperationException("任务不存在");
+                if (!_settings.IsInMemoryOnly || !UseExperimentalVersionedBackup || !task.IsExperimentalBackup)
+                    throw new InvalidOperationException("中断恢复目前仅支持隔离试验任务");
+                if (_stopping || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId))
+                    throw new InvalidOperationException("任务正在停止、移除或执行其他恢复操作");
+                _settings.EnsureIsolatedTestTask(task);
+                _recoverySessions.Add(taskId, gate);
+                try
+                {
+                    PauseTask(taskId);
+                    running = _runningCompletions.TryGetValue(taskId, out var done) ? done.Task : null;
+                }
+                catch
+                {
+                    _recoverySessions.Remove(taskId);
+                    gate.TrySetResult();
+                    throw;
+                }
+            }
+            bool handedOff = false;
+            try
+            {
+                if (running != null && await Task.WhenAny(running, Task.Delay(timeout)).ConfigureAwait(false) != running) return null;
+                lock (_taskLifecycleLock)
+                {
+                    if (_stopping || !_settings.Tasks.Contains(task) || !task.IsUserPaused || _runningCompletions.ContainsKey(taskId))
+                        throw new InvalidOperationException("任务状态已变化，无法安全开始恢复检查");
+                    task.State = TaskSyncState.Paused;
+                    task.LastSyncStatus = "已暂停，等待中断恢复检查";
+                    handedOff = true;
+                    return new IsolatedRecoverySession(this, task, gate);
+                }
+            }
+            finally { if (!handedOff) EndIsolatedRecovery(taskId, gate); }
+        }
+
+        private void EndIsolatedRecovery(string taskId, TaskCompletionSource gate)
+        {
+            lock (_taskLifecycleLock)
+            {
+                if (_recoverySessions.TryGetValue(taskId, out var existing) && ReferenceEquals(existing, gate))
+                {
+                    _recoverySessions.Remove(taskId);
+                    _isolatedProjections.TryRemove(taskId, out _);
+                }
+            }
+            gate.TrySetResult();
+        }
+
+        public sealed class IsolatedRecoverySession : IAsyncDisposable
+        {
+            private readonly TaskManager _owner;
+            private readonly SyncTask _task;
+            private readonly TaskCompletionSource _gate;
+            private readonly string _destination;
+            private readonly SemaphoreSlim _operation = new(1, 1);
+            private int _closing;
+
+            internal IsolatedRecoverySession(TaskManager owner, SyncTask task, TaskCompletionSource gate)
+            {
+                _owner = owner; _task = task; _gate = gate; _destination = task.DestinationFolder;
+            }
+
+            private INasStorageProvider CheckedProvider()
+            {
+                lock (_owner._taskLifecycleLock)
+                {
+                    if (_owner._stopping || !_owner._settings.Tasks.Contains(_task) || !_task.IsUserPaused ||
+                        _task.DestinationFolder != _destination ||
+                        !_owner._recoverySessions.TryGetValue(_task.TaskId, out var gate) || !ReferenceEquals(gate, _gate))
+                        throw new InvalidOperationException("恢复会话已结束或任务状态发生变化");
+                    _owner._settings.EnsureIsolatedTestTask(_task);
+                }
+                var provider = _owner.StorageProviderSupplier?.Invoke();
+                if (provider == null || !provider.IsAuthenticated || provider.ProviderType != StorageProviderType.FnOsPersonal)
+                    throw new InvalidOperationException("飞牛未连接，不能检查中断状态");
+                if (provider is FnOsPersonalStorageProvider fn && !string.IsNullOrWhiteSpace(_task.NasUsername) &&
+                    !string.Equals(_task.NasUsername, fn.CurrentUsername, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("当前飞牛账号与任务账号不一致");
+                return provider;
+            }
+
+            private async Task<T> RunAsync<T>(Func<INasStorageProvider, CancellationToken, Task<T>> operation)
+            {
+                if (Volatile.Read(ref _closing) != 0) throw new ObjectDisposedException(nameof(IsolatedRecoverySession));
+                await _operation.WaitAsync(_owner._managerCts.Token).ConfigureAwait(false);
+                try
+                {
+                    if (Volatile.Read(ref _closing) != 0) throw new ObjectDisposedException(nameof(IsolatedRecoverySession));
+                    return await operation(CheckedProvider(), _owner._managerCts.Token).ConfigureAwait(false);
+                }
+                finally { _operation.Release(); }
+            }
+
+            public Task<ExperimentalProjectionRecoveryInspector.Inspection?> InspectAsync() =>
+                RunAsync((provider, token) => new ExperimentalProjectionRecoveryLocator().LocateAsync(provider, _destination, token));
+
+            public Task<ExperimentalProjectionRecovery.Recovered> RecoverAsync(
+                ExperimentalProjectionRecoveryInspector.Inspection expected, string acknowledgement) =>
+                RunAsync((provider, token) => new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(provider, _destination, expected, acknowledgement, token));
+
+            public async ValueTask DisposeAsync()
+            {
+                if (Interlocked.Exchange(ref _closing, 1) != 0) return;
+                await _operation.WaitAsync().ConfigureAwait(false);
+                try { _owner.EndIsolatedRecovery(_task.TaskId, _gate); }
+                finally { _operation.Release(); }
+            }
+        }
+
         private async Task ProcessQueueLoopAsync(CancellationToken token)
         {
             while (!token.IsCancellationRequested)
@@ -401,7 +526,7 @@ namespace FNSyncPlus.Core.Services
                         lock (_taskLifecycleLock)
                         {
                             task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-                            if (_stopping || task == null || _removingTasks.Contains(taskId) || !task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing || task.State == TaskSyncState.ConfigurationError) continue;
+                            if (_stopping || task == null || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId) || !task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing || task.State == TaskSyncState.ConfigurationError) continue;
                         }
 
                         // 等待获取全局并发信号量槽位
@@ -411,7 +536,7 @@ namespace FNSyncPlus.Core.Services
                         TaskCompletionSource completion;
                         lock (_taskLifecycleLock)
                         {
-                            if (_stopping || !_settings.Tasks.Contains(task) || _removingTasks.Contains(taskId) ||
+                            if (_stopping || !_settings.Tasks.Contains(task) || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId) ||
                                 _runningCompletions.ContainsKey(taskId) || !task.Enabled || task.IsUserPaused ||
                                 task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing ||
                                 task.State == TaskSyncState.ConfigurationError)
@@ -1108,7 +1233,8 @@ namespace FNSyncPlus.Core.Services
             {
                 if (_shutdownTask != null) return _shutdownTask;
                 _stopping = true;
-                completion = Task.WhenAll(_runningCompletions.Values.Select(v => v.Task).Append(_queueWorkerTask));
+                completion = Task.WhenAll(_runningCompletions.Values.Select(v => v.Task)
+                    .Concat(_recoverySessions.Values.Select(v => v.Task)).Append(_queueWorkerTask));
                 _shutdownTask = completion;
             }
             _managerCts.Cancel();

@@ -1,4 +1,5 @@
 using System;
+using FNSyncPlus.Core.Services;
 using FNSyncPlus.WinUI.Dialogs;
 using FNSyncPlus.WinUI.Services;
 using FNSyncPlus.WinUI.ViewModels;
@@ -13,6 +14,7 @@ namespace FNSyncPlus.WinUI.Pages
         private bool _isDeleting = false;
         private bool _isShowingDetails = false;
         private bool _isEditingSettings = false;
+        private bool _isInspectingInterruption = false;
 
         public TasksPage()
         {
@@ -38,6 +40,8 @@ namespace FNSyncPlus.WinUI.Pages
             ViewModel.RequestConfirmDelete += ConfirmDeleteTask;
             ViewModel.RequestOperationError -= ShowOperationError;
             ViewModel.RequestOperationError += ShowOperationError;
+            ViewModel.RequestInspectInterruption -= InspectInterruptedBackup;
+            ViewModel.RequestInspectInterruption += InspectInterruptedBackup;
         }
 
         private void OnPageUnloaded(object sender, RoutedEventArgs e)
@@ -47,6 +51,7 @@ namespace FNSyncPlus.WinUI.Pages
             ViewModel.RequestEditSettings -= OpenTaskSettingsDialog;
             ViewModel.RequestConfirmDelete -= ConfirmDeleteTask;
             ViewModel.RequestOperationError -= ShowOperationError;
+            ViewModel.RequestInspectInterruption -= InspectInterruptedBackup;
         }
 
         private async void ShowOperationError(string message)
@@ -59,6 +64,64 @@ namespace FNSyncPlus.WinUI.Pages
                 XamlRoot = this.XamlRoot ?? App.MainWindowInstance?.Content?.XamlRoot
             };
             await dialog.ShowAsync();
+        }
+
+        private async void InspectInterruptedBackup(SyncTaskItemViewModel item)
+        {
+            if (_isInspectingInterruption || !AppServices.IsIsolatedTestSession || item?.Model.IsExperimentalBackup != true || XamlRoot == null) return;
+            _isInspectingInterruption = true;
+            try
+            {
+                var manager = AppServices.GetService<TaskManager>();
+                await using var session = await manager.BeginIsolatedRecoveryAsync(item.TaskId, TimeSpan.FromSeconds(10));
+                item.UpdateVisualState();
+                if (session == null)
+                {
+                    await new ContentDialog { Title = "写入尚未停止", Content = "任务已暂停，但仍有写入操作尚未结束。请稍后再检查；期间不会执行恢复。",
+                        CloseButtonText = "知道了", XamlRoot = XamlRoot }.ShowAsync();
+                    return;
+                }
+                var inspection = await session.InspectAsync();
+                if (inspection == null)
+                {
+                    await new ContentDialog { Title = "没有发现中断的发布", Content = "没有发现未释放的备份锁。任务保持暂停，确认后可手动恢复同步。",
+                        CloseButtonText = "知道了", XamlRoot = XamlRoot }.ShowAsync();
+                    return;
+                }
+                string stage = inspection.Stage switch
+                {
+                    ExperimentalProjectionRecoveryInspector.Stage.FirstPrepared => "首次备份的候选目录尚未发布",
+                    ExperimentalProjectionRecoveryInspector.Stage.FirstMoved => "首次备份目录已移动，完成记录尚未写入",
+                    ExperimentalProjectionRecoveryInspector.Stage.BeforeArchive => "旧目录尚未归档",
+                    ExperimentalProjectionRecoveryInspector.Stage.OldArchived => "旧目录已归档，新目录尚未发布",
+                    ExperimentalProjectionRecoveryInspector.Stage.NewMoved => "新目录已发布，完成记录尚未写入",
+                    ExperimentalProjectionRecoveryInspector.Stage.Committed => "发布记录已完成，但锁尚未释放",
+                    _ => "发布状态未知"
+                };
+                var confirm = new ContentDialog
+                {
+                    Title = "确认修复中断的隔离备份",
+                    Content = $"检查结果：{stage}。\n\n本机此任务已暂停并停止写入。请先确认原同步程序和所有其他可能写入此备份的设备都已停止；软件无法替你判断其他设备是否停止。\n\n确认后会按记录完成目录恢复并释放该锁。任务仍保持暂停，需手动恢复同步。",
+                    PrimaryButtonText = "已确认全部停止，修复",
+                    CloseButtonText = "取消",
+                    DefaultButton = ContentDialogButton.Close,
+                    XamlRoot = XamlRoot
+                };
+                if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
+                await session.RecoverAsync(inspection, ExperimentalProjectionRecovery.RequiredAcknowledgement);
+                await new ContentDialog { Title = "隔离备份已修复", Content = "目录和记录已核验，任务仍保持暂停。请检查结果后手动恢复同步。",
+                    CloseButtonText = "知道了", XamlRoot = XamlRoot }.ShowAsync();
+            }
+            catch (Exception ex)
+            {
+                await new ContentDialog { Title = "中断检查或修复未完成", Content = $"任务保持暂停，现场已保留。\n{ex.Message}",
+                    CloseButtonText = "知道了", XamlRoot = XamlRoot }.ShowAsync();
+            }
+            finally
+            {
+                item.UpdateVisualState();
+                _isInspectingInterruption = false;
+            }
         }
 
         private async void OpenAddFolderWizardDialog()
