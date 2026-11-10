@@ -1706,6 +1706,7 @@ namespace FNSyncPlus.Tests
                 await TestShutdownAsync(root);
                 await TestPausePersistsAsync(root);
                 await TestDisconnectLockAsync(root);
+                await TestTwoFactorCredentialPersistenceAsync(root);
                 await TestInitialOfflineRetryAsync(root);
                 await TestTestLabIsolationAsync(root);
                 await TestFirstPhysicalProjectionAsync(root);
@@ -1737,6 +1738,93 @@ namespace FNSyncPlus.Tests
             info.ArgumentList.Add(mode);
             info.ArgumentList.Add(name);
             return System.Diagnostics.Process.Start(info) ?? throw new InvalidOperationException("无法启动隔离测试进程");
+        }
+
+        static async Task TestTwoFactorCredentialPersistenceAsync(string root)
+        {
+            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            var connectionType = typeof(NasConnectionService);
+            var complete = connectionType.GetMethod("CompleteTwoFactorLogin", flags)!;
+            void SetPending(NasConnectionService connection, bool remember, string? password)
+            {
+                connectionType.GetProperty(nameof(NasConnectionService.ServerAddress))!.SetValue(connection, "https://fixture.invalid");
+                connectionType.GetProperty(nameof(NasConnectionService.Username))!.SetValue(connection, "fixture-user");
+                connectionType.GetField("_pendingTwoFactorRemember", flags)!.SetValue(connection, remember);
+                connectionType.GetField("_pendingTwoFactorPassword", flags)!.SetValue(connection, password);
+            }
+            (bool Success, string Message) Complete(NasConnectionService connection, FnOsPersonalStorageProvider provider, bool? remember = null) =>
+                ((bool Success, string Message))complete.Invoke(connection, new object?[] { provider, new StorageAuthResult { Success = true, UserUid = 1000 }, remember })!;
+
+            await using var api = new FnOsApiClient();
+            api.SetAuthenticatedForTesting("fixture-user", 1000, 1);
+            await using var provider = new FnOsPersonalStorageProvider(api);
+            var settings = AppSettings.CreateForTest(Path.Combine(root, "two-factor-settings.json"));
+            settings.IsolatedCredentialPath = Path.Combine(root, "two-factor-credentials.dat");
+            using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "two-factor-logs")));
+            var connection = new NasConnectionService(new SmbAuthService(), settings, manager);
+            SetPending(connection, false, "fixture-secret");
+            var completed = Complete(connection, provider, true);
+            var saved = SmbAuthService.LoadCredentials(settings.IsolatedCredentialPath);
+            var persisted = AppSettings.LoadFromPath(settings.CustomConfigPath!);
+            Assert(completed.Success && connection.IsConnected && saved?.Password == "fixture-secret" &&
+                persisted.RememberCredentials && persisted.NasServer == "https://fixture.invalid" && persisted.Username == "fixture-user" &&
+                connectionType.GetField("_pendingTwoFactorPassword", flags)!.GetValue(connection) == null,
+                "双重验证完成后按选择保存独立加密凭据并清除临时密码");
+            SetPending(connection, true, "fixture-secret");
+            completed = Complete(connection, provider, false);
+            Assert(completed.Success && !settings.RememberCredentials && !File.Exists(settings.IsolatedCredentialPath),
+                "双重验证未选择记住密码时清除旧凭据");
+
+            SetPending(connection, true, "fixture-secret");
+            var forgot = await connection.ForgetSavedCredentialsAsync();
+            completed = Complete(connection, provider);
+            Assert(forgot.Success && completed.Success && !settings.RememberCredentials && !File.Exists(settings.IsolatedCredentialPath),
+                "双重验证期间清除凭据后不会重新保存密码");
+            var gate = (SemaphoreSlim)connectionType.GetField("_connectionLock", flags)!.GetValue(connection)!;
+            await gate.WaitAsync();
+            try
+            {
+                var busy = await connection.SubmitTwoFactorCodeAsync("123456");
+                Assert(!busy.Success && busy.Message.Contains("正在执行", StringComparison.Ordinal), "双重验证与连接操作互斥");
+            }
+            finally { gate.Release(); }
+            await using var lostApi = new FnOsApiClient();
+            await using var lostProvider = new FnOsPersonalStorageProvider(lostApi);
+            connectionType.GetProperty(nameof(NasConnectionService.CurrentStorageProvider))!.SetValue(connection, lostProvider);
+            settings.RememberCredentials = true;
+            SetPending(connection, false, null);
+            connectionType.GetProperty(nameof(NasConnectionService.TwoFactorRequired))!.SetValue(connection, true);
+            connectionType.GetProperty(nameof(NasConnectionService.TwoFactorAccessToken))!.SetValue(connection, "fixture-token");
+            var lostMethod = connectionType.GetMethod("HandleFnOsConnectionLostAsync", flags)!;
+            await (Task)lostMethod.Invoke(connection, new object[] { lostProvider })!;
+            Assert(!connection.TwoFactorRequired && connection.TwoFactorAccessToken == null &&
+                connectionType.GetField("_reconnectCts", flags)!.GetValue(connection) == null,
+                "等待验证码时断线会清除会话，不会使用旧凭据自动重连");
+            int factorNotifications = 0;
+            connection.PropertyChanged += (_, e) => { if (e.PropertyName == nameof(NasConnectionService.TwoFactorRequired)) factorNotifications++; };
+            SetPending(connection, true, "fixture-secret");
+            connectionType.GetProperty(nameof(NasConnectionService.TwoFactorRequired))!.SetValue(connection, true);
+            connectionType.GetProperty(nameof(NasConnectionService.TwoFactorAccessToken))!.SetValue(connection, "fixture-token");
+            var invalid = await connection.ConnectAsync("", "fixture-user", "fixture-secret", true);
+            Assert(!invalid.Success && !manager.IsNasOnline && !connection.TwoFactorRequired && connection.TwoFactorAccessToken == null &&
+                connectionType.GetField("_pendingTwoFactorPassword", flags)!.GetValue(connection) == null && factorNotifications >= 2,
+                "开始无效的新连接时清除旧的验证码会话并停止新同步");
+            SetPending(connection, true, "fixture-secret");
+            await connection.DisconnectAsync();
+            Assert(connectionType.GetField("_pendingTwoFactorPassword", flags)!.GetValue(connection) == null &&
+                !(bool)connectionType.GetField("_pendingTwoFactorRemember", flags)!.GetValue(connection)!,
+                "断开连接时清除待验证的临时密码");
+            if (!await manager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("双重验证测试未停止");
+
+            var failing = AppSettings.CreateForTest(Path.Combine(root, "missing-two-factor-parent", "settings.json"));
+            failing.IsolatedCredentialPath = Path.Combine(root, "two-factor-failed-credentials.dat");
+            using var failingManager = new TaskManager(failing, new SmbAuthService(), new LogService(Path.Combine(root, "two-factor-failed-logs")));
+            var failingConnection = new NasConnectionService(new SmbAuthService(), failing, failingManager);
+            SetPending(failingConnection, true, "fixture-secret");
+            var failed = Complete(failingConnection, provider);
+            Assert(!failed.Success && !failingConnection.IsConnected && !failingManager.IsNasOnline && !File.Exists(failing.IsolatedCredentialPath),
+                "双重验证后设置保存失败时不启动同步或保存凭据");
+            if (!await failingManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("双重验证失败测试未停止");
         }
 
         static async Task TestSingleInstanceAsync()

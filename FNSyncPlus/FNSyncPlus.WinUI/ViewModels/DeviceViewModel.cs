@@ -44,7 +44,10 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _statusMessage = string.Empty;
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(CanChangeRememberPassword))]
         private bool _isBusy = false;
+
+        public bool CanChangeRememberPassword => !IsBusy;
 
         [ObservableProperty]
         private bool _isSuccess = false;
@@ -228,7 +231,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             IsBusy = true;
             try
             {
-                var (success, msg) = await _connectionService.SubmitTwoFactorCodeAsync(TwoFactorCode);
+                var (success, msg) = await _connectionService.SubmitTwoFactorCodeAsync(TwoFactorCode, RememberPassword);
                 IsSuccess = success;
                 StatusMessage = msg;
                 if (success)

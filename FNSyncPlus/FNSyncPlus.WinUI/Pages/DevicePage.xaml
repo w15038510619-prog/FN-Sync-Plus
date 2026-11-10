@@ -177,7 +177,7 @@
                         </Border>
 
                         <!-- Remember Password -->
-                        <CheckBox Content="记住凭据 (使用 Windows DPAPI 本地强加密安全存储)" IsChecked="{x:Bind ViewModel.RememberPassword, Mode=TwoWay}" FontSize="12" Width="380" />
+                        <CheckBox Content="记住凭据 (使用 Windows DPAPI 本地强加密安全存储)" IsChecked="{x:Bind ViewModel.RememberPassword, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanChangeRememberPassword, Mode=OneWay}" FontSize="12" Width="380" />
 
                         <!-- Action Buttons -->
                         <StackPanel Orientation="Horizontal" Spacing="12" Width="380">

@@ -31,6 +31,8 @@ namespace FNSyncPlus.Core.Services
 
         private readonly SemaphoreSlim _connectionLock = new(1, 1);
         private CancellationTokenSource? _activeConnectionCts;
+        private string? _pendingTwoFactorPassword;
+        private bool _pendingTwoFactorRemember;
         private readonly object _reconnectLock = new();
         private CancellationTokenSource? _reconnectCts;
         private long _connectionIntentVersion;
@@ -62,7 +64,17 @@ namespace FNSyncPlus.Core.Services
         public StorageProviderType CurrentProviderType { get; set; } = StorageProviderType.FnOsPersonal;
         public int? CurrentUid { get; private set; }
         public string PersonalRootDisplay { get; private set; } = string.Empty;
-        public bool TwoFactorRequired { get; private set; }
+        private bool _twoFactorRequired;
+        public bool TwoFactorRequired
+        {
+            get => _twoFactorRequired;
+            private set
+            {
+                if (_twoFactorRequired == value) return;
+                _twoFactorRequired = value;
+                OnPropertyChanged();
+            }
+        }
         public string? TwoFactorAccessToken { get; private set; }
 
         // TLS 证书待核对与信任机制（严格防护中间人攻击与自签名证书）
@@ -242,20 +254,6 @@ namespace FNSyncPlus.Core.Services
             string server, string user, string password, bool rememberCredentials,
             StorageProviderType providerType, string? twoFactorCode, CancellationToken reconnectToken)
         {
-            if (string.IsNullOrWhiteSpace(server) || string.IsNullOrWhiteSpace(user))
-            {
-                LastError = "请输入 NAS 地址和用户名";
-                State = NasConnectionState.AuthenticationFailed;
-                return (false, LastError);
-            }
-            if (providerType == StorageProviderType.FnOsPersonal && server.Trim().StartsWith("http://", StringComparison.OrdinalIgnoreCase))
-            {
-                LastError = "飞牛连接必须使用 HTTPS 加密；请将地址改为 https:// 或省略协议前缀。";
-                State = NasConnectionState.AuthenticationFailed;
-                _taskManager.SetNasOnlineState(false);
-                return (false, LastError);
-            }
-
             if (!await _connectionLock.WaitAsync(0).ConfigureAwait(false))
             {
                 return (false, "当前已有连接或断开操作正在执行，请稍候。");
@@ -269,12 +267,28 @@ namespace FNSyncPlus.Core.Services
 
             try
             {
+                _pendingTwoFactorPassword = null;
+                _pendingTwoFactorRemember = false;
+                TwoFactorRequired = false;
+                TwoFactorAccessToken = null;
+                if (string.IsNullOrWhiteSpace(server) || string.IsNullOrWhiteSpace(user))
+                {
+                    LastError = "请输入 NAS 地址和用户名";
+                    State = NasConnectionState.AuthenticationFailed;
+                    _taskManager.SetNasOnlineState(false);
+                    return (false, LastError);
+                }
+                if (providerType == StorageProviderType.FnOsPersonal && server.Trim().StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+                {
+                    LastError = "飞牛连接必须使用 HTTPS 加密；请将地址改为 https:// 或省略协议前缀。";
+                    State = NasConnectionState.AuthenticationFailed;
+                    _taskManager.SetNasOnlineState(false);
+                    return (false, LastError);
+                }
                 State = NasConnectionState.Connecting;
                 LastError = string.Empty;
                 ServerAddress = server.Trim();
                 Username = user.Trim();
-                TwoFactorRequired = false;
-                TwoFactorAccessToken = null;
                 CertificateConfirmationRequired = false;
                 UntrustedCertificateInfo = null;
                 CurrentProviderType = providerType;
@@ -378,10 +392,13 @@ namespace FNSyncPlus.Core.Services
 
                     if (authResult.TwoFactorRequired)
                     {
-                        TwoFactorRequired = true;
                         TwoFactorAccessToken = authResult.TwoFactorAccessToken;
                         await ReplaceCurrentProviderAsync(fnProvider).ConfigureAwait(false);
+                        _pendingTwoFactorRemember = rememberCredentials;
+                        _pendingTwoFactorPassword = password;
                         LastError = authResult.ErrorMessage;
+                        _taskManager.SetNasOnlineState(false);
+                        TwoFactorRequired = true;
                         State = NasConnectionState.AuthenticationFailed;
                         return (false, authResult.ErrorMessage);
                     }
@@ -494,35 +511,68 @@ namespace FNSyncPlus.Core.Services
         /// <summary>
         /// 提交 TOTP 两步验证动态码完成登录
         /// </summary>
-        public async Task<(bool Success, string Message)> SubmitTwoFactorCodeAsync(string twoFactorCode)
+        public async Task<(bool Success, string Message)> SubmitTwoFactorCodeAsync(string twoFactorCode, bool? rememberCredentials = null)
         {
             if (string.IsNullOrWhiteSpace(twoFactorCode))
             {
                 return (false, "请输入 6 位动态验证码。");
             }
 
-            if (CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider && !string.IsNullOrEmpty(TwoFactorAccessToken))
+            if (!await _connectionLock.WaitAsync(0).ConfigureAwait(false))
+                return (false, "当前已有连接或断开操作正在执行，请稍候。");
+            try
             {
-                var authResult = await fnProvider.VerifyTwoFactorCodeAsync(TwoFactorAccessToken, twoFactorCode.Trim(), Username).ConfigureAwait(false);
-                if (authResult.Success)
+                if (CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider && !string.IsNullOrEmpty(TwoFactorAccessToken))
                 {
-                    TwoFactorRequired = false;
-                    TwoFactorAccessToken = null;
-                    CurrentUid = authResult.UserUid;
-                    PersonalRootDisplay = fnProvider.RootDisplayPath;
-                    _taskManager.SetNasOnlineState(true);
-                    LastConnectedTime = DateTime.Now;
-                    State = NasConnectionState.Connected;
-                    return (true, $"两步验证成功！已连接飞牛官方「我的文件」个人空间 (UID: {CurrentUid})。");
-                }
-                else
-                {
+                    var authResult = await fnProvider.VerifyTwoFactorCodeAsync(TwoFactorAccessToken, twoFactorCode.Trim(), Username).ConfigureAwait(false);
+                    if (authResult.Success) return CompleteTwoFactorLogin(fnProvider, authResult, rememberCredentials);
                     LastError = authResult.ErrorMessage;
                     return (false, authResult.ErrorMessage);
                 }
+                return (false, "当前无待验证的两步验证会话。");
             }
+            finally { _connectionLock.Release(); }
+        }
 
-            return (false, "当前无待验证的两步验证会话。");
+        // Called only while _connectionLock is held, after successful second-factor authentication.
+        private (bool Success, string Message) CompleteTwoFactorLogin(FnOsPersonalStorageProvider provider, StorageAuthResult authResult, bool? rememberCredentials)
+        {
+            bool remember = rememberCredentials ?? _pendingTwoFactorRemember;
+            string? password = _pendingTwoFactorPassword;
+            _pendingTwoFactorRemember = false;
+            _pendingTwoFactorPassword = null;
+            _settings.NasServer = ServerAddress;
+            _settings.Username = Username;
+            _settings.RememberCredentials = remember;
+            try { _settings.Save(); }
+            catch (Exception ex)
+            {
+                TwoFactorRequired = false;
+                TwoFactorAccessToken = null;
+                LastError = $"两步验证已通过，但连接设置保存失败，请重新连接：{ex.Message}";
+                State = NasConnectionState.AuthenticationFailed;
+                _taskManager.SetNasOnlineState(false);
+                return (false, LastError);
+            }
+            string? warning = null;
+            if (remember && (!_settings.IsInMemoryOnly || !string.IsNullOrEmpty(_settings.IsolatedCredentialPath)))
+            {
+                if (password == null || !SmbAuthService.SaveCredentials(ServerAddress, Username, password, _settings.IsolatedCredentialPath))
+                    warning = "登录凭据未能保存，断线后可能需要重新登录。";
+            }
+            else if (!remember && (!_settings.IsInMemoryOnly || !string.IsNullOrEmpty(_settings.IsolatedCredentialPath)) &&
+                !SmbAuthService.ClearSavedCredentials(_settings.IsolatedCredentialPath))
+                warning = "旧的本机登录凭据未能清除，请检查文件权限。";
+
+            TwoFactorRequired = false;
+            TwoFactorAccessToken = null;
+            CurrentUid = authResult.UserUid;
+            PersonalRootDisplay = provider.RootDisplayPath;
+            _taskManager.SetNasOnlineState(true);
+            LastConnectedTime = DateTime.Now;
+            State = NasConnectionState.Connected;
+            LastError = warning ?? string.Empty;
+            return (true, $"两步验证成功！已连接飞牛官方「我的文件」个人空间 (UID: {CurrentUid})。{warning}");
         }
 
         /// <summary>
@@ -550,6 +600,8 @@ namespace FNSyncPlus.Core.Services
             {
                 _activeConnectionCts?.Cancel();
                 _activeConnectionCts = null;
+                _pendingTwoFactorPassword = null;
+                _pendingTwoFactorRemember = false;
 
                 // 1. 先安全通知 TaskManager 标记 NAS 离线，停止依赖当前连接的活动
                 _taskManager.SetNasOnlineState(false);
@@ -657,17 +709,23 @@ namespace FNSyncPlus.Core.Services
         private async Task HandleFnOsConnectionLostAsync(FnOsPersonalStorageProvider provider)
         {
             long intentVersion;
+            bool waitingForTwoFactor;
             await _connectionLock.WaitAsync().ConfigureAwait(false);
             try
             {
                 if (!ReferenceEquals(CurrentStorageProvider, provider) || provider.IsAuthenticated) return;
+                waitingForTwoFactor = TwoFactorRequired;
+                _pendingTwoFactorPassword = null;
+                _pendingTwoFactorRemember = false;
+                TwoFactorRequired = false;
+                TwoFactorAccessToken = null;
                 LastError = "飞牛控制连接已中断，请重新连接后继续备份。";
                 State = NasConnectionState.ConnectionLost;
                 _taskManager.SetNasOnlineState(false);
                 lock (_reconnectLock) intentVersion = _connectionIntentVersion;
             }
             finally { _connectionLock.Release(); }
-            StartAutomaticReconnect(intentVersion);
+            if (!waitingForTwoFactor) StartAutomaticReconnect(intentVersion);
         }
 
         private void CancelAutomaticReconnect(bool disconnectRequested)
@@ -694,6 +752,8 @@ namespace FNSyncPlus.Core.Services
             {
                 // An already-running login may have saved its preference while we waited.
                 _settings.RememberCredentials = false;
+                _pendingTwoFactorPassword = null;
+                _pendingTwoFactorRemember = false;
                 bool removed = _settings.IsInMemoryOnly && string.IsNullOrEmpty(_settings.IsolatedCredentialPath) ||
                     SmbAuthService.ClearSavedCredentials(_settings.IsolatedCredentialPath);
                 try { _settings.Save(); }
