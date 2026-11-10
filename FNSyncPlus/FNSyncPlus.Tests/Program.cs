@@ -336,7 +336,7 @@ namespace FNSyncPlus.Tests
                 try { await manifestManager.LoadManifestAsync(faultProvider, "backup"); }
                 catch (InvalidDataException) { refused = true; }
                 Assert(refused, "主备清单均损坏时拒绝返回空清单");
-                Assert(new FnOsFileListResponse { Files = new() }.IsSuccess, "fnOS 文件列表允许省略 result 的有效响应");
+                Assert(!new FnOsFileListResponse { Files = new() }.IsSuccess, "fnOS 文件列表批次未收到完成标记前不能视为成功");
                 Assert(new FnOsFileListResponse { Result = "succ" }.IsSuccess, "fnOS 空目录允许成功响应省略 files");
                 Assert(!new FnOsFileListResponse().IsSuccess && !new FnOsFileListResponse { Result = "fail", Files = new() }.IsSuccess, "fnOS 文件列表拒绝空响应或明确失败");
                 await using (var rpcClient = new FnOsApiClient())
@@ -365,21 +365,53 @@ namespace FNSyncPlus.Tests
                     catch (InvalidOperationException) { sendFailed = true; }
                     Assert(sendFailed && taskRequests.Count == 0, "异步 RPC 发送失败时清除待处理请求");
                     var normalRequests = (Dictionary<string, TaskCompletionSource<string>>)type.GetField("_pendingRequests", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rpcClient)!;
+                    var fileLists = (Dictionary<string, List<FnOsFileEntry>>)type.GetField("_pendingFileLists", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(rpcClient)!;
+                    var listPending = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    normalRequests.Add("list-test", listPending); fileLists.Add("list-test", new());
+                    process.Invoke(rpcClient, new object[] { "{\"reqid\":\"list-test\",\"files\":[{\"name\":\"first\",\"dir\":1}]}" });
+                    process.Invoke(rpcClient, new object[] { "{\"reqid\":\"list-test\",\"files\":[{\"name\":\"second\",\"dir\":0}]}" });
+                    bool listWaited = !listPending.Task.IsCompleted && fileLists["list-test"].Count == 2;
+                    process.Invoke(rpcClient, new object[] { "{\"reqid\":\"list-test\",\"result\":\"succ\"}" });
+                    var completeList = System.Text.Json.JsonSerializer.Deserialize<FnOsFileListResponse>(await listPending.Task);
+                    Assert(listWaited && completeList?.IsSuccess == true && completeList.Files?.Select(f => f.Name).SequenceEqual(new[] { "first", "second" }) == true &&
+                        !fileLists.ContainsKey("list-test"), "飞牛目录列表合并全部批次并等待最终成功标记");
+                    var failedList = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    normalRequests.Add("failed-list", failedList); fileLists.Add("failed-list", new());
+                    process.Invoke(rpcClient, new object[] { "{\"reqid\":\"failed-list\",\"files\":[{\"name\":\"partial\"}]}" });
+                    process.Invoke(rpcClient, new object[] { "{\"reqid\":\"failed-list\",\"result\":\"fail\",\"errno\":4100}" });
+                    var failedResponse = System.Text.Json.JsonSerializer.Deserialize<FnOsFileListResponse>(await failedList.Task);
+                    Assert(failedResponse?.IsSuccess == false && !fileLists.ContainsKey("failed-list"), "飞牛目录列表中途失败时不报告列表读取成功");
+                    var malformedList = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    normalRequests.Add("invalid-list", malformedList); fileLists.Add("invalid-list", new());
+                    process.Invoke(rpcClient, new object[] { "{\"reqid\":\"invalid-list\",\"files\":{}}" });
+                    Assert(malformedList.Task.IsFaulted && !fileLists.ContainsKey("invalid-list"), "飞牛目录列表批次损坏时拒绝返回部分数据");
+                    _ = malformedList.Task.Exception;
+                    var duplicateList = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    normalRequests.Add("duplicate-list", duplicateList); fileLists.Add("duplicate-list", new());
+                    process.Invoke(rpcClient, new object[] { "{\"reqid\":\"duplicate-list\",\"files\":[{\"name\":\"same\"},{\"name\":\"SAME\"}],\"result\":\"succ\"}" });
+                    Assert(duplicateList.Task.IsFaulted && !fileLists.ContainsKey("duplicate-list"), "飞牛目录列表重复条目时拒绝不确定结果");
+                    _ = duplicateList.Task.Exception;
+                    bool listSendFailed = false;
+                    try { await rpcClient.ListFilesAsync("test"); }
+                    catch (InvalidOperationException) { listSendFailed = true; }
+                    Assert(listSendFailed && fileLists.Count == 0, "飞牛目录列表发送失败后清除所有批次状态");
                     var socketField = type.GetField("_webSocket", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
                     var stopped = type.GetMethod("MarkControlChannelStopped", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
                     using var socket = new System.Net.WebSockets.ClientWebSocket();
                     socketField.SetValue(rpcClient, socket);
                     var pendingNormal = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
                     var pendingLong = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    var pendingList = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
                     normalRequests.Add("normal-disconnect", pendingNormal);
                     taskRequests.Add("long-disconnect", pendingLong);
+                    normalRequests.Add("list-disconnect", pendingList); fileLists.Add("list-disconnect", new());
                     int lostEvents = 0;
                     rpcClient.ConnectionLost += () => lostEvents++;
                     stopped.Invoke(rpcClient, new object[] { socket, false });
                     Assert(!rpcClient.IsAuthenticated && lostEvents == 1 && pendingNormal.Task.IsFaulted && pendingLong.Task.IsFaulted &&
-                        normalRequests.Count == 0 && taskRequests.Count == 0,
+                        pendingList.Task.IsFaulted && normalRequests.Count == 0 && taskRequests.Count == 0 && fileLists.Count == 0,
                         "控制连接意外中断立即撤销登录状态并结束等待的请求");
-                    _ = pendingNormal.Task.Exception; _ = pendingLong.Task.Exception;
+                    _ = pendingNormal.Task.Exception; _ = pendingLong.Task.Exception; _ = pendingList.Task.Exception;
                     using var newSocket = new System.Net.WebSockets.ClientWebSocket();
                     socketField.SetValue(rpcClient, newSocket);
                     rpcClient.SetAuthenticatedForTesting("isolated-test", 1, 1);
@@ -2062,6 +2094,53 @@ namespace FNSyncPlus.Tests
             Assert(occupiedTask.State == TaskSyncState.Error && occupiedTask.ExperimentalPendingInitialization &&
                 File.ReadAllText(Path.Combine(root, occupiedTask.DestinationFolder, "current", "sample.txt")) == "updated before restart",
                 "重启前待创建任务遇到已存在目标时拒绝覆盖并保留数据");
+
+            var firstSessionId = Guid.NewGuid();
+            string firstRemoteRoot = "Codex_FN_Test_" + Guid.NewGuid().ToString("N");
+            string firstSource = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", "FirstPublicationSource_" + firstSessionId.ToString("N"));
+            Directory.CreateDirectory(firstSource);
+            Directory.CreateDirectory(Path.Combine(root, firstRemoteRoot));
+            File.WriteAllText(Path.Combine(firstSource, "sample.txt"), "updated before restart");
+            var interruptedSettings = AppSettings.LoadIsolatedTestSession(firstSessionId);
+            interruptedSettings.SetIsolatedTestBoundary(firstRemoteRoot);
+            var interruptedTask = new SyncTask { TaskName = "首次发布中断", SourceFolder = firstSource, DestinationFolder = firstRemoteRoot + "/reattach-first-publication",
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly, SettlingDelaySeconds = 1 };
+            using var interruptedManager = new TaskManager(interruptedSettings, new SmbAuthService(), new LogService(Path.Combine(root, "first-publication-fail-logs")), experimentalVersionedBackup: true);
+            interruptedManager.StorageProviderSupplier = () => provider;
+            interruptedManager.AddTask(interruptedTask);
+            provider.FailUploadSuffix = "/receipt.json";
+            var interruptedDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            interruptedManager.TaskStateChanged += t => { if (t.TaskId == interruptedTask.TaskId && t.State == TaskSyncState.Error) interruptedDone.TrySetResult(); };
+            interruptedManager.TriggerSync(interruptedTask.TaskId);
+            if (await Task.WhenAny(interruptedDone.Task, Task.Delay(15000)) != interruptedDone.Task) throw new TimeoutException("首次发布故障注入超时");
+            provider.FailUploadSuffix = null;
+            var interruptedReload = AppSettings.LoadIsolatedTestSession(firstSessionId);
+            interruptedReload.SetIsolatedTestBoundary(firstRemoteRoot);
+            Assert(!interruptedReload.Tasks.Single().ExperimentalPendingInitialization && interruptedReload.Tasks.Single().ExperimentalFirstPublicationPending &&
+                (await new VersionedManifestStore().LoadAsync(provider, interruptedTask.DestinationFolder)) != null,
+                "首次版本已提交但物理准备失败时持久记录待发布状态");
+            if (!await interruptedManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("首次发布故障后未停止");
+            interruptedReload.IsInMemoryOnly = true;
+            var resumedTask = interruptedReload.Tasks.Single();
+            using var resumedManager = new TaskManager(interruptedReload, new SmbAuthService(), new LogService(Path.Combine(root, "first-publication-resume-logs")), experimentalVersionedBackup: true);
+            resumedManager.StorageProviderSupplier = () => provider;
+            var resumedDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            resumedManager.TaskStateChanged += t => { if (t.TaskId == resumedTask.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) resumedDone.TrySetResult(); };
+            resumedManager.TriggerSync(resumedTask.TaskId);
+            if (await Task.WhenAny(resumedDone.Task, Task.Delay(15000)) != resumedDone.Task) throw new TimeoutException("首次发布重启续接超时");
+            Assert(resumedTask.State == TaskSyncState.Completed && !resumedTask.ExperimentalFirstPublicationPending && resumedTask.LastUploadedFiles == 0 &&
+                File.ReadAllText(Path.Combine(root, resumedTask.DestinationFolder, "current", "sample.txt")) == "updated before restart",
+                "首次物理发布未开始时重启续接已提交版本，不重复上传");
+
+            string foreignTarget = "reattach-first-foreign-current";
+            await backup.CreateNewAsync(provider, source, foreignTarget);
+            Directory.CreateDirectory(Path.Combine(root, foreignTarget, "current"));
+            File.WriteAllText(Path.Combine(root, foreignTarget, "current", "keep.txt"), "foreign data");
+            bool refusedForeignCurrent = false;
+            try { await new ExperimentalProjectionDiscovery().DiscoverFirstPublicationAsync(provider, foreignTarget); }
+            catch (InvalidDataException) { refusedForeignCurrent = true; }
+            Assert(refusedForeignCurrent && File.ReadAllText(Path.Combine(root, foreignTarget, "current", "keep.txt")) == "foreign data",
+                "首次发布续接遇到无法确认的当前目录时拒绝覆盖");
         }
 
         static async Task TestReconnectSchedulingAsync(string root)

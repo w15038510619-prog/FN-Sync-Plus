@@ -719,8 +719,11 @@ namespace FNSyncPlus.Core.Services
                     {
                         task.CurrentFile = "正在核验隔离备份的已有物理目录及发布记录";
                         TaskStateChanged?.Invoke(task);
-                        var found = await new ExperimentalProjectionDiscovery().DiscoverAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false);
-                        _isolatedProjections[task.TaskId] = new IsolatedProjectionState(found.Plan, found.Publication);
+                        var discovery = new ExperimentalProjectionDiscovery();
+                        var found = task.ExperimentalFirstPublicationPending
+                            ? await discovery.DiscoverFirstPublicationAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false)
+                            : await discovery.DiscoverAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false);
+                        if (found != null) _isolatedProjections[task.TaskId] = new IsolatedProjectionState(found.Plan, found.Publication);
                     }
                     AppendTaskLog(task, "INFO", "隔离试验：正在准备版本化内容及物理候选目录。");
                     var experimental = new ExperimentalVersionedBackup();
@@ -730,12 +733,19 @@ namespace FNSyncPlus.Core.Services
                         task.CurrentFile = message;
                         TaskStateChanged?.Invoke(task);
                     };
-                    var result = task.RequiresNewExperimentalBackup
+                    bool initializing = task.RequiresNewExperimentalBackup;
+                    var result = initializing
                         ? string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot)
                             ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay).ConfigureAwait(false)
                             : await experimental.CreateNewFromExistingAsync(provider, task.SourceFolder, task.DestinationFolder, task.ExperimentalExistingRoot, taskToken, task.Strategy, settlingDelay).ConfigureAwait(false)
                         : await experimental.RunAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay).ConfigureAwait(false);
                     task.RequiresNewExperimentalBackup = false;
+                    if (initializing)
+                    {
+                        task.ExperimentalPendingInitialization = false;
+                        task.ExperimentalFirstPublicationPending = true;
+                        _settings.Save(); // A committed first version can now be reattached after restart.
+                    }
                     reusedFiles = result.ReusedFiles;
                     bool hasPrevious = _isolatedProjections.TryGetValue(task.TaskId, out var previousProjection);
                     if (hasPrevious && previousProjection!.Plan.VersionId == result.Snapshot.Id)
@@ -768,6 +778,7 @@ namespace FNSyncPlus.Core.Services
                         _isolatedProjections[task.TaskId] = new IsolatedProjectionState(plan, publication);
                     }
                     task.ExperimentalPendingInitialization = false;
+                    task.ExperimentalFirstPublicationPending = false;
                     if (reusedFiles > 0) AppendTaskLog(task, "INFO", $"隔离试验：已复用 {reusedFiles} 个 NAS 文件，上传 {result.UploadedFiles} 个文件。");
                     report = new SyncProgressReport {
                         State = SyncState.Completed, TotalFiles = result.Snapshot.Manifest.Files.Count,

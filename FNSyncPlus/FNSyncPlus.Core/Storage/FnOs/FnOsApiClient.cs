@@ -42,6 +42,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
         private readonly SemaphoreSlim _wsLock = new(1, 1);
         private readonly Dictionary<string, TaskCompletionSource<string>> _pendingRequests = new();
         private readonly Dictionary<string, TaskCompletionSource<string>> _pendingTaskRequests = new();
+        private readonly Dictionary<string, List<FnOsFileEntry>> _pendingFileLists = new();
         private CancellationTokenSource? _receiveCts;
         private Task? _receiveLoopTask;
         private CancellationTokenSource? _heartbeatCts;
@@ -305,6 +306,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 pending = _pendingRequests.Values.Concat(_pendingTaskRequests.Values).ToList();
                 _pendingRequests.Clear();
                 _pendingTaskRequests.Clear();
+                _pendingFileLists.Clear();
             }
             foreach (var request in pending)
                 request.TrySetException(new IOException("飞牛控制连接已中断，已发送的远端操作结果可能不确定"));
@@ -391,9 +393,45 @@ namespace FNSyncPlus.Core.Storage.FnOs
                     if (!string.IsNullOrEmpty(reqId))
                     {
                         TaskCompletionSource<string>? completed = null;
+                        Exception? listError = null;
+                        string response = jsonBody;
                         lock (_pendingRequests)
                         {
-                            if (_pendingTaskRequests.TryGetValue(reqId, out var taskCompletion))
+                            if (_pendingFileLists.TryGetValue(reqId, out var fileList) && _pendingRequests.TryGetValue(reqId, out var listCompletion))
+                            {
+                                try
+                                {
+                                    if (doc.RootElement.TryGetProperty("files", out var files))
+                                    {
+                                        if (files.ValueKind != JsonValueKind.Array) throw new InvalidDataException("飞牛目录列表批次无效");
+                                        var batch = JsonSerializer.Deserialize<List<FnOsFileEntry>>(files.GetRawText())
+                                            ?? throw new InvalidDataException("飞牛目录列表批次为空");
+                                        if (batch.Any(item => item == null || string.IsNullOrWhiteSpace(item.Name)))
+                                            throw new InvalidDataException("飞牛目录列表包含无效条目");
+                                        fileList.AddRange(batch);
+                                    }
+                                    var frame = JsonSerializer.Deserialize<FnOsFileListResponse>(jsonBody)
+                                        ?? throw new InvalidDataException("飞牛目录列表响应无效");
+                                    if (frame.Result != null || (frame.ErrNo.HasValue && frame.ErrNo.Value != 0))
+                                    {
+                                        if (frame.IsSuccess && fileList.Select(item => item.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != fileList.Count)
+                                            throw new InvalidDataException("飞牛目录列表包含重复条目，拒绝使用不确定的结果");
+                                        frame.Files = fileList;
+                                        response = JsonSerializer.Serialize(frame);
+                                        _pendingFileLists.Remove(reqId);
+                                        _pendingRequests.Remove(reqId);
+                                        completed = listCompletion;
+                                    }
+                                }
+                                catch (Exception ex) when (ex is JsonException or InvalidDataException or NotSupportedException)
+                                {
+                                    _pendingFileLists.Remove(reqId);
+                                    _pendingRequests.Remove(reqId);
+                                    completed = listCompletion;
+                                    listError = ex;
+                                }
+                            }
+                            else if (_pendingTaskRequests.TryGetValue(reqId, out var taskCompletion))
                             {
                                 bool terminalResult = doc.RootElement.TryGetProperty("result", out var result) &&
                                     result.ValueKind == JsonValueKind.String && result.GetString() is "succ" or "fail" or "partialCompleted" or "canceled";
@@ -411,7 +449,8 @@ namespace FNSyncPlus.Core.Storage.FnOs
                                 completed = tcs;
                             }
                         }
-                        completed?.TrySetResult(jsonBody);
+                        if (listError != null) completed?.TrySetException(listError);
+                        else completed?.TrySetResult(response);
                     }
                 }
             }
@@ -640,7 +679,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
             => SendSignedRpcCoreAsync(method, payload, true, timeout, ct);
 
         private async Task<string> SendSignedRpcCoreAsync(string method, Dictionary<string, object?> payload,
-            bool waitForTerminalResult, TimeSpan timeout, CancellationToken ct)
+            bool waitForTerminalResult, TimeSpan timeout, CancellationToken ct, bool collectFileList = false)
         {
             if (!IsAuthenticated || _hmacKeyBytes == null)
                 throw new InvalidOperationException("未鉴权或缺少 HMAC 签名密钥，无法发送 RPC。");
@@ -657,6 +696,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
             lock (_pendingRequests)
             {
                 (waitForTerminalResult ? _pendingTaskRequests : _pendingRequests).Add(reqId, tcs);
+                if (collectFileList) _pendingFileLists.Add(reqId, new List<FnOsFileEntry>());
             }
             try
             {
@@ -672,6 +712,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 {
                     var pending = waitForTerminalResult ? _pendingTaskRequests : _pendingRequests;
                     if (pending.TryGetValue(reqId, out var current) && ReferenceEquals(current, tcs)) pending.Remove(reqId);
+                    if (collectFileList) _pendingFileLists.Remove(reqId);
                 }
             }
         }
@@ -687,7 +728,15 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 payload["path"] = subPath;
             }
 
-            string responseJson = await SendSignedRpcAsync("file.ls", payload, ct).ConfigureAwait(false);
+            string responseJson;
+            try
+            {
+                responseJson = await SendSignedRpcCoreAsync("file.ls", payload, false, TimeSpan.FromSeconds(60), ct, collectFileList: true).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                throw new TimeoutException("飞牛目录列表未在时限内完整返回，已停止读取。", ex);
+            }
             var result = JsonSerializer.Deserialize<FnOsFileListResponse>(responseJson);
 
             // 若在根目录下，自动捕获当前系统 VolumeId 与 UID

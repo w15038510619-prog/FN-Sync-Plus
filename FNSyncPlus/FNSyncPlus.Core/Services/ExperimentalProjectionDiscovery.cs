@@ -14,6 +14,14 @@ public sealed class ExperimentalProjectionDiscovery
     private sealed record Entry(string Journal, ProjectionIntent Intent);
 
     public async Task<Result> DiscoverAsync(INasStorageProvider provider, string backupRoot, CancellationToken token = default)
+        => await DiscoverCoreAsync(provider, backupRoot, false, token).ConfigureAwait(false)
+            ?? throw new InvalidDataException("无法唯一确定已发布目录");
+
+    /// <summary>Only for a task durably marked as awaiting its first physical publication.</summary>
+    public Task<Result?> DiscoverFirstPublicationAsync(INasStorageProvider provider, string backupRoot, CancellationToken token = default)
+        => DiscoverCoreAsync(provider, backupRoot, true, token);
+
+    private async Task<Result?> DiscoverCoreAsync(INasStorageProvider provider, string backupRoot, bool allowUnpublished, CancellationToken token)
     {
         ArgumentNullException.ThrowIfNull(provider);
         if (!PathHelper.IsSafeRelativePath(backupRoot)) throw new ArgumentException("备份目录路径无效");
@@ -28,7 +36,12 @@ public sealed class ExperimentalProjectionDiscovery
             if (await versions.LoadForWritingAsync(provider, root, token).ConfigureAwait(false) == null)
                 throw new InvalidDataException("备份没有已提交版本");
             var entries = new Dictionary<string, Entry>(StringComparer.OrdinalIgnoreCase);
-            foreach (var item in await provider.ListEntriesAsync(projections, token).ConfigureAwait(false))
+            var projectionsItem = await provider.GetItemAsync(projections, token).ConfigureAwait(false);
+            if (projectionsItem != null && !projectionsItem.IsDirectory) throw new InvalidDataException("发布记录路径不是目录");
+            var projectionItems = projectionsItem == null
+                ? Array.Empty<NasStorageItem>()
+                : (await provider.ListEntriesAsync(projections, token).ConfigureAwait(false)).ToArray();
+            foreach (var item in projectionItems)
             {
                 if (!item.Name.StartsWith("candidate-", StringComparison.Ordinal)) continue;
                 if (!item.IsDirectory || !Guid.TryParseExact(item.Name["candidate-".Length..], "N", out _))
@@ -55,6 +68,13 @@ public sealed class ExperimentalProjectionDiscovery
                     ExperimentalFirstProjection.ValidatePlan(intent.Next, version, provider.ProviderType);
                     if (!entries.TryAdd(journal, new Entry(journal, intent))) throw new InvalidDataException("发布记录重复");
                 }
+            }
+            if (allowUnpublished && entries.Count == 0)
+            {
+                if (projectionItems.Any(item => !item.Name.StartsWith("candidate-", StringComparison.Ordinal)) ||
+                    await provider.GetItemAsync($"{root}/current", token).ConfigureAwait(false) != null)
+                    throw new InvalidDataException("存在无法确认的物理目录或发布记录，拒绝首次发布");
+                return null;
             }
             var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             int firstCount = 0;
