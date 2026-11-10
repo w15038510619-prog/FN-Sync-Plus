@@ -246,6 +246,29 @@ namespace FNSyncPlus.Tests
                     catch (InvalidOperationException) { rejectedLabParents++; }
                 }
                 Assert(unboundedLabRejected && rejectedLabParents == 3, "隔离测试实验室只接受已授权沙盒或其子目录");
+                string previewDir = new string('中', 90);
+                string previewName = new string('中', 98) + "ab.txt";
+                string previewObject = ".fnsync/objects/obj-" + Guid.NewGuid().ToString("N");
+                var previewManifest = new Manifest
+                {
+                    Directories = new List<ManifestDirEntry> { new() { OriginalRel = previewDir, StoredRel = previewDir } },
+                    Files = new List<ManifestFileEntry>
+                    {
+                        new() { OriginalRel = previewDir + "/" + previewName, StoredRel = previewObject, IsLongName = true, Sha256 = new string('a', 64) },
+                        new() { OriginalRel = "normal.txt", StoredRel = ".fnsync/objects/obj-" + Guid.NewGuid().ToString("N"), Sha256 = new string('b', 64) },
+                        new() { OriginalRel = previewDir + "/short.txt", StoredRel = ".fnsync/objects/obj-" + Guid.NewGuid().ToString("N"), Sha256 = new string('c', 64) }
+                    }
+                };
+                var previewItems = ManifestMappingPreview.Create(previewManifest, versioned: true);
+                Assert(previewItems.Count == 2 && previewItems.Single(x => x.IsDirectory).NameUtf8Bytes == 270 &&
+                    previewItems.Single(x => !x.IsDirectory).NameUtf8Bytes == 300 &&
+                    previewItems.Single(x => !x.IsDirectory).StorageDescription == previewObject,
+                    "新版详情仅展示超长名称并明确使用对象路径，目录字节数按名称计算");
+                previewManifest.Files[0].StoredRel = "unexpected-location";
+                bool unsafePreviewRejected = false;
+                try { ManifestMappingPreview.Create(previewManifest, versioned: true); }
+                catch (InvalidDataException) { unsafePreviewRejected = true; }
+                Assert(unsafePreviewRejected, "新版详情拒绝展示无效的备份对象路径");
                 string config = Path.Combine(root, "settings.json");
                 var settings = AppSettings.CreateForTest(config);
                 settings.Tasks.Add(new SyncTask { TaskName = "失败测试", TaskId = "task_fail_legitimate", SourceFolder = @"C:\Fake" });

@@ -94,7 +94,7 @@ namespace FNSyncPlus.WinUI.Dialogs
             }
         }
 
-        public Visibility GetEmptyMappingsVisibility(bool hasMappings) => hasMappings ? Visibility.Collapsed : Visibility.Visible;
+        public Visibility GetEmptyMappingsVisibility(bool hasMappings, bool hasManifest) => hasManifest && !hasMappings ? Visibility.Visible : Visibility.Collapsed;
         public Visibility GetHasMappingsVisibility(bool hasMappings) => hasMappings ? Visibility.Visible : Visibility.Collapsed;
         public Visibility GetEmptyLogsVisibility(bool hasLogs) => hasLogs ? Visibility.Collapsed : Visibility.Visible;
         public Visibility GetHasLogsVisibility(bool hasLogs) => hasLogs ? Visibility.Visible : Visibility.Collapsed;

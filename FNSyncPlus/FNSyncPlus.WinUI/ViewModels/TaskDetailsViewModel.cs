@@ -13,6 +13,7 @@ using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
 using FNSyncPlus.Core.Storage;
 using FNSyncPlus.Core.Utils;
+using FNSyncPlus.WinUI.Services;
 
 namespace FNSyncPlus.WinUI.ViewModels
 {
@@ -115,6 +116,9 @@ namespace FNSyncPlus.WinUI.ViewModels
         private bool _hasLongNameMappings;
 
         [ObservableProperty]
+        private bool _hasManifestResult;
+
+        [ObservableProperty]
         private bool _hasLogs;
 
         [ObservableProperty]
@@ -209,20 +213,39 @@ namespace FNSyncPlus.WinUI.ViewModels
         private async Task LoadManifestDataAsync(SyncTask task)
         {
             LongNameMappings.Clear();
+            HasLongNameMappings = false;
+            HasManifestResult = false;
+            ManifestStatusNotice = "正在读取备份清单...";
 
             try
             {
                 Manifest? manifest = null;
+                bool invalidVersionRecords = false;
 
                 // A. 飞牛官方个人空间模式
                 if (task.ProviderType == StorageProviderType.FnOsPersonal)
                 {
                     if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider && fnProvider.IsAuthenticated)
                     {
-                        manifest = await _manifestManager.LoadManifestAsync(fnProvider, task.DestinationFolder);
+                        if (task.IsExperimentalBackup)
+                        {
+                            if ((!string.IsNullOrWhiteSpace(task.NasUsername) && !string.Equals(task.NasUsername, fnProvider.CurrentUsername, StringComparison.OrdinalIgnoreCase)) ||
+                                (!string.IsNullOrWhiteSpace(task.NasDeviceId) && !fnProvider.MatchesServerAddress(task.NasDeviceId)) ||
+                                (!AppServices.IsIsolatedTestSession && (string.IsNullOrWhiteSpace(task.NasUsername) || string.IsNullOrWhiteSpace(task.NasDeviceId))))
+                                throw new InvalidOperationException("飞牛账号或设备与任务不匹配，无法确认备份位置。");
+                            var inspected = await new VersionedManifestStore().InspectForRestoreAsync(fnProvider, task.DestinationFolder);
+                            manifest = inspected.Snapshot?.Manifest;
+                            invalidVersionRecords = inspected.HasInvalidRecords;
+                        }
+                        else manifest = await _manifestManager.LoadManifestAsync(fnProvider, task.DestinationFolder);
                     }
                     else
                     {
+                        if (task.IsExperimentalBackup)
+                        {
+                            ManifestStatusNotice = "飞牛未连接，暂时无法读取新版备份清单。";
+                            return;
+                        }
                         // 离线读取本地缓存清单
                         string cacheFile = ManifestManager.GetLocalCachePath(task.DestinationFolder);
                         if (File.Exists(cacheFile))
@@ -254,10 +277,17 @@ namespace FNSyncPlus.WinUI.ViewModels
                     }
                 }
 
-                if (manifest != null)
+                if (manifest != null && !manifest.IsNew)
                 {
+                    var mappings = ManifestMappingPreview.Create(manifest, task.IsExperimentalBackup);
                     // 状态提示
-                    if (manifest.IsFromCache)
+                    if (task.IsExperimentalBackup)
+                    {
+                        ManifestStatusNotice = invalidVersionRecords
+                            ? "发现异常提交，显示最后有效清单；文件位置为备份对象路径，未单独核验对象。"
+                            : "已读取新版备份清单；文件位置为备份对象路径，未单独核验对象。";
+                    }
+                    else if (manifest.IsFromCache)
                     {
                         ManifestStatusNotice = $"离线模式：已展示最近一次本地缓存清单 (缓存时间: {manifest.CachedAt:yyyy-MM-dd HH:mm})";
                     }
@@ -270,31 +300,18 @@ namespace FNSyncPlus.WinUI.ViewModels
                         ManifestStatusNotice = "ℹ 远端尚未建立文件映射或当前任务所有文件均符合 NAS 原名规范";
                     }
 
-                    // 映射超长目录
-                    foreach (var dir in manifest.Directories.Where(d => d.IsLongName || d.OriginalRel != d.StoredRel))
+                    foreach (var mapping in mappings)
                     {
                         LongNameMappings.Add(new LongNameMappingDisplayItem
                         {
-                            OriginalRel = dir.OriginalRel,
-                            StoredRel = dir.StoredRel,
-                            Utf8Bytes = PathHelper.GetUtf8ByteCount(dir.OriginalRel),
-                            Sha256 = "-- (目录)",
-                            EntryType = "目录"
+                            OriginalRel = mapping.OriginalRel,
+                            StoredRel = mapping.StorageDescription,
+                            Utf8Bytes = mapping.NameUtf8Bytes,
+                            Sha256 = mapping.Sha256,
+                            EntryType = mapping.IsDirectory ? "目录" : "文件"
                         });
                     }
-
-                    // 映射超长文件
-                    foreach (var file in manifest.Files.Where(f => f.IsLongName || f.OriginalRel != f.StoredRel))
-                    {
-                        LongNameMappings.Add(new LongNameMappingDisplayItem
-                        {
-                            OriginalRel = file.OriginalRel,
-                            StoredRel = file.StoredRel,
-                            Utf8Bytes = PathHelper.GetUtf8ByteCount(file.OriginalRel),
-                            Sha256 = file.Sha256,
-                            EntryType = "文件"
-                        });
-                    }
+                    HasManifestResult = true;
                 }
                 else
                 {
@@ -303,6 +320,8 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
             catch (Exception ex)
             {
+                LongNameMappings.Clear();
+                HasManifestResult = false;
                 ManifestStatusNotice = $"读取清单异常: {ex.Message}";
             }
 

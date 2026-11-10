@@ -115,18 +115,18 @@
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="类型" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock Grid.Column="1" Text="原始超长相对路径" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Grid.Column="2" Text="NAS 物理存储安全别名" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Grid.Column="2" Text="NAS 备份对象或别名" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock Grid.Column="3" Text="UTF-8 字节" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock Grid.Column="4" Text="SHA-256 哈希" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock Grid.Column="5" Text="操作" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
                         </Grid>
 
                         <!-- Empty State Notice -->
-                        <Grid Grid.Row="2" Visibility="{x:Bind GetEmptyMappingsVisibility(ViewModel.HasLongNameMappings), Mode=OneWay}" MinHeight="160">
+                        <Grid Grid.Row="2" Visibility="{x:Bind GetEmptyMappingsVisibility(ViewModel.HasLongNameMappings, ViewModel.HasManifestResult), Mode=OneWay}" MinHeight="160">
                             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8">
                                 <FontIcon Glyph="&#xE73E;" FontSize="32" Foreground="{ThemeResource SystemFillColorSuccessBrush}" HorizontalAlignment="Center" />
                                 <TextBlock Text="当前备份任务暂无超长文件名映射" FontSize="13" FontWeight="Medium" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
-                                <TextBlock Text="所有文件与目录名称均在 NAS UTF-8 255 字节限制内，100% 保持原名存储。" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
+                                <TextBlock Text="已读取清单，没有需要显示的超长名称。" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
                             </StackPanel>
                         </Grid>
 
