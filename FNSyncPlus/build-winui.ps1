@@ -32,7 +32,7 @@ try {
 FN Sync Plus v0.4.0-beta 测试候选包
 
 当前软件尚未完成正式验收，请勿用于正式文件或作为现有备份的唯一副本。
-默认入口仍有旧引擎历史内容风险，异机、真实断网及 NAS 断电等场景尚未验收。
+默认入口使用新版试验配置；旧引擎仍有历史内容风险。异机、真实断网及 NAS 断电等场景尚未验收。
 请查阅项目 README 和 docs/codex-integrity-audit.md 了解实际进度。
 '@ | Set-Content -LiteralPath (Join-Path $publishDir 'TEST_ONLY.txt') -Encoding UTF8
     $required = @('FNSyncPlus.WinUI.exe', 'resources.pri', 'hostfxr.dll', 'Microsoft.WindowsAppRuntime.Bootstrap.dll', 'TEST_ONLY.txt')

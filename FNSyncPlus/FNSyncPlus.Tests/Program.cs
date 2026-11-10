@@ -202,6 +202,21 @@ namespace FNSyncPlus.Tests
             try
             {
                 await TestSingleInstanceAsync();
+                Assert(DesktopStartupProfileSelector.Select(Array.Empty<string>()) == DesktopStartupProfile.VersionedBeta &&
+                    DesktopStartupProfileSelector.Select(new[] { "--versioned-beta" }) == DesktopStartupProfile.VersionedBeta &&
+                    DesktopStartupProfileSelector.Select(new[] { "--isolated-test-session" }) == DesktopStartupProfile.IsolatedTest &&
+                    DesktopStartupProfileSelector.Select(new[] { "--legacy-engine" }) == DesktopStartupProfile.LegacyEngine,
+                    "默认启动新版试验配置，隔离和旧引擎入口均需显式参数");
+                int conflictingProfilesRejected = 0;
+                foreach (var conflicting in new[] {
+                    new[] { "--isolated-test-session", "--legacy-engine" },
+                    new[] { "--isolated-test-session", "--versioned-beta" },
+                    new[] { "--legacy-engine", "--versioned-beta" } })
+                {
+                    try { DesktopStartupProfileSelector.Select(conflicting); }
+                    catch (InvalidOperationException) { conflictingProfilesRejected++; }
+                }
+                Assert(conflictingProfilesRejected == 3, "互相冲突的启动配置参数被拒绝");
                 string config = Path.Combine(root, "settings.json");
                 var settings = AppSettings.CreateForTest(config);
                 settings.Tasks.Add(new SyncTask { TaskName = "失败测试", TaskId = "task_fail_legitimate", SourceFolder = @"C:\Fake" });

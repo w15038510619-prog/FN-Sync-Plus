@@ -25,7 +25,16 @@ namespace FNSyncPlus.WinUI.Pages
             ViewModel = AppServices.GetService<TasksViewModel>();
             InitializeComponent();
             BtnViewLegacyTasks.Visibility = AppServices.GetService<AppSettings>().IsVersionedBetaProfile ? Visibility.Visible : Visibility.Collapsed;
-            BetaSafetyNotice.Visibility = AppServices.IsVersionedBetaSession ? Visibility.Visible : Visibility.Collapsed;
+            if (AppServices.IsVersionedBetaSession)
+            {
+                BetaSafetyNotice.Text = "新版备份仍在试用。旧任务配置已保留但不会自动运行，可点击“查看旧任务”；请勿让其他设备同时写入同一备份目录。";
+                BetaSafetyNotice.Visibility = Visibility.Visible;
+            }
+            else if (AppServices.IsLegacyEngineSession)
+            {
+                BetaSafetyNotice.Text = "旧版引擎仅供诊断，历史数据保护存在风险，请勿用于正式文件。";
+                BetaSafetyNotice.Visibility = Visibility.Visible;
+            }
 
             Loaded += OnPageLoaded;
             Unloaded += OnPageUnloaded;

@@ -12,6 +12,7 @@ namespace FNSyncPlus.WinUI.Services
         private static IServiceProvider? _serviceProvider;
         public static bool IsIsolatedTestSession { get; private set; }
         public static bool IsVersionedBetaSession { get; private set; }
+        public static bool IsLegacyEngineSession { get; private set; }
 
         public static IServiceProvider Provider => _serviceProvider 
             ?? throw new InvalidOperationException("AppServices has not been initialized.");
@@ -21,12 +22,11 @@ namespace FNSyncPlus.WinUI.Services
             var services = new ServiceCollection();
 
             // 1. Core Services & Data Configuration
-            IsIsolatedTestSession = Array.Exists(Environment.GetCommandLineArgs(),
-                arg => arg.Equals("--isolated-test-session", StringComparison.Ordinal));
             var args = Environment.GetCommandLineArgs();
-            IsVersionedBetaSession = Array.Exists(args, arg => arg.Equals("--versioned-beta", StringComparison.Ordinal));
-            if (IsIsolatedTestSession && IsVersionedBetaSession)
-                throw new InvalidOperationException("新版试用与隔离测试参数不能同时使用");
+            var profile = DesktopStartupProfileSelector.Select(args);
+            IsIsolatedTestSession = profile == DesktopStartupProfile.IsolatedTest;
+            IsVersionedBetaSession = profile == DesktopStartupProfile.VersionedBeta;
+            IsLegacyEngineSession = profile == DesktopStartupProfile.LegacyEngine;
             string? stateArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-state=", StringComparison.Ordinal));
             string? betaStateArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-beta-profile=", StringComparison.Ordinal));
             string? remoteArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-remote=", StringComparison.Ordinal));
