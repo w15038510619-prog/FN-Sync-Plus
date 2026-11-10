@@ -178,9 +178,13 @@ namespace FNSyncPlus.Core.Models
         [JsonIgnore]
         public bool IsExperimentalBackup { get; internal set; }
 
-        /// <summary>Only for an explicitly selected source in an in-memory isolated experiment.</summary>
-        [JsonIgnore]
+        /// <summary>Only for an explicitly selected source in an isolated experiment.</summary>
+        [JsonPropertyName("experimental_existing_root")]
         public string? ExperimentalExistingRoot { get; set; }
+
+        [JsonPropertyName("experimental_pending_initialization")]
+        [JsonInclude]
+        public bool ExperimentalPendingInitialization { get; internal set; }
 
         [JsonIgnore]
         public bool RequiresNewExperimentalBackup { get; internal set; }

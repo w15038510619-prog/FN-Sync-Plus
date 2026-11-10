@@ -104,7 +104,7 @@ namespace FNSyncPlus.Core.Services
                 foreach (var task in settings.Tasks.Where(t => t.ProviderType == StorageProviderType.FnOsPersonal))
                 {
                     task.IsExperimentalBackup = true;
-                    task.RequiresNewExperimentalBackup = false;
+                    task.RequiresNewExperimentalBackup = task.ExperimentalPendingInitialization;
                 }
             }
 
@@ -129,31 +129,46 @@ namespace FNSyncPlus.Core.Services
             _settings.EnsureIsolatedTestTask(task);
             task.IsExperimentalBackup = UseExperimentalVersionedBackup && task.ProviderType == StorageProviderType.FnOsPersonal;
             task.RequiresNewExperimentalBackup = task.IsExperimentalBackup;
+            task.ExperimentalPendingInitialization = task.IsExperimentalBackup;
             if (!string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot) && !task.IsExperimentalBackup)
                 throw new InvalidOperationException("复用已有目录目前只能在隔离试验会话使用");
-
-            // 1. 检查本地源是否与已有任务冲突（禁止同源、禁止父子嵌套）
-            foreach (var existing in _settings.Tasks)
-            {
-                if (PathHelper.ArePathsSameOrNested(task.SourceFolder, existing.SourceFolder, out string reason))
-                {
-                    throw new InvalidOperationException($"无法添加任务【{task.TaskName}】：本地源文件夹与已有任务【{existing.TaskName}】冲突！\n{reason}");
-                }
-
-                // 2. 检查 NAS 目标是否与已有任务重叠
-                if (PathHelper.ArePathsSameOrNested(task.DestinationFolder, existing.DestinationFolder, out string destReason))
-                {
-                    throw new InvalidOperationException($"无法添加任务【{task.TaskName}】：NAS 目标备份目录与已有任务【{existing.TaskName}】重叠！\n不同任务必须享有独立的存储子目录。");
-                }
-            }
 
             lock (_taskLifecycleLock)
             {
                 if (_stopping) throw new InvalidOperationException("程序正在停止，不能添加任务");
                 lock (_settings.Tasks)
                 {
+                    foreach (var existing in _settings.Tasks)
+                    {
+                        if (string.Equals(task.TaskId, existing.TaskId, StringComparison.Ordinal))
+                            throw new InvalidOperationException("任务标识已存在，不能重复添加");
+                        if (PathHelper.ArePathsSameOrNested(task.SourceFolder, existing.SourceFolder, out string reason))
+                            throw new InvalidOperationException($"无法添加任务【{task.TaskName}】：本地源文件夹与已有任务【{existing.TaskName}】冲突！\n{reason}");
+                        if (task.ProviderType == StorageProviderType.FnOsPersonal && existing.ProviderType == StorageProviderType.FnOsPersonal)
+                        {
+                            var fn = StorageProviderSupplier?.Invoke() as FnOsPersonalStorageProvider;
+                            string CanonicalDestination(string path)
+                            {
+                                if (fn?.IsAuthenticated == true) return fn.NormalizeRelativePath(path);
+                                string value = PathHelper.NormalizeRelPath(path);
+                                if (value.Equals("我的文件", StringComparison.OrdinalIgnoreCase)) return string.Empty;
+                                if (value.StartsWith("我的文件/", StringComparison.OrdinalIgnoreCase)) value = value["我的文件/".Length..];
+                                if (value.StartsWith("vol1/", StringComparison.OrdinalIgnoreCase))
+                                    throw new InvalidOperationException("无法离线确认飞牛目标路径别名，请连接后再添加任务");
+                                return value;
+                            }
+                            string candidate = CanonicalDestination(task.DestinationFolder), prior = CanonicalDestination(existing.DestinationFolder);
+                            if (string.IsNullOrEmpty(candidate) || string.IsNullOrEmpty(prior) || candidate.Equals(prior, StringComparison.OrdinalIgnoreCase) ||
+                                candidate.StartsWith(prior + "/", StringComparison.OrdinalIgnoreCase) ||
+                                prior.StartsWith(candidate + "/", StringComparison.OrdinalIgnoreCase))
+                                throw new InvalidOperationException($"无法添加任务【{task.TaskName}】：飞牛目标与已有任务【{existing.TaskName}】相同或嵌套。");
+                        }
+                        if (PathHelper.ArePathsSameOrNested(task.DestinationFolder, existing.DestinationFolder, out string destReason))
+                            throw new InvalidOperationException($"无法添加任务【{task.TaskName}】：NAS 目标备份目录与已有任务【{existing.TaskName}】重叠！\n不同任务必须享有独立的存储子目录。\n{destReason}");
+                    }
                     _settings.Tasks.Add(task);
-                    _settings.Save();
+                    try { _settings.Save(); }
+                    catch { _settings.Tasks.Remove(task); throw; }
                 }
                 ApplyTaskAutomation(task);
             }
@@ -727,6 +742,7 @@ namespace FNSyncPlus.Core.Services
                         }
                         _isolatedProjections[task.TaskId] = new IsolatedProjectionState(plan, publication);
                     }
+                    task.ExperimentalPendingInitialization = false;
                     if (reusedFiles > 0) AppendTaskLog(task, "INFO", $"隔离试验：已复用 {reusedFiles} 个 NAS 文件，上传 {result.UploadedFiles} 个文件。");
                     report = new SyncProgressReport {
                         State = SyncState.Completed, TotalFiles = result.Snapshot.Manifest.Files.Count,

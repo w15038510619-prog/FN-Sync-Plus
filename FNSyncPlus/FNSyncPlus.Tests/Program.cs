@@ -1285,6 +1285,13 @@ namespace FNSyncPlus.Tests
                     "版本化恢复逐项报告哈希损坏并恢复未损坏文件");
                 var leaseProviderOne = new FaultInjectingProvider(root);
                 var leaseProviderTwo = new FaultInjectingProvider(root);
+                bool missingLeaseRootRejected = false;
+                try { await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderOne, "lease-missing-root"); }
+                catch (DirectoryNotFoundException) { missingLeaseRootRejected = true; }
+                Assert(missingLeaseRootRejected && !Directory.Exists(Path.Combine(root, "lease-missing-root")),
+                    "备份目标不存在时获取锁不会创建目标目录");
+                foreach (string leaseRoot in new[] { "lease-normal", "lease-bad-release", "lease-release-retry", "lease-race" })
+                    Directory.CreateDirectory(Path.Combine(root, leaseRoot));
                 var lease = await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderOne, "lease-normal");
                 var busyLease = await ExperimentalRemoteLease.TryAcquireAsync(leaseProviderTwo, "lease-normal");
                 Assert(lease != null && busyLease == null, "独占目录锁持有期间拒绝第二个写入者");
@@ -1574,6 +1581,7 @@ namespace FNSyncPlus.Tests
                         "飞牛已连接时本地任务仍写入本地目标");
                 }
                 await Task.Delay(200);
+                await TestTaskAdditionSafetyAsync(root);
                 await TestTaskRemovalWhileRunningAsync(root);
                 await TestTaskRemovalFailureAsync(root);
                 await TestIsolatedVersionedTaskAsync(root);
@@ -1594,6 +1602,65 @@ namespace FNSyncPlus.Tests
             {
                 Directory.Delete(root, true);
             }
+        }
+
+        static async Task TestTaskAdditionSafetyAsync(string root)
+        {
+            string source = Path.Combine(root, "addition-source");
+            Directory.CreateDirectory(source);
+            var failingSettings = AppSettings.CreateForTest(Path.Combine(root, "missing-addition-parent", "settings.json"));
+            using var failingManager = new TaskManager(failingSettings, new SmbAuthService(), new LogService(Path.Combine(root, "addition-fail-logs")));
+            var failedTask = new SyncTask { TaskName = "保存失败", SourceFolder = source, DestinationFolder = "addition-failed-target",
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            bool saveRejected = false;
+            try { failingManager.AddTask(failedTask); }
+            catch (IOException) { saveRejected = true; }
+            Assert(saveRejected && failingSettings.Tasks.Count == 0 && !failedTask.IsWatching,
+                "添加任务配置保存失败时不保留内存任务或启动监听");
+
+            var concurrentSettings = AppSettings.CreateInMemory();
+            using var concurrentManager = new TaskManager(concurrentSettings, new SmbAuthService(), new LogService(Path.Combine(root, "addition-race-logs")));
+            var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            async Task<bool> AddAsync(string id)
+            {
+                await start.Task;
+                try
+                {
+                    concurrentManager.AddTask(new SyncTask { TaskId = id, TaskName = id, SourceFolder = source,
+                        DestinationFolder = "addition-target-" + id, ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly });
+                    return true;
+                }
+                catch (InvalidOperationException) { return false; }
+            }
+            var first = Task.Run(() => AddAsync("first"));
+            var second = Task.Run(() => AddAsync("second"));
+            start.TrySetResult();
+            var results = await Task.WhenAll(first, second);
+            Assert(results.Count(x => x) == 1 && concurrentSettings.Tasks.Count == 1,
+                "并发添加重叠源目录时只允许一个任务成功");
+            string otherSource = Path.Combine(root, "addition-other-source");
+            Directory.CreateDirectory(otherSource);
+            bool duplicateIdRejected = false;
+            try
+            {
+                concurrentManager.AddTask(new SyncTask { TaskId = concurrentSettings.Tasks.Single().TaskId, SourceFolder = otherSource,
+                    DestinationFolder = "addition-other-target", ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly });
+            }
+            catch (InvalidOperationException) { duplicateIdRejected = true; }
+            Assert(duplicateIdRejected && concurrentSettings.Tasks.Count == 1, "重复任务标识不能覆盖或混淆已有任务");
+
+            var aliasSettings = AppSettings.CreateInMemory();
+            using var aliasManager = new TaskManager(aliasSettings, new SmbAuthService(), new LogService(Path.Combine(root, "addition-alias-logs")));
+            aliasManager.AddTask(new SyncTask { SourceFolder = source, DestinationFolder = "我的文件/alias-parent/backup",
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly });
+            bool aliasRejected = false;
+            try
+            {
+                aliasManager.AddTask(new SyncTask { SourceFolder = otherSource, DestinationFolder = "alias-parent/backup/nested",
+                    ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly });
+            }
+            catch (InvalidOperationException) { aliasRejected = true; }
+            Assert(aliasRejected && aliasSettings.Tasks.Count == 1, "飞牛我的文件路径别名不能绕过任务目标重叠保护");
         }
 
         static async Task TestTaskRemovalWhileRunningAsync(string root)
@@ -1914,6 +1981,55 @@ namespace FNSyncPlus.Tests
                 File.ReadAllText(Path.Combine(root, target, ".fnsync", "projections", Directory.GetDirectories(Path.Combine(root, target, ".fnsync", "projections"), "archive-*").Select(Path.GetFileName).Single()!, "current", "sample.txt")) == "original",
                 "隔离任务重新接续时补发已提交版本并保留旧物理目录");
             if (!await manager.ShutdownAsync(TimeSpan.FromSeconds(15))) throw new TimeoutException("隔离任务接续后未停止");
+
+            var pendingSettings = AppSettings.CreateInMemory();
+            var pendingTask = new SyncTask { TaskName = "首次创建中断", SourceFolder = source, DestinationFolder = "reattach-missing-target",
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            pendingSettings.Tasks.Add(pendingTask);
+            using var pendingManager = new TaskManager(pendingSettings, new SmbAuthService(), new LogService(Path.Combine(root, "reattach-missing-logs")), experimentalVersionedBackup: true);
+            pendingManager.StorageProviderSupplier = () => provider;
+            var rejected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            pendingManager.TaskStateChanged += t => { if (t.TaskId == pendingTask.TaskId && t.State == TaskSyncState.Error) rejected.TrySetResult(); };
+            pendingManager.TriggerSync(pendingTask.TaskId);
+            if (await Task.WhenAny(rejected.Task, Task.Delay(10000)) != rejected.Task) throw new TimeoutException("缺失目标检查超时");
+            Assert(pendingTask.State == TaskSyncState.Error && !Directory.Exists(Path.Combine(root, pendingTask.DestinationFolder)),
+                "首次备份尚未创建目标时重启检查不会创建空备份目录");
+
+            string existingRoot = Path.Combine(root, "reattach-existing");
+            Directory.CreateDirectory(existingRoot);
+            File.WriteAllText(Path.Combine(existingRoot, "sample.txt"), "updated before restart");
+            var freshSettings = AppSettings.CreateInMemory();
+            using var creationManager = new TaskManager(freshSettings, new SmbAuthService(), new LogService(Path.Combine(root, "reattach-create-logs")), experimentalVersionedBackup: true);
+            creationManager.AddTask(new SyncTask { TaskName = "待首次备份", SourceFolder = source, DestinationFolder = "reattach-new-pending",
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly,
+                ExperimentalExistingRoot = "reattach-existing" });
+            var freshReload = AppSettings.FromJson(freshSettings.ToJson());
+            if (!await creationManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("创建任务后未停止");
+            freshReload.IsInMemoryOnly = true;
+            var freshTask = freshReload.Tasks.Single();
+            using var freshManager = new TaskManager(freshReload, new SmbAuthService(), new LogService(Path.Combine(root, "reattach-fresh-logs")), experimentalVersionedBackup: true);
+            freshManager.StorageProviderSupplier = () => provider;
+            var freshDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            freshManager.TaskStateChanged += t => { if (t.TaskId == freshTask.TaskId && (t.State == TaskSyncState.Completed || t.State == TaskSyncState.Error)) freshDone.TrySetResult(); };
+            freshManager.TriggerSync(freshTask.TaskId);
+            if (await Task.WhenAny(freshDone.Task, Task.Delay(15000)) != freshDone.Task) throw new TimeoutException("重启首次备份超时");
+            Assert(freshTask.State == TaskSyncState.Completed && !freshTask.ExperimentalPendingInitialization && freshTask.LastUploadedFiles == 0 &&
+                freshTask.ExperimentalExistingRoot == "reattach-existing" &&
+                File.ReadAllText(Path.Combine(root, freshTask.DestinationFolder, "current", "sample.txt")) == "updated before restart" &&
+                File.ReadAllText(Path.Combine(existingRoot, "sample.txt")) == "updated before restart",
+                "首次备份尚未开始时重启可安全创建目标并保留已有目录复用选择");
+            var occupiedReload = AppSettings.FromJson(freshSettings.ToJson());
+            occupiedReload.IsInMemoryOnly = true;
+            var occupiedTask = occupiedReload.Tasks.Single();
+            using var occupiedManager = new TaskManager(occupiedReload, new SmbAuthService(), new LogService(Path.Combine(root, "reattach-occupied-logs")), experimentalVersionedBackup: true);
+            occupiedManager.StorageProviderSupplier = () => provider;
+            var occupiedDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            occupiedManager.TaskStateChanged += t => { if (t.TaskId == occupiedTask.TaskId && t.State == TaskSyncState.Error) occupiedDone.TrySetResult(); };
+            occupiedManager.TriggerSync(occupiedTask.TaskId);
+            if (await Task.WhenAny(occupiedDone.Task, Task.Delay(10000)) != occupiedDone.Task) throw new TimeoutException("已存在目标检查超时");
+            Assert(occupiedTask.State == TaskSyncState.Error && occupiedTask.ExperimentalPendingInitialization &&
+                File.ReadAllText(Path.Combine(root, occupiedTask.DestinationFolder, "current", "sample.txt")) == "updated before restart",
+                "重启前待创建任务遇到已存在目标时拒绝覆盖并保留数据");
         }
 
         static async Task TestReconnectSchedulingAsync(string root)

@@ -36,11 +36,14 @@ public sealed class ExperimentalRemoteLease
             throw new NotSupportedException("存储提供程序不支持可区分冲突的独占目录创建");
         if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("锁目标必须是安全的相对路径", nameof(target));
         string root = PathHelper.NormalizeRelPath(target);
+        var existingRoot = await provider.GetItemAsync(root, token).ConfigureAwait(false);
+        if (existingRoot == null || !existingRoot.IsDirectory)
+            throw new DirectoryNotFoundException("备份目标不存在或不是目录，拒绝为其创建锁");
         string lockRoot = $"{root}/.fnsync/lock-generations";
-        string path = "";
-        foreach (string part in lockRoot.Split('/'))
+        string path = root;
+        foreach (string part in new[] { ".fnsync", "lock-generations" })
         {
-            path = path.Length == 0 ? part : $"{path}/{part}";
+            path = $"{path}/{part}";
             var made = await provider.CreateDirectoryAsync(path, token).ConfigureAwait(false);
             if (!made.Success) throw new IOException($"无法准备锁目录: {made.ErrorMessage}");
         }
