@@ -703,12 +703,12 @@ namespace FNSyncPlus.Core.Services
                 return;
             }
             if (task.Strategy == BackupStrategy.Mirror &&
-                (!task.IsExperimentalBackup || !task.MirrorDeletionEnabled || !(_settings.IsInMemoryOnly ||
+                (!task.IsExperimentalBackup || !task.MirrorDeletionEnabled || task.ScheduleMode != TaskSyncScheduleMode.ManualOnly || !(_settings.IsInMemoryOnly ||
                     (_settings.IsVersionedBetaTestProfile && _settings.HasIsolatedTestBoundary))))
             {
                 task.State = TaskSyncState.ConfigurationError;
                 task.LastSyncStatus = "镜像删除未启用或超出测试范围";
-                task.LastError = "镜像删除需要明确启用，当前仅允许在隔离测试范围验证。";
+                task.LastError = "镜像删除需要明确启用，当前仅允许在隔离测试范围以手动模式验证。";
                 AppendTaskLog(task, "ERROR", task.LastError);
                 TaskStateChanged?.Invoke(task);
                 return;

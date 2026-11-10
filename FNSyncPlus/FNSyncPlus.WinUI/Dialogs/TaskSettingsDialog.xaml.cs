@@ -172,6 +172,13 @@ namespace FNSyncPlus.WinUI.Dialogs
                 _ => BackupStrategy.Smart
             };
             edited.MirrorDeletionEnabled = edited.Strategy == BackupStrategy.Mirror && MirrorDeletionConsent.IsChecked == true;
+            if (edited.Strategy == BackupStrategy.Mirror && edited.ScheduleMode != TaskSyncScheduleMode.ManualOnly)
+            {
+                TxtSaveError.Text = "隔离镜像测试目前只支持仅手动模式。";
+                TxtSaveError.Visibility = Visibility.Visible;
+                args.Cancel = true;
+                return;
+            }
 
             try
             {

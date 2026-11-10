@@ -2496,6 +2496,21 @@ namespace FNSyncPlus.Tests
                 "旧引擎即使设置授权标记也不能执行未经验证的镜像");
             if (!await legacyManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("旧引擎镜像测试未停止");
 
+            var automaticSettings = AppSettings.CreateInMemory();
+            var automaticTask = new SyncTask { TaskName = "自动镜像", SourceFolder = source, DestinationFolder = "mirror-automatic-refused",
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.SmartAuto,
+                Strategy = BackupStrategy.Mirror, MirrorDeletionEnabled = true };
+            using var automaticManager = new TaskManager(automaticSettings, new SmbAuthService(), new LogService(Path.Combine(root, "mirror-automatic-logs")), experimentalVersionedBackup: true);
+            automaticManager.StorageProviderSupplier = () => provider;
+            automaticManager.AddTask(automaticTask);
+            var automaticDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            automaticManager.TaskStateChanged += t => { if (t.TaskId == automaticTask.TaskId && t.State == TaskSyncState.ConfigurationError) automaticDone.TrySetResult(); };
+            automaticManager.TriggerSync(automaticTask.TaskId);
+            if (await Task.WhenAny(automaticDone.Task, Task.Delay(10000)) != automaticDone.Task) throw new TimeoutException("自动镜像拒绝测试超时");
+            Assert(automaticTask.LastSyncStatus == "镜像删除未启用或超出测试范围" && !Directory.Exists(Path.Combine(root, automaticTask.DestinationFolder)),
+                "镜像原型即使启用授权也拒绝自动调度");
+            if (!await automaticManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("自动镜像测试未停止");
+
             string interruptedSource = Path.Combine(root, "mirror-interrupted-source"), interruptedTarget = "mirror-interrupted-target";
             Directory.CreateDirectory(interruptedSource);
             File.WriteAllText(Path.Combine(interruptedSource, "keep.txt"), "stable");
