@@ -63,6 +63,12 @@ namespace FNSyncPlus.Core.Services
         public bool IsVersionedBetaProfile => VersionedBetaProfilePath != null;
 
         [JsonIgnore]
+        public bool IsVersionedBetaTestProfile { get; private set; }
+
+        [JsonIgnore]
+        public bool HasIsolatedTestBoundary => IsolatedTestRemoteRoot != null;
+
+        [JsonIgnore]
         private string? IsolatedTestRemoteRoot { get; set; }
 
         public static AppSettings CreateInMemory() => new AppSettings { IsInMemoryOnly = true };
@@ -77,7 +83,9 @@ namespace FNSyncPlus.Core.Services
         {
             if (id == Guid.Empty) throw new ArgumentException("测试配置标识无效", nameof(id));
             string folder = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"VersionedProfile_{id:N}");
-            return LoadVersionedProfileAt(folder, Path.Combine(folder, "old-settings-readonly.json"));
+            var settings = LoadVersionedProfileAt(folder, Path.Combine(folder, "old-settings-readonly.json"));
+            settings.IsVersionedBetaTestProfile = true;
+            return settings;
         }
 
         private static AppSettings LoadVersionedProfileAt(string folder, string legacySettingsPath)
@@ -107,7 +115,7 @@ namespace FNSyncPlus.Core.Services
 
         public void SetIsolatedTestBoundary(string remoteRoot)
         {
-            if (IsolatedSessionPath == null || !PathHelper.IsSafeRelativePath(remoteRoot) || remoteRoot.Contains('/') || remoteRoot.Contains('\\') ||
+            if ((IsolatedSessionPath == null && !IsVersionedBetaTestProfile) || !PathHelper.IsSafeRelativePath(remoteRoot) || remoteRoot.Contains('/') || remoteRoot.Contains('\\') ||
                 !remoteRoot.StartsWith("Codex_FN_Test_", StringComparison.Ordinal))
                 throw new InvalidOperationException("隔离测试远端父目录无效");
             IsolatedTestRemoteRoot = remoteRoot;
@@ -116,7 +124,7 @@ namespace FNSyncPlus.Core.Services
 
         public void EnsureIsolatedTestTask(SyncTask task)
         {
-            if (IsolatedSessionPath == null) return;
+            if (IsolatedSessionPath == null && IsolatedTestRemoteRoot == null) return;
             if (IsolatedTestRemoteRoot == null) throw new InvalidOperationException("隔离测试尚未指定远端父目录");
             string localRoot = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests");
             string relative = Path.GetRelativePath(localRoot, Path.GetFullPath(task.SourceFolder));

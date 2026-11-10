@@ -216,6 +216,17 @@ namespace FNSyncPlus.Tests
                 try { bounded.EnsureIsolatedTestTask(boundedTask); }
                 catch (InvalidOperationException) { sourceRejected = true; }
                 Assert(outsideRejected && sourceRejected, "持久隔离会话拒绝测试目录外的源目录或 NAS 目标");
+                var betaBounded = AppSettings.LoadVersionedBetaTestProfile(Guid.NewGuid());
+                betaBounded.SetIsolatedTestBoundary("Codex_FN_Test_allowed");
+                var betaBoundedTask = new SyncTask { SourceFolder = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", "source"),
+                    DestinationFolder = "我的文件/Codex_FN_Test_allowed/backup", ProviderType = StorageProviderType.FnOsPersonal };
+                betaBounded.EnsureIsolatedTestTask(betaBoundedTask);
+                betaBoundedTask.ExperimentalExistingRoot = "我的文件/Codex_FN_Test_other/existing";
+                bool betaOutsideRejected = false;
+                try { betaBounded.EnsureIsolatedTestTask(betaBoundedTask); }
+                catch (InvalidOperationException) { betaOutsideRejected = true; }
+                Assert(betaBounded.IsVersionedBetaTestProfile && betaBounded.HasIsolatedTestBoundary && betaOutsideRejected,
+                    "新版隔离界面会话限制复用来源和目标均位于授权测试目录");
                 Assert(PathHelper.EnsureLongPathPrefix(@"C:/folder/file.txt") == @"\\?\C:\folder\file.txt" &&
                     PathHelper.EnsureLongPathPrefix(@"C:/") == @"\\?\C:\" &&
                     PathHelper.EnsureLongPathPrefix(@"C:\\\") == @"\\?\C:\" &&
@@ -2783,6 +2794,44 @@ namespace FNSyncPlus.Tests
                 "写入者未停止时恢复检查超时并保持任务暂停");
             blockedProvider.ContinueUpload.TrySetResult();
             if (!await blockedManager.ShutdownAsync(TimeSpan.FromSeconds(10))) throw new TimeoutException("等待写入停止测试未退出");
+
+            var betaSettings = AppSettings.LoadVersionedBetaTestProfile(Guid.NewGuid());
+            betaSettings.SetIsolatedTestBoundary("Codex_FN_Test_recovery");
+            string betaSource = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", "BetaRecovery_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(betaSource);
+            var betaTask = new SyncTask { SourceFolder = betaSource, DestinationFolder = "Codex_FN_Test_recovery/backup", ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            using var betaManager = new TaskManager(betaSettings, new SmbAuthService(), new LogService(Path.Combine(root, "beta-recovery-logs")), experimentalVersionedBackup: true);
+            betaManager.AddTask(betaTask);
+            var betaSession = await betaManager.BeginIsolatedRecoveryAsync(betaTask.TaskId, TimeSpan.FromSeconds(5));
+            Assert(betaSession != null && betaTask.IsUserPaused, "新版测试配置仅在授权边界内可进入暂停后的恢复检查");
+            var betaOld = AppSettings.CreateInMemory();
+            betaOld.Tasks.Add(new SyncTask { DestinationFolder = "Codex_FN_Test_recovery", ProviderType = StorageProviderType.FnOsPersonal });
+            File.WriteAllText(betaSettings.VersionedLegacySettingsPath!, betaOld.ToJson());
+            bool betaRecoveryChanged = false;
+            if (betaSession != null)
+            {
+                try { await betaSession.InspectAsync(); }
+                catch (InvalidOperationException) { betaRecoveryChanged = true; }
+            }
+            Assert(betaRecoveryChanged, "恢复会话期间旧目标出现冲突时停止检查和修复");
+            File.WriteAllText(betaSettings.VersionedLegacySettingsPath!, AppSettings.CreateInMemory().ToJson());
+            if (betaSession != null) await betaSession.DisposeAsync();
+            betaManager.ResumeTask(betaTask.TaskId);
+            File.WriteAllText(betaSettings.VersionedLegacySettingsPath!, betaOld.ToJson());
+            bool betaRecoveryConflict = false;
+            try { await betaManager.BeginIsolatedRecoveryAsync(betaTask.TaskId, TimeSpan.FromSeconds(5)); }
+            catch (InvalidOperationException) { betaRecoveryConflict = true; }
+            Assert(betaRecoveryConflict && !betaTask.IsUserPaused, "新版恢复前也检查旧程序目标重叠");
+            if (!await betaManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("新版恢复检查未退出");
+
+            var unboundedSettings = AppSettings.LoadVersionedBetaTestProfile(Guid.NewGuid());
+            var unboundedTask = new SyncTask { SourceFolder = betaSource, DestinationFolder = "unbounded-backup", ScheduleMode = TaskSyncScheduleMode.ManualOnly };
+            using var unboundedManager = new TaskManager(unboundedSettings, new SmbAuthService(), new LogService(Path.Combine(root, "beta-unbounded-recovery-logs")), experimentalVersionedBackup: true);
+            unboundedManager.AddTask(unboundedTask);
+            bool unboundedRejected = false;
+            try { await unboundedManager.BeginIsolatedRecoveryAsync(unboundedTask.TaskId, TimeSpan.FromSeconds(5)); }
+            catch (InvalidOperationException) { unboundedRejected = true; }
+            Assert(unboundedRejected && !unboundedTask.IsUserPaused, "无授权边界的新版配置不能进入隔离恢复流程");
         }
 
         static async Task TestLongDirectoryRenameAsync(string root)

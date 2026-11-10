@@ -29,10 +29,11 @@ namespace FNSyncPlus.WinUI
             _settings = AppServices.GetService<AppSettings>();
             InitializeComponent();
 
-            WindowHelper.ConfigureWindow(this, AppServices.IsIsolatedTestSession
-                ? "飞牛同步增强版 v0.4.0-beta [隔离测试会话]"
-                : "飞牛同步增强版 v0.4.0-beta", 1200, 780);
-            if (AppServices.IsIsolatedTestSession) AppTitleText.Text = "飞牛同步增强版 v0.4.0-beta [隔离测试会话]";
+            string title = AppServices.IsIsolatedTestSession
+                ? (_settings.IsVersionedBetaTestProfile ? "飞牛同步增强版 v0.4.0-beta [隔离测试会话·新版配置]" : "飞牛同步增强版 v0.4.0-beta [隔离测试会话]")
+                : "飞牛同步增强版 v0.4.0-beta";
+            WindowHelper.ConfigureWindow(this, title, 1200, 780);
+            if (AppServices.IsIsolatedTestSession) AppTitleText.Text = title;
             _appWindow = AppWindow.GetFromWindowId(Microsoft.UI.Win32Interop.GetWindowIdFromWindow(WindowHelper.GetHandle(this)));
             InitializeTrayIcon();
             _appWindow.Closing += OnAppWindowClosing;

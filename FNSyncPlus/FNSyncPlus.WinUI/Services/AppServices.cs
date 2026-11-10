@@ -24,11 +24,19 @@ namespace FNSyncPlus.WinUI.Services
                 arg => arg.Equals("--isolated-test-session", StringComparison.Ordinal));
             var args = Environment.GetCommandLineArgs();
             string? stateArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-state=", StringComparison.Ordinal));
+            string? betaStateArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-beta-profile=", StringComparison.Ordinal));
             string? remoteArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-remote=", StringComparison.Ordinal));
-            if (!IsIsolatedTestSession && (stateArg != null || remoteArg != null))
+            if (!IsIsolatedTestSession && (stateArg != null || betaStateArg != null || remoteArg != null))
                 throw new InvalidOperationException("隔离会话参数只能用于隔离测试模式");
             AppSettings settings;
-            if (stateArg != null || remoteArg != null)
+            if (betaStateArg != null)
+            {
+                if (stateArg != null || remoteArg == null || !Guid.TryParseExact(betaStateArg["--isolated-test-beta-profile=".Length..], "N", out var id) || id == Guid.Empty)
+                    throw new InvalidOperationException("隔离新版测试会话参数不完整");
+                settings = AppSettings.LoadVersionedBetaTestProfile(id);
+                settings.SetIsolatedTestBoundary(remoteArg["--isolated-test-remote=".Length..]);
+            }
+            else if (stateArg != null || remoteArg != null)
             {
                 if (stateArg == null || remoteArg == null || !Guid.TryParseExact(stateArg["--isolated-test-state=".Length..], "N", out var id) || id == Guid.Empty)
                     throw new InvalidOperationException("隔离测试会话参数不完整");
@@ -95,7 +103,8 @@ namespace FNSyncPlus.WinUI.Services
         {
             if (!IsIsolatedTestSession) return;
             var settings = GetService<AppSettings>();
-            if (!settings.IsInMemoryOnly || string.IsNullOrEmpty(settings.IsolatedCredentialPath)) return;
+            if ((!settings.IsInMemoryOnly && !(settings.IsVersionedBetaTestProfile && settings.HasIsolatedTestBoundary)) ||
+                string.IsNullOrEmpty(settings.IsolatedCredentialPath)) return;
             var credentials = SmbAuthService.LoadCredentials(settings.IsolatedCredentialPath);
             if (credentials == null) return;
             try

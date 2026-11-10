@@ -486,11 +486,13 @@ namespace FNSyncPlus.Core.Services
             {
                 task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId)
                     ?? throw new InvalidOperationException("任务不存在");
-                if (!_settings.IsInMemoryOnly || !UseExperimentalVersionedBackup || !task.IsExperimentalBackup)
+                if ((!_settings.IsInMemoryOnly && !(_settings.IsVersionedBetaTestProfile && _settings.HasIsolatedTestBoundary)) ||
+                    !UseExperimentalVersionedBackup || !task.IsExperimentalBackup)
                     throw new InvalidOperationException("中断恢复目前仅支持隔离试验任务");
                 if (_stopping || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId))
                     throw new InvalidOperationException("任务正在停止、移除或执行其他恢复操作");
                 _settings.EnsureIsolatedTestTask(task);
+                EnsureSeparateFromLegacyTasks(task);
                 _recoverySessions.Add(taskId, gate);
                 try
                 {
@@ -557,6 +559,7 @@ namespace FNSyncPlus.Core.Services
                         !_owner._recoverySessions.TryGetValue(_task.TaskId, out var gate) || !ReferenceEquals(gate, _gate))
                         throw new InvalidOperationException("恢复会话已结束或任务状态发生变化");
                     _owner._settings.EnsureIsolatedTestTask(_task);
+                    _owner.EnsureSeparateFromLegacyTasks(_task);
                 }
                 var provider = _owner.StorageProviderSupplier?.Invoke();
                 if (provider == null || !provider.IsAuthenticated || provider.ProviderType != StorageProviderType.FnOsPersonal)
