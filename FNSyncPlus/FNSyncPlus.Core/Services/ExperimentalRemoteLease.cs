@@ -47,34 +47,53 @@ public sealed class ExperimentalRemoteLease
             var made = await provider.CreateDirectoryAsync(path, token).ConfigureAwait(false);
             if (!made.Success) throw new IOException($"无法准备锁目录: {made.ErrorMessage}");
         }
-        // Preserve and verify every older generation; the format's D8 is a minimum width,
-        // not a maximum. Sequential verification is deliberately conservative but expensive.
-        for (long sequence = 1; sequence < long.MaxValue; sequence++)
+        // Enumerate once, but verify every older generation sequentially: fnOS rejected
+        // concurrent marker downloads under load during real two-connection testing.
+        var directories = await ListGenerationsAsync(provider, lockRoot, token).ConfigureAwait(false);
+        foreach (var directory in directories)
         {
             token.ThrowIfCancellationRequested();
-            string directory = $"{lockRoot}/{sequence.ToString("D8", System.Globalization.CultureInfo.InvariantCulture)}";
-            var result = await exclusive.TryCreateDirectoryExclusiveAsync(directory, token).ConfigureAwait(false);
-            if (result == ExclusiveDirectoryResult.Created)
-            {
-                // A missing generation must not hide a later, possibly live writer.
-                // If the check fails, leave this new directory without an owner: fail closed.
-                await RejectLaterGenerationsAsync(provider, lockRoot, sequence, token).ConfigureAwait(false);
-                byte[] owner = Encoding.UTF8.GetBytes($"v1:{Guid.NewGuid():N}");
-                await WriteAndVerifyMarkerAsync(provider, $"{directory}/owner", owner, token).ConfigureAwait(false);
-                return new ExperimentalRemoteLease(provider, directory, owner);
-            }
-
             byte[]? previousOwner = await ReadMarkerAsync(provider, $"{directory}/owner", token).ConfigureAwait(false);
             byte[]? released = await ReadMarkerAsync(provider, $"{directory}/released", token).ConfigureAwait(false);
             if (previousOwner == null || released == null)
             {
+                long sequence = long.Parse(directory[(directory.LastIndexOf('/') + 1)..], System.Globalization.CultureInfo.InvariantCulture);
                 await RejectLaterGenerationsAsync(provider, lockRoot, sequence, token).ConfigureAwait(false);
                 return null;
             }
             if (!IsValidOwner(previousOwner) || !previousOwner.AsSpan().SequenceEqual(released))
                 throw new InvalidDataException("锁的持有者或释放记录无效，拒绝继续");
         }
-        throw new IOException("锁记录序号耗尽，需安全维护后才能继续");
+        long next = (long)directories.Count + 1;
+        string nextDirectory = $"{lockRoot}/{next.ToString("D8", System.Globalization.CultureInfo.InvariantCulture)}";
+        var created = await exclusive.TryCreateDirectoryExclusiveAsync(nextDirectory, token).ConfigureAwait(false);
+        if (created != ExclusiveDirectoryResult.Created) return null;
+        // A listing that missed a later generation must not authorize a new owner.
+        await RejectLaterGenerationsAsync(provider, lockRoot, next, token).ConfigureAwait(false);
+        byte[] newOwner = Encoding.UTF8.GetBytes($"v1:{Guid.NewGuid():N}");
+        await WriteAndVerifyMarkerAsync(provider, $"{nextDirectory}/owner", newOwner, token).ConfigureAwait(false);
+        return new ExperimentalRemoteLease(provider, nextDirectory, newOwner);
+    }
+
+    private static async Task<List<string>> ListGenerationsAsync(INasStorageProvider provider, string lockRoot, CancellationToken token)
+    {
+        var sequences = new SortedSet<long>();
+        foreach (var item in await provider.ListEntriesAsync(lockRoot, token).ConfigureAwait(false))
+        {
+            if (!item.IsDirectory || !long.TryParse(item.Name, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out long sequence) || sequence < 1 ||
+                item.Name != sequence.ToString("D8", System.Globalization.CultureInfo.InvariantCulture) || !sequences.Add(sequence))
+                throw new InvalidDataException("锁目录包含无效或重复的代次记录");
+        }
+        var result = new List<string>(sequences.Count);
+        long expected = 1;
+        foreach (long sequence in sequences)
+        {
+            if (sequence != expected) throw new InvalidDataException("锁记录存在缺口，拒绝继续");
+            result.Add($"{lockRoot}/{sequence.ToString("D8", System.Globalization.CultureInfo.InvariantCulture)}");
+            expected++;
+        }
+        return result;
     }
 
     public async Task ReleaseAsync(CancellationToken token = default)
