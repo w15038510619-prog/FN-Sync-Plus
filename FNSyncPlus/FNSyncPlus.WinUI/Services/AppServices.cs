@@ -22,9 +22,21 @@ namespace FNSyncPlus.WinUI.Services
             // 1. Core Services & Data Configuration
             IsIsolatedTestSession = Array.Exists(Environment.GetCommandLineArgs(),
                 arg => arg.Equals("--isolated-test-session", StringComparison.Ordinal));
-            var settings = IsIsolatedTestSession
-                ? AppSettings.CreateInMemory()
-                : AppSettings.Load();
+            var args = Environment.GetCommandLineArgs();
+            string? stateArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-state=", StringComparison.Ordinal));
+            string? remoteArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-remote=", StringComparison.Ordinal));
+            if (!IsIsolatedTestSession && (stateArg != null || remoteArg != null))
+                throw new InvalidOperationException("隔离会话参数只能用于隔离测试模式");
+            AppSettings settings;
+            if (stateArg != null || remoteArg != null)
+            {
+                if (stateArg == null || remoteArg == null || !Guid.TryParseExact(stateArg["--isolated-test-state=".Length..], "N", out var id) || id == Guid.Empty)
+                    throw new InvalidOperationException("隔离测试会话参数不完整");
+                string remoteRoot = remoteArg["--isolated-test-remote=".Length..];
+                settings = AppSettings.LoadIsolatedTestSession(id);
+                settings.SetIsolatedTestBoundary(remoteRoot);
+            }
+            else settings = IsIsolatedTestSession ? AppSettings.CreateInMemory() : AppSettings.Load();
             if (IsIsolatedTestSession)
             {
                 settings.IsolatedCredentialPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -44,8 +56,8 @@ namespace FNSyncPlus.WinUI.Services
             var manifestManager = new ManifestManager();
             services.AddSingleton(manifestManager);
 
-            var taskManager = new TaskManager(settings, longNameEngine, manifestManager, smbService);
-            taskManager.UseExperimentalVersionedBackup = IsIsolatedTestSession;
+            var taskManager = new TaskManager(settings, longNameEngine, manifestManager, smbService,
+                experimentalVersionedBackup: IsIsolatedTestSession);
             services.AddSingleton(taskManager);
 
             var connectionService = new NasConnectionService(smbService, settings, taskManager);

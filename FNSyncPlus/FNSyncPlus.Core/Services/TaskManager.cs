@@ -125,6 +125,7 @@ namespace FNSyncPlus.Core.Services
         public void AddTask(SyncTask task)
         {
             if (task == null) throw new ArgumentNullException(nameof(task));
+            _settings.EnsureIsolatedTestTask(task);
             task.IsExperimentalBackup = UseExperimentalVersionedBackup && task.ProviderType == StorageProviderType.FnOsPersonal;
             task.RequiresNewExperimentalBackup = task.IsExperimentalBackup;
             if (!string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot) && !task.IsExperimentalBackup)
@@ -459,6 +460,16 @@ namespace FNSyncPlus.Core.Services
         private async Task ExecuteSingleTaskSyncAsync(SyncTask task, CancellationToken taskToken)
         {
             taskToken.ThrowIfCancellationRequested();
+            try { _settings.EnsureIsolatedTestTask(task); }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or NotSupportedException)
+            {
+                task.State = TaskSyncState.ConfigurationError;
+                task.LastError = ex.Message;
+                task.LastSyncStatus = "隔离测试路径异常";
+                AppendTaskLog(task, "ERROR", ex.Message);
+                TaskStateChanged?.Invoke(task);
+                return;
+            }
             // 运行时二次安全配置校验拦截
             if (!task.ValidateConfiguration(out string valErr))
             {

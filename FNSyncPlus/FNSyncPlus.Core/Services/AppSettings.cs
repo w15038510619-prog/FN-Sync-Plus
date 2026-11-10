@@ -5,6 +5,8 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FNSyncPlus.Core.Models;
+using FNSyncPlus.Core.Storage;
+using FNSyncPlus.Core.Utils;
 using Microsoft.Win32;
 
 namespace FNSyncPlus.Core.Services
@@ -46,8 +48,53 @@ namespace FNSyncPlus.Core.Services
         [JsonIgnore]
         public string? IsolatedCredentialPath { get; set; }
 
+        // Optional, explicitly selected test session. It never points at production settings.
+        [JsonIgnore]
+        public string? IsolatedSessionPath { get; private set; }
+
+        [JsonIgnore]
+        private string? IsolatedTestRemoteRoot { get; set; }
+
         public static AppSettings CreateInMemory() => new AppSettings { IsInMemoryOnly = true };
         public static AppSettings CreateForTest(string testFilePath) => new AppSettings { CustomConfigPath = testFilePath };
+
+        public static AppSettings LoadIsolatedTestSession(Guid id)
+        {
+            if (id == Guid.Empty) throw new ArgumentException("隔离会话标识无效", nameof(id));
+            string folder = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"WinUiSession_{id:N}");
+            Directory.CreateDirectory(folder);
+            string path = Path.Combine(folder, "settings.json");
+            var settings = File.Exists(path) ? FromJson(File.ReadAllText(path)) : new AppSettings();
+            settings.IsInMemoryOnly = true;
+            settings.IsolatedSessionPath = path;
+            return settings;
+        }
+
+        public void SetIsolatedTestBoundary(string remoteRoot)
+        {
+            if (IsolatedSessionPath == null || !PathHelper.IsSafeRelativePath(remoteRoot) || remoteRoot.Contains('/') || remoteRoot.Contains('\\') ||
+                !remoteRoot.StartsWith("Codex_FN_Test_", StringComparison.Ordinal))
+                throw new InvalidOperationException("隔离测试远端父目录无效");
+            IsolatedTestRemoteRoot = remoteRoot;
+            foreach (var task in Tasks) EnsureIsolatedTestTask(task);
+        }
+
+        public void EnsureIsolatedTestTask(SyncTask task)
+        {
+            if (IsolatedSessionPath == null) return;
+            if (IsolatedTestRemoteRoot == null) throw new InvalidOperationException("隔离测试尚未指定远端父目录");
+            string localRoot = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests");
+            string relative = Path.GetRelativePath(localRoot, Path.GetFullPath(task.SourceFolder));
+            bool WithinRemote(string path)
+            {
+                string normalized = PathHelper.NormalizeRelPath(path);
+                if (normalized.StartsWith("我的文件/", StringComparison.Ordinal)) normalized = normalized["我的文件/".Length..];
+                return PathHelper.IsSafeRelativePath(normalized) && normalized.StartsWith(IsolatedTestRemoteRoot + "/", StringComparison.OrdinalIgnoreCase);
+            }
+            if (task.ProviderType != StorageProviderType.FnOsPersonal || !PathHelper.IsSafeRelativePath(relative) ||
+                !WithinRemote(task.DestinationFolder) || (!string.IsNullOrEmpty(task.ExperimentalExistingRoot) && !WithinRemote(task.ExperimentalExistingRoot)))
+                throw new InvalidOperationException("隔离会话中的任务超出指定测试目录，已阻止执行");
+        }
 
         /// <summary>Reads only already-trusted SHA-256 certificate fingerprints; never migrates or writes the source settings.</summary>
         public static Dictionary<string, string> ReadTrustedCertificates(string path)
@@ -172,11 +219,11 @@ namespace FNSyncPlus.Core.Services
 
         public void Save()
         {
-            if (IsInMemoryOnly) return; // 单元测试或沙盒模式绝不写入磁盘配置文件
+            if (IsInMemoryOnly && IsolatedSessionPath == null) return;
 
             lock (Tasks)
             {
-                string path = !string.IsNullOrEmpty(CustomConfigPath) ? CustomConfigPath : GetConfigFilePath();
+                string path = IsolatedSessionPath ?? (!string.IsNullOrEmpty(CustomConfigPath) ? CustomConfigPath : GetConfigFilePath());
                 string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
                 try
                 {
@@ -188,7 +235,7 @@ namespace FNSyncPlus.Core.Services
                 {
                     if (File.Exists(temp)) File.Delete(temp);
                 }
-                if (string.IsNullOrEmpty(CustomConfigPath))
+                if (IsolatedSessionPath == null && string.IsNullOrEmpty(CustomConfigPath))
                     ApplyStartupRegistry(StartWithWindows);
             }
         }

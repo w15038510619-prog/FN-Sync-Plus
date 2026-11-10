@@ -185,6 +185,37 @@ namespace FNSyncPlus.Tests
                 settings.Tasks.Add(new SyncTask { TaskName = "失败测试", TaskId = "task_fail_legitimate", SourceFolder = @"C:\Fake" });
                 settings.Save();
                 Assert(AppSettings.LoadFromPath(config).Tasks.Single().TaskName == "失败测试", "合法任务名称和路径在加载后保留");
+                var isolatedId = Guid.NewGuid();
+                var isolatedSession = AppSettings.LoadIsolatedTestSession(isolatedId);
+                isolatedSession.Tasks.Add(new SyncTask { TaskName = "隔离重启样本" });
+                isolatedSession.Save();
+                string isolatedSessionPath = isolatedSession.IsolatedSessionPath!;
+                var reloadedSession = AppSettings.LoadIsolatedTestSession(isolatedId);
+                Assert(reloadedSession.IsInMemoryOnly && reloadedSession.Tasks.Single().TaskName == "隔离重启样本" &&
+                    isolatedSessionPath.StartsWith(Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests"), StringComparison.OrdinalIgnoreCase) &&
+                    AppSettings.LoadFromPath(config).Tasks.Single().TaskName == "失败测试",
+                    "指定的隔离测试会话可单独保存并重启加载，不修改其他配置");
+                File.WriteAllText(isolatedSessionPath, "{broken");
+                bool isolatedBrokenRejected = false;
+                try { AppSettings.LoadIsolatedTestSession(isolatedId); }
+                catch (System.Text.Json.JsonException) { isolatedBrokenRejected = true; }
+                Assert(isolatedBrokenRejected && File.ReadAllText(isolatedSessionPath) == "{broken",
+                    "损坏的隔离测试配置不会自动覆盖");
+                var bounded = AppSettings.LoadIsolatedTestSession(Guid.NewGuid());
+                bounded.SetIsolatedTestBoundary("Codex_FN_Test_allowed");
+                var boundedTask = new SyncTask { SourceFolder = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", "source"),
+                    DestinationFolder = "我的文件/Codex_FN_Test_allowed/backup", ProviderType = StorageProviderType.FnOsPersonal };
+                bounded.EnsureIsolatedTestTask(boundedTask);
+                bool outsideRejected = false;
+                boundedTask.DestinationFolder = "我的文件/Codex_FN_Test_other/backup";
+                try { bounded.EnsureIsolatedTestTask(boundedTask); }
+                catch (InvalidOperationException) { outsideRejected = true; }
+                boundedTask.DestinationFolder = "我的文件/Codex_FN_Test_allowed/backup";
+                boundedTask.SourceFolder = Path.Combine(Path.GetTempPath(), "outside-test-root");
+                bool sourceRejected = false;
+                try { bounded.EnsureIsolatedTestTask(boundedTask); }
+                catch (InvalidOperationException) { sourceRejected = true; }
+                Assert(outsideRejected && sourceRejected, "持久隔离会话拒绝测试目录外的源目录或 NAS 目标");
                 Assert(PathHelper.EnsureLongPathPrefix(@"C:/folder/file.txt") == @"\\?\C:\folder\file.txt" &&
                     PathHelper.EnsureLongPathPrefix(@"C:/") == @"\\?\C:\" &&
                     PathHelper.EnsureLongPathPrefix(@"C:\\\") == @"\\?\C:\" &&
