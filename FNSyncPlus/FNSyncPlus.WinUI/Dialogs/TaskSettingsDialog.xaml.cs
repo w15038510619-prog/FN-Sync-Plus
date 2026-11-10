@@ -92,10 +92,16 @@ namespace FNSyncPlus.WinUI.Dialogs
 
         private void CmbStrategy_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateMirrorConsentVisibility();
 
+        private void MirrorDeletionConsent_Checked(object sender, RoutedEventArgs e)
+        {
+            if (MirrorConsentError != null) MirrorConsentError.Visibility = Visibility.Collapsed;
+        }
+
         private void UpdateMirrorConsentVisibility()
         {
             if (MirrorDeletionConsent != null)
                 MirrorDeletionConsent.Visibility = _canTestMirror && CmbStrategy.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
+            if (MirrorConsentError != null && CmbStrategy.SelectedIndex != 2) MirrorConsentError.Visibility = Visibility.Collapsed;
         }
 
         private void UpdateIntervalPanelVisibility()
@@ -112,6 +118,7 @@ namespace FNSyncPlus.WinUI.Dialogs
             {
                 TxtSaveError.Text = "镜像测试需要在授权范围内明确勾选允许移入历史。";
                 TxtSaveError.Visibility = Visibility.Visible;
+                if (_canTestMirror) MirrorConsentError.Visibility = Visibility.Visible;
                 args.Cancel = true;
                 return;
             }
