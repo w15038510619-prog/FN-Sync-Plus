@@ -8,7 +8,7 @@ namespace FNSyncPlus.Core.Services;
 
 /// <summary>
 /// Versioned backup experiment used by isolated tasks. Physical publication is coordinated
-/// separately; mirror deletion remains disabled.
+/// separately; mirror removal requires explicit authorization and retains history.
 /// </summary>
 public sealed class ExperimentalVersionedBackup
 {
@@ -43,28 +43,27 @@ public sealed class ExperimentalVersionedBackup
     }
 
     public Task<Result> RunAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0)
-        => RunCoreAsync(provider, sourceDirectory, target, false, null, token, strategy, settlingDelaySeconds);
+        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0, bool mirrorDeletionEnabled = false)
+        => RunCoreAsync(provider, sourceDirectory, target, false, null, token, strategy, settlingDelaySeconds, mirrorDeletionEnabled);
 
     /// <summary>Creates a destination, or resumes only one with a matching initialization record.</summary>
     public async Task<Result> CreateNewAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0, string? initializationId = null)
-        => await CreateNewCoreAsync(provider, sourceDirectory, target, null, token, strategy, settlingDelaySeconds, initializationId).ConfigureAwait(false);
+        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0, string? initializationId = null, bool mirrorDeletionEnabled = false)
+        => await CreateNewCoreAsync(provider, sourceDirectory, target, null, token, strategy, settlingDelaySeconds, initializationId, mirrorDeletionEnabled).ConfigureAwait(false);
 
     /// <summary>Experimental import from an existing independent NAS directory; the existing directory is read-only.</summary>
     public async Task<Result> CreateNewFromExistingAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        string existingRoot, CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0, string? initializationId = null)
-        => await CreateNewCoreAsync(provider, sourceDirectory, target, existingRoot, token, strategy, settlingDelaySeconds, initializationId).ConfigureAwait(false);
+        string existingRoot, CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0, string? initializationId = null, bool mirrorDeletionEnabled = false)
+        => await CreateNewCoreAsync(provider, sourceDirectory, target, existingRoot, token, strategy, settlingDelaySeconds, initializationId, mirrorDeletionEnabled).ConfigureAwait(false);
 
     private async Task<Result> CreateNewCoreAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds, string? initializationId)
+        string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds, string? initializationId, bool mirrorDeletionEnabled)
     {
         ArgumentNullException.ThrowIfNull(provider);
         if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("备份目标必须是安全的相对路径", nameof(target));
         if (string.IsNullOrWhiteSpace(sourceDirectory) || !Directory.Exists(sourceDirectory))
             throw new DirectoryNotFoundException("备份源目录不存在");
-        if (strategy is not (BackupStrategy.Smart or BackupStrategy.Archive))
-            throw new NotSupportedException("实验性同步尚不支持镜像删除");
+        ValidateStrategy(strategy, mirrorDeletionEnabled);
         if (provider is not IExclusiveDirectoryProvider exclusive)
             throw new NotSupportedException("存储不支持独占创建新的备份目录");
         if (initializationId != null && (!Guid.TryParseExact(initializationId, "N", out var ownerId) || ownerId == Guid.Empty))
@@ -110,20 +109,19 @@ public sealed class ExperimentalVersionedBackup
         var committed = await _versions.LoadForWritingAsync(provider, canonicalTarget, token).ConfigureAwait(false);
         if (created == ExclusiveDirectoryResult.Created && committed != null)
             throw new InvalidDataException("新目标出现了已有版本，拒绝接管");
-        var result = await RunCoreAsync(provider, sourceDirectory, target, committed == null, existingRoot, token, strategy, 0, ownershipPath, ownership).ConfigureAwait(false);
+        var result = await RunCoreAsync(provider, sourceDirectory, target, committed == null, existingRoot, token, strategy, 0, mirrorDeletionEnabled, ownershipPath, ownership).ConfigureAwait(false);
         return result with { ResumedInitialization = created != ExclusiveDirectoryResult.Created };
     }
 
     private async Task<Result> RunCoreAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        bool creating, string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds,
+        bool creating, string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds, bool mirrorDeletionEnabled,
         string? ownershipPath = null, byte[]? ownership = null)
     {
         ArgumentNullException.ThrowIfNull(provider);
         if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("备份目标必须是安全的相对路径", nameof(target));
         if (string.IsNullOrWhiteSpace(sourceDirectory) || !Directory.Exists(sourceDirectory))
             throw new DirectoryNotFoundException("备份源目录不存在");
-        if (strategy is not (BackupStrategy.Smart or BackupStrategy.Archive))
-            throw new NotSupportedException("实验性同步尚不支持镜像删除");
+        ValidateStrategy(strategy, mirrorDeletionEnabled);
         string sourceRoot = PathHelper.EnsureLongPathPrefix(sourceDirectory);
         await WaitForTreeSettlingAsync(sourceRoot, settlingDelaySeconds, token).ConfigureAwait(false);
         var initial = await _versions.LoadForWritingAsync(provider, target, token).ConfigureAwait(false);
@@ -193,6 +191,10 @@ public sealed class ExperimentalVersionedBackup
             foreach (var history in manifest.History) await VerifyPreviousObjectAsync(history.StoredRel, history.Size, history.Sha256).ConfigureAwait(false);
 
             SourceTree tree = Scan(sourceRoot, token);
+            if (strategy == BackupStrategy.Mirror &&
+                ((previous.Count > 0 && tree.Files.Count == 0) ||
+                 (previous.Count == 0 && previousDirectories.Count > 0 && tree.Files.Count == 0 && tree.Directories.Count == 0)))
+                throw new IOException("镜像源目录突然变空，已停止；请检查源目录后再处理。");
             var currentNames = new HashSet<string>(tree.Files.Select(f => f.RelativePath), StringComparer.OrdinalIgnoreCase);
             var baselines = new Dictionary<string, SourceFile>(StringComparer.OrdinalIgnoreCase);
             foreach (var source in tree.Files)
@@ -379,13 +381,13 @@ public sealed class ExperimentalVersionedBackup
             manifest.BackupPolicy = strategy.ToString();
             token.ThrowIfCancellationRequested();
             if (oldSnapshot != null && ComparableManifest(manifest, provider).AsSpan().SequenceEqual(ComparableManifest(oldSnapshot.Manifest, provider)))
-                return new Result(oldSnapshot, uploaded, unchanged, renamed, strategy == BackupStrategy.Smart ? deleted.Count : 0, reused, HasNewVersion: false);
+                return new Result(oldSnapshot, uploaded, unchanged, renamed, strategy is BackupStrategy.Smart or BackupStrategy.Mirror ? deleted.Count : 0, reused, HasNewVersion: false);
             manifest.UpdatedAt = DateTimeOffset.UtcNow;
             token.ThrowIfCancellationRequested();
             commitMayHaveStarted = true;
             var snapshot = await _versions.SaveAsync(provider, target, manifest, oldSnapshot?.Id, token).ConfigureAwait(false);
             committed = true;
-            return new Result(snapshot, uploaded, unchanged, renamed, strategy == BackupStrategy.Smart ? deleted.Count : 0, reused);
+            return new Result(snapshot, uploaded, unchanged, renamed, strategy is BackupStrategy.Smart or BackupStrategy.Mirror ? deleted.Count : 0, reused);
         }
         catch (Exception ex)
         {
@@ -425,6 +427,14 @@ public sealed class ExperimentalVersionedBackup
         }
         copy.UpdatedAt = DateTimeOffset.UnixEpoch;
         return JsonSerializer.SerializeToUtf8Bytes(copy);
+    }
+
+    private static void ValidateStrategy(BackupStrategy strategy, bool mirrorDeletionEnabled)
+    {
+        if (strategy is not (BackupStrategy.Smart or BackupStrategy.Archive or BackupStrategy.Mirror))
+            throw new NotSupportedException("备份策略不受支持");
+        if (strategy == BackupStrategy.Mirror && !mirrorDeletionEnabled)
+            throw new NotSupportedException("镜像删除未明确启用，已停止备份");
     }
 
     private static bool IsHash(string? value) => value != null && value.Length == 64 && value.All(Uri.IsHexDigit);

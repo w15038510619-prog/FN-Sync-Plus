@@ -99,6 +99,9 @@ namespace FNSyncPlus.Core.Models
         [JsonPropertyName("backup_strategy")]
         public BackupStrategy Strategy { get; set; } = BackupStrategy.Smart;
 
+        [JsonPropertyName("mirror_deletion_enabled")]
+        public bool MirrorDeletionEnabled { get; set; }
+
         [JsonPropertyName("settling_delay_seconds")]
         public int SettlingDelaySeconds { get; set; } = 3;
 

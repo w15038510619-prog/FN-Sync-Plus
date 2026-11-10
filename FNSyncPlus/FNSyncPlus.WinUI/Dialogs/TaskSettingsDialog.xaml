@@ -138,7 +138,7 @@
                             </StackPanel>
                         </ComboBoxItem>
                     </ComboBox>
-                    <TextBlock x:Name="MirrorUnavailableNotice" Visibility="Collapsed" Text="新版备份试用暂不支持镜像删除，请选择智能备份或归档备份。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="MirrorUnavailableNotice" Visibility="Collapsed" Text="镜像删除仍在隔离验证，请选择智能备份或归档备份。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                 </StackPanel>
             </Border>
 

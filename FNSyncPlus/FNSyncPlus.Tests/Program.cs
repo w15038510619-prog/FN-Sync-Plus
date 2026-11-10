@@ -1699,6 +1699,7 @@ namespace FNSyncPlus.Tests
                 await TestTaskRemovalWhileRunningAsync(root);
                 await TestTaskRemovalFailureAsync(root);
                 await TestIsolatedVersionedTaskAsync(root);
+                await TestExperimentalMirrorAsync(root);
                 await TestVersionedDeviceBindingAsync(root);
                 await TestLegacyTargetProtectionAsync(root);
                 await TestIsolatedTaskReattachmentAsync(root);
@@ -2363,6 +2364,153 @@ namespace FNSyncPlus.Tests
             try { AppSettings.LoadVersionedBetaTestProfile(profileId); }
             catch (System.Text.Json.JsonException) { refusedBrokenProfile = true; }
             Assert(refusedBrokenProfile && File.ReadAllText(betaPath) == "broken beta settings", "新版配置损坏时停止且不重置原文件");
+        }
+
+        static async Task TestExperimentalMirrorAsync(string root)
+        {
+            string source = Path.Combine(root, "mirror-prototype-source"), target = "mirror-prototype-target";
+            Directory.CreateDirectory(source);
+            File.WriteAllText(Path.Combine(source, "keep.txt"), "keep original");
+            File.WriteAllText(Path.Combine(source, "remove.txt"), "recover this content");
+            var provider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+            bool denied = false;
+            try { await new ExperimentalVersionedBackup().CreateNewAsync(provider, source, "mirror-without-consent", strategy: BackupStrategy.Mirror); }
+            catch (NotSupportedException) { denied = true; }
+            Assert(denied && !Directory.Exists(Path.Combine(root, "mirror-without-consent")), "未明确启用镜像删除时不创建备份目标");
+
+            var settings = AppSettings.CreateInMemory();
+            var task = new SyncTask { TaskName = "隔离镜像原型", SourceFolder = source, DestinationFolder = target,
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly,
+                SettlingDelaySeconds = 1, Strategy = BackupStrategy.Mirror };
+            using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "mirror-prototype-logs")), experimentalVersionedBackup: true);
+            manager.StorageProviderSupplier = () => provider;
+            manager.AddTask(task);
+            TaskCompletionSource<TaskSyncState> finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            manager.TaskStateChanged += t =>
+            {
+                if (t.TaskId == task.TaskId && t.State is TaskSyncState.Completed or TaskSyncState.Error or TaskSyncState.ConfigurationError)
+                    finished.TrySetResult(t.State);
+            };
+            async Task<TaskSyncState> RunOnce()
+            {
+                finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                for (int i = 0; i < 200 && !finished.Task.IsCompleted; i++)
+                {
+                    manager.TriggerSync(task.TaskId);
+                    await Task.WhenAny(finished.Task, Task.Delay(100));
+                }
+                if (!finished.Task.IsCompleted) throw new TimeoutException("隔离镜像测试未完成");
+                var result = await finished.Task;
+                await Task.Delay(300);
+                return result;
+            }
+            var refused = await RunOnce();
+            Assert(refused == TaskSyncState.ConfigurationError && !Directory.Exists(Path.Combine(root, target)) && provider.DeleteCalls == 0,
+                "镜像任务未启用删除时不会写入或删除备份");
+            task.MirrorDeletionEnabled = true;
+            var roundTrip = AppSettings.FromJson(settings.ToJson()).Tasks.Single();
+            Assert(roundTrip.MirrorDeletionEnabled && !AppSettings.FromJson("{\"Tasks\":[{}]}").Tasks.Single().MirrorDeletionEnabled,
+                "镜像删除授权明确持久化，旧配置默认关闭");
+            var initial = await RunOnce();
+            if (initial != TaskSyncState.Completed) throw new IOException("隔离镜像首次备份失败: " + task.LastError);
+            var versions = new VersionedManifestStore();
+            var first = await versions.LoadAsync(provider, target) ?? throw new InvalidDataException("首次镜像清单不存在");
+            File.Delete(Path.Combine(source, "remove.txt")); // Synthetic local fixture only.
+            var updated = await RunOnce();
+            var second = await versions.LoadAsync(provider, target) ?? throw new InvalidDataException("镜像增量清单不存在");
+            string current = Path.Combine(root, target, "current");
+            var history = second.Manifest.History.Single(h => h.OriginalRel == "remove.txt" && h.Reason == "deleted");
+            string restored = Path.Combine(root, "mirror-prototype-restored");
+            bool restoredHistory = await new RestoreEngine(new ManifestManager()).RunRestoreHistoryFileAsync(provider, target, restored, history);
+            string archiveParent = Path.Combine(root, target, ".fnsync", "projections");
+            string archived = Directory.GetDirectories(archiveParent, "archive-*").Single();
+            Assert(updated == TaskSyncState.Completed && second.Id != first.Id &&
+                File.Exists(Path.Combine(current, "keep.txt")) && !File.Exists(Path.Combine(current, "remove.txt")) &&
+                File.ReadAllText(Path.Combine(archived, "current", "remove.txt")) == "recover this content" &&
+                restoredHistory && File.ReadAllText(Path.Combine(restored, "remove.txt")) == "recover this content" && provider.DeleteCalls == 0,
+                "隔离镜像把消失文件移出当前树并保留可校验历史，不调用远端删除");
+
+            string unexpected = Path.Combine(current, "external.txt");
+            File.WriteAllText(unexpected, "external content"); // Synthetic remote fixture only.
+            File.WriteAllText(Path.Combine(source, "keep.txt"), "new content");
+            var extraState = await RunOnce();
+            var afterExtra = await versions.LoadAsync(provider, target);
+            Assert(extraState == TaskSyncState.Error && afterExtra?.Id == second.Id &&
+                File.ReadAllText(unexpected) == "external content" && File.ReadAllText(Path.Combine(current, "keep.txt")) == "keep original" && provider.DeleteCalls == 0,
+                "镜像遇到未记录的远端文件时停止，保留当前树和清单");
+            File.Delete(unexpected); // Remove only the synthetic fixture created directly above.
+            File.Delete(Path.Combine(source, "keep.txt")); // Synthetic local fixture only.
+            var emptyState = await RunOnce();
+            var afterEmpty = await versions.LoadAsync(provider, target);
+            Assert(emptyState == TaskSyncState.Error && task.LastError?.Contains("变空", StringComparison.Ordinal) == true &&
+                afterEmpty?.Id == second.Id && File.Exists(Path.Combine(current, "keep.txt")) && provider.DeleteCalls == 0,
+                "镜像源目录突然变空时停止，保留上一版本和当前树");
+            if (!await manager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("镜像原型测试未停止");
+
+            var ordinary = AppSettings.LoadVersionedBetaTestProfile(Guid.NewGuid());
+            typeof(AppSettings).GetProperty(nameof(AppSettings.IsVersionedBetaTestProfile))!.SetValue(ordinary, false);
+            var outside = new SyncTask { TaskName = "非隔离镜像", SourceFolder = source, DestinationFolder = "mirror-outside-test",
+                ProviderType = StorageProviderType.FnOsPersonal, ScheduleMode = TaskSyncScheduleMode.ManualOnly,
+                Strategy = BackupStrategy.Mirror, MirrorDeletionEnabled = true };
+            using var outsideManager = new TaskManager(ordinary, new SmbAuthService(), new LogService(Path.Combine(root, "mirror-outside-logs")), experimentalVersionedBackup: true);
+            outsideManager.StorageProviderSupplier = () => provider;
+            outsideManager.AddTask(outside);
+            var outsideDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            outsideManager.TaskStateChanged += t => { if (t.TaskId == outside.TaskId && t.State == TaskSyncState.ConfigurationError) outsideDone.TrySetResult(); };
+            outsideManager.TriggerSync(outside.TaskId);
+            if (await Task.WhenAny(outsideDone.Task, Task.Delay(10000)) != outsideDone.Task) throw new TimeoutException("非隔离镜像拒绝测试超时");
+            Assert(outside.LastSyncStatus == "镜像删除未启用或超出测试范围" && !Directory.Exists(Path.Combine(root, outside.DestinationFolder)),
+                "镜像原型即使启用也不会在非隔离配置运行");
+            if (!await outsideManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("非隔离镜像测试未停止");
+
+            var legacySettings = AppSettings.CreateInMemory();
+            var legacyTask = new SyncTask { TaskName = "旧引擎镜像", SourceFolder = source, DestinationFolder = Path.Combine(root, "mirror-legacy-target"),
+                ProviderType = StorageProviderType.LocalFileSystem, ScheduleMode = TaskSyncScheduleMode.ManualOnly,
+                Strategy = BackupStrategy.Mirror, MirrorDeletionEnabled = true };
+            using var legacyManager = new TaskManager(legacySettings, new SmbAuthService(), new LogService(Path.Combine(root, "mirror-legacy-logs")));
+            legacyManager.AddTask(legacyTask);
+            var legacyDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            legacyManager.TaskStateChanged += t => { if (t.TaskId == legacyTask.TaskId && t.State == TaskSyncState.ConfigurationError) legacyDone.TrySetResult(); };
+            legacyManager.TriggerSync(legacyTask.TaskId);
+            if (await Task.WhenAny(legacyDone.Task, Task.Delay(10000)) != legacyDone.Task) throw new TimeoutException("旧引擎镜像拒绝测试超时");
+            Assert(legacyTask.LastSyncStatus == "镜像删除未启用或超出测试范围" && !Directory.Exists(legacyTask.DestinationFolder),
+                "旧引擎即使设置授权标记也不能执行未经验证的镜像");
+            if (!await legacyManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("旧引擎镜像测试未停止");
+
+            string interruptedSource = Path.Combine(root, "mirror-interrupted-source"), interruptedTarget = "mirror-interrupted-target";
+            Directory.CreateDirectory(interruptedSource);
+            File.WriteAllText(Path.Combine(interruptedSource, "keep.txt"), "stable");
+            File.WriteAllText(Path.Combine(interruptedSource, "remove.txt"), "preserve through interruption");
+            var interruptedProvider = new FaultInjectingProvider(root) { ClaimFnOs = true };
+            var backup = new ExperimentalVersionedBackup();
+            await backup.CreateNewAsync(interruptedProvider, interruptedSource, interruptedTarget,
+                strategy: BackupStrategy.Mirror, mirrorDeletionEnabled: true);
+            var oldPlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(interruptedProvider, interruptedTarget);
+            var oldPublication = await new ExperimentalFirstProjection().PublishAsync(interruptedProvider, interruptedTarget, oldPlan);
+            File.Delete(Path.Combine(interruptedSource, "remove.txt")); // Synthetic local fixture only.
+            await backup.RunAsync(interruptedProvider, interruptedSource, interruptedTarget,
+                strategy: BackupStrategy.Mirror, mirrorDeletionEnabled: true);
+            var nextPlan = await new ExperimentalPhysicalSnapshot().PrepareAsync(interruptedProvider, interruptedTarget);
+            interruptedProvider.FailAfterArchiveMove = true;
+            bool interrupted = false;
+            try { await new ExperimentalNextProjection().PublishAsync(interruptedProvider, interruptedTarget, oldPlan, oldPublication, nextPlan); }
+            catch (IOException) { interrupted = true; }
+            interruptedProvider.FailAfterArchiveMove = false;
+            var inspection = await new ExperimentalProjectionRecoveryLocator().LocateAsync(interruptedProvider, interruptedTarget);
+            bool missingConsentRejected = false;
+            try { await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(interruptedProvider, interruptedTarget, inspection!, ""); }
+            catch (InvalidOperationException) { missingConsentRejected = true; }
+            Assert(interrupted && inspection?.Stage == ExperimentalProjectionRecoveryInspector.Stage.OldArchived &&
+                missingConsentRejected && interruptedProvider.DeleteCalls == 0,
+                "镜像归档中断时保留锁，未确认写入者停止前不恢复");
+            await new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(interruptedProvider, interruptedTarget,
+                inspection!, ExperimentalProjectionRecovery.RequiredAcknowledgement);
+            string recoveredCurrent = Path.Combine(root, interruptedTarget, "current");
+            string interruptedArchive = Path.Combine(root, inspection!.ArchiveDirectory!.Replace('/', Path.DirectorySeparatorChar), "current", "remove.txt");
+            Assert(File.ReadAllText(Path.Combine(recoveredCurrent, "keep.txt")) == "stable" &&
+                !File.Exists(Path.Combine(recoveredCurrent, "remove.txt")) &&
+                File.ReadAllText(interruptedArchive) == "preserve through interruption" && interruptedProvider.DeleteCalls == 0,
+                "确认停止写入后可恢复镜像发布，归档中的旧文件完整保留");
         }
 
         static async Task TestVersionedDeviceBindingAsync(string root)

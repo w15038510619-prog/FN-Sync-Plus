@@ -337,7 +337,7 @@ namespace FNSyncPlus.Core.Services
                 lock (_settings.Tasks)
                 {
                     var previous = (existing.TaskName, existing.Enabled, existing.AutoSyncEnabled, existing.RealtimeWatchEnabled,
-                        existing.IntervalMinutes, existing.Mode, existing.ScheduleMode, existing.Strategy, existing.SettlingDelaySeconds);
+                        existing.IntervalMinutes, existing.Mode, existing.ScheduleMode, existing.Strategy, existing.SettlingDelaySeconds, existing.MirrorDeletionEnabled);
                     existing.TaskName = task.TaskName;
                     existing.Enabled = task.Enabled;
                     existing.AutoSyncEnabled = task.AutoSyncEnabled;
@@ -347,11 +347,12 @@ namespace FNSyncPlus.Core.Services
                     existing.ScheduleMode = task.ScheduleMode;
                     existing.Strategy = task.Strategy;
                     existing.SettlingDelaySeconds = task.SettlingDelaySeconds;
+                    existing.MirrorDeletionEnabled = task.MirrorDeletionEnabled;
                     try { _settings.Save(); }
                     catch
                     {
                         (existing.TaskName, existing.Enabled, existing.AutoSyncEnabled, existing.RealtimeWatchEnabled,
-                            existing.IntervalMinutes, existing.Mode, existing.ScheduleMode, existing.Strategy, existing.SettlingDelaySeconds) = previous;
+                            existing.IntervalMinutes, existing.Mode, existing.ScheduleMode, existing.Strategy, existing.SettlingDelaySeconds, existing.MirrorDeletionEnabled) = previous;
                         throw;
                     }
 
@@ -701,6 +702,17 @@ namespace FNSyncPlus.Core.Services
                 TaskStateChanged?.Invoke(task);
                 return;
             }
+            if (task.Strategy == BackupStrategy.Mirror &&
+                (!task.IsExperimentalBackup || !task.MirrorDeletionEnabled || !(_settings.IsInMemoryOnly ||
+                    (_settings.IsVersionedBetaTestProfile && _settings.HasIsolatedTestBoundary))))
+            {
+                task.State = TaskSyncState.ConfigurationError;
+                task.LastSyncStatus = "镜像删除未启用或超出测试范围";
+                task.LastError = "镜像删除需要明确启用，当前仅允许在隔离测试范围验证。";
+                AppendTaskLog(task, "ERROR", task.LastError);
+                TaskStateChanged?.Invoke(task);
+                return;
+            }
             try { EnsureSeparateFromLegacyTasks(task); }
             catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
             {
@@ -807,7 +819,8 @@ namespace FNSyncPlus.Core.Services
                 {
                     if (!UseExperimentalVersionedBackup || provider == null)
                         throw new InvalidOperationException("实验性备份必须使用隔离会话和已连接的飞牛存储");
-                    if (!task.RequiresNewExperimentalBackup && !_isolatedProjections.ContainsKey(task.TaskId))
+                    if (!task.RequiresNewExperimentalBackup &&
+                        (!_isolatedProjections.ContainsKey(task.TaskId) || task.Strategy == BackupStrategy.Mirror))
                     {
                         task.CurrentFile = "正在核验隔离备份的已有物理目录及发布记录";
                         TaskStateChanged?.Invoke(task);
@@ -828,9 +841,9 @@ namespace FNSyncPlus.Core.Services
                     bool initializing = task.RequiresNewExperimentalBackup;
                     var result = initializing
                         ? string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot)
-                            ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId).ConfigureAwait(false)
-                            : await experimental.CreateNewFromExistingAsync(provider, task.SourceFolder, task.DestinationFolder, task.ExperimentalExistingRoot, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId).ConfigureAwait(false)
-                        : await experimental.RunAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay).ConfigureAwait(false);
+                            ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId, task.MirrorDeletionEnabled).ConfigureAwait(false)
+                            : await experimental.CreateNewFromExistingAsync(provider, task.SourceFolder, task.DestinationFolder, task.ExperimentalExistingRoot, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId, task.MirrorDeletionEnabled).ConfigureAwait(false)
+                        : await experimental.RunAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay, task.MirrorDeletionEnabled).ConfigureAwait(false);
                     task.RequiresNewExperimentalBackup = false;
                     if (initializing)
                     {
