@@ -1569,15 +1569,24 @@ namespace FNSyncPlus.Tests
                     var pairConfirmedRun = await versionedBackup.RunAsync(versionProvider, pairSource, pairFixture.folder,
                         confirmedRenames: resolution.Pairs);
                     var pairManifest = await versions.LoadAsync(versionProvider, pairFixture.folder);
+                    // The legacy fixture already carried one history entry for the same original name
+                    // (reason "superseded"); a confirmed rename must append a second one, never replace it.
+                    var renamedHistory = pairManifest!.Manifest.History
+                        .Single(h => h.OriginalRel == longOriginal && h.Reason == "renamed");
+                    var migratedHistory = pairManifest.Manifest.History
+                        .Single(h => h.OriginalRel == longOriginal && h.Reason == "superseded");
                     Assert(secondStop != null && resolutionProblems.Count == 0 && pairConfirmedRun.RenamedFiles == 1 &&
-                        pairManifest!.Manifest.Files.Any(f => f.OriginalRel == "候选丙.txt") &&
+                        pairManifest.Manifest.Files.Any(f => f.OriginalRel == "候选丙.txt") &&
                         !pairManifest.Manifest.Files.Any(f => f.OriginalRel == longOriginal) &&
                         pairManifest.Manifest.History.Any(h => h.OriginalRel == longOriginal && h.RenamedTo == "候选丙.txt" && h.Sha256 == pairBase.Manifest.Files.Single().Sha256) &&
-                        pairManifest.Manifest.History.Single(h => h.OriginalRel == longOriginal).StoredRel == pairBase.Manifest.Files.Single().StoredRel,
-                        "经确认的配对在内容校验通过后提交，旧内容进入历史而不是被覆盖");
+                        renamedHistory.StoredRel == pairBase.Manifest.Files.Single().StoredRel &&
+                        pairManifest.Manifest.History.Count(h => h.OriginalRel == longOriginal) == 2 &&
+                        migratedHistory.StoredRel.StartsWith(".fnsync/objects/", StringComparison.Ordinal) &&
+                        !string.Equals(migratedHistory.Sha256, pairBase.Manifest.Files.Single().Sha256, StringComparison.OrdinalIgnoreCase),
+                        "经确认的配对在内容校验通过后提交，旧内容进入历史而不是被覆盖，原有历史记录保留");
 
                     string pairRestore = Path.Combine(root, "versioned-rename-detail-restore");
-                    var pairHistory = pairManifest.Manifest.History.Single(h => h.OriginalRel == longOriginal);
+                    var pairHistory = renamedHistory;
                     bool pairHistoryRestored = await historyEngine.RunRestoreHistoryFileAsync(versionProvider, pairFixture.folder, pairRestore, pairHistory);
                     Assert(pairHistoryRestored && File.ReadAllText(Path.Combine(pairRestore, longOriginal)) == "legacy active",
                         "人工确认改名后旧名称历史仍可恢复");
