@@ -69,6 +69,8 @@ namespace FNSyncPlus.Core.Services
         public void LogTask(TaskLogEntry entry)
         {
             if (entry == null || string.IsNullOrWhiteSpace(entry.TaskId)) return;
+            entry = entry.Copy();
+            entry.EntryId = Guid.NewGuid().ToString("N");
 
             // 敏感信息安全脱敏
             entry.Message = Sanitize(entry.Message);
@@ -114,7 +116,8 @@ namespace FNSyncPlus.Core.Services
             int retryCount = 0,
             string? uploadResult = null,
             string? manifestResult = null,
-            string? verificationResult = null)
+            string? verificationResult = null,
+            string? syncBatchId = null)
         {
             var entry = new TaskLogEntry
             {
@@ -133,6 +136,7 @@ namespace FNSyncPlus.Core.Services
                 UploadResult = uploadResult,
                 ManifestResult = manifestResult,
                 VerificationResult = verificationResult,
+                SyncBatchId = syncBatchId,
                 Timestamp = DateTimeOffset.Now
             };
 
@@ -225,8 +229,7 @@ namespace FNSyncPlus.Core.Services
         #region 读取、检索与导出
 
         /// <summary>
-        /// 获取指定任务的完整日志记录（优先从磁盘读取持久化历史，合并当前运行时新增项）
-        /// 软件重启后仍能 100% 完整加载历史日志
+        /// 读取最近的任务日志，合并当前运行时新增项；旧日志可从日志目录或诊断包查看。
         /// </summary>
         public IReadOnlyList<TaskLogEntry> GetTaskLogs(string taskId, int maxCount = 500)
         {
@@ -285,8 +288,10 @@ namespace FNSyncPlus.Core.Services
                 var memItems = memQueue.ToArray();
                 foreach (var item in memItems)
                 {
-                    // 依据时间戳与信息去重
-                    if (!result.Any(r => r.Timestamp == item.Timestamp && r.Message == item.Message))
+                    // New entries have stable identities; legacy entries fall back to timestamp, message and batch.
+                    if (!result.Any(r => item.EntryId != null
+                        ? string.Equals(r.EntryId, item.EntryId, StringComparison.Ordinal)
+                        : r.EntryId == null && r.Timestamp == item.Timestamp && r.Message == item.Message && r.SyncBatchId == item.SyncBatchId))
                     {
                         result.Add(item);
                     }

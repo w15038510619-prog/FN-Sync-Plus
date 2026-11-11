@@ -26,6 +26,7 @@ namespace FNSyncPlus.Core.Services
 
         private readonly ConcurrentQueue<string> _taskQueue = new();
         private readonly ConcurrentDictionary<string, CancellationTokenSource> _runningCts = new();
+        private readonly ConcurrentDictionary<string, string> _runningBatchIds = new();
         private readonly object _taskLifecycleLock = new();
         private readonly Dictionary<string, TaskCompletionSource> _runningCompletions = new();
         private readonly Dictionary<string, TaskCompletionSource> _recoverySessions = new();
@@ -657,6 +658,7 @@ namespace FNSyncPlus.Core.Services
                             completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                             _runningCts[taskId] = taskCts;
                             _runningCompletions[taskId] = completion;
+                            _runningBatchIds[taskId] = Guid.NewGuid().ToString("N");
                         }
 
                         // 异步执行单个任务
@@ -673,6 +675,7 @@ namespace FNSyncPlus.Core.Services
                                 {
                                     _runningCts.TryRemove(taskId, out _);
                                     _runningCompletions.Remove(taskId);
+                                    _runningBatchIds.TryRemove(taskId, out _);
                                     if (task.IsUserPaused && !_removingTasks.Contains(taskId) && task.State != TaskSyncState.Paused)
                                     {
                                         task.State = TaskSyncState.Paused;
@@ -970,7 +973,8 @@ namespace FNSyncPlus.Core.Services
                             message: $"文件同步失败: {item.ErrorMessage}",
                             localRel: item.RelativePath,
                             errorMsg: item.ErrorMessage,
-                            retryCount: item.RetryCount);
+                            retryCount: item.RetryCount,
+                            syncBatchId: _runningBatchIds.TryGetValue(task.TaskId, out var batchId) ? batchId : null);
                     }
                 }
                 else
@@ -986,12 +990,14 @@ namespace FNSyncPlus.Core.Services
                 }
 
                 _settings.Save();
+                AppendTaskLog(task, report.FailedFiles > 0 ? "WARN" : "INFO", task.LastSyncStatus);
                 TaskStateChanged?.Invoke(task);
             }
             catch (OperationCanceledException)
             {
                 task.State = TaskSyncState.Paused;
                 task.LastSyncStatus = "已暂停/取消";
+                AppendTaskLog(task, "INFO", task.LastSyncStatus);
                 TaskStateChanged?.Invoke(task);
             }
             catch (Exception ex)
@@ -1286,7 +1292,9 @@ namespace FNSyncPlus.Core.Services
         private void AppendTaskLog(SyncTask task, string level, string message)
         {
             string cleanMsg = CleanLogMessage(message);
-            string formatted = $"[{DateTime.Now:HH:mm:ss}] [{level,-5}] [SYNC] {cleanMsg}";
+            _runningBatchIds.TryGetValue(task.TaskId, out string? batchId);
+            string formatted = $"[{DateTime.Now:HH:mm:ss}] [{level,-5}] [SYNC] {cleanMsg}" +
+                (batchId == null ? string.Empty : $" [批次: {batchId}]");
 
             // 1. 存入持久化日志服务 (磁盘文件 + 内存)
             try
@@ -1297,6 +1305,7 @@ namespace FNSyncPlus.Core.Services
                     Level = level,
                     Stage = "SYNC",
                     Message = cleanMsg,
+                    SyncBatchId = batchId,
                     Timestamp = DateTimeOffset.Now
                 });
             }

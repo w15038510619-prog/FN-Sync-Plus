@@ -161,21 +161,20 @@
                         </Grid.RowDefinitions>
 
                         <!-- Log Toolbar -->
-                        <Grid Grid.Row="0">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBox Grid.Column="0" PlaceholderText="搜索日志关键字..." Text="{x:Bind ViewModel.LogSearchQuery, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="160" Margin="0,0,8,0" />
-                            <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.SelectedLogLevelIndex, Mode=TwoWay}" Width="110" Margin="0,0,8,0">
-                                <ComboBoxItem Content="全部日志" />
-                                <ComboBoxItem Content="仅看错误" />
-                                <ComboBoxItem Content="错误与警告" />
-                            </ComboBox>
-                            <TextBlock Grid.Column="2" Text="{x:Bind ViewModel.StatusFeedbackMessage, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                            <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6">
+                        <StackPanel Grid.Row="0" Spacing="6">
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBox Grid.Column="0" PlaceholderText="搜索关键字或批次号..." Text="{x:Bind ViewModel.LogSearchQuery, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.SelectedLogLevelIndex, Mode=TwoWay}" Width="110">
+                                    <ComboBoxItem Content="全部日志" />
+                                    <ComboBoxItem Content="仅看错误" />
+                                    <ComboBoxItem Content="错误与警告" />
+                                </ComboBox>
+                            </Grid>
+                            <StackPanel Orientation="Horizontal" Spacing="6">
                                 <Button Click="BtnRefreshLogs_Click" Style="{ThemeResource SubtleButtonStyle}" Padding="8,4" ToolTipService.ToolTip="刷新日志">
                                     <StackPanel Orientation="Horizontal" Spacing="4">
                                         <FontIcon Glyph="&#xE72C;" FontSize="11" />
@@ -201,7 +200,9 @@
                                     </StackPanel>
                                 </Button>
                             </StackPanel>
-                        </Grid>
+                            <TextBlock Text="{x:Bind ViewModel.StatusFeedbackMessage, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="搜索最近 5 个日志文件中的最后 500 条；已保存的完整日志可从目录查看或导出。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
 
                         <!-- Empty Logs State -->
                         <Grid Grid.Row="2" Visibility="{x:Bind GetEmptyLogsVisibility(ViewModel.HasLogs), Mode=OneWay}" MinHeight="160">
@@ -212,10 +213,15 @@
                             </StackPanel>
                         </Grid>
 
-                        <!-- Log Items List with horizontal scrolling, text wrapping, and selectable copyable text -->
-                        <ScrollViewer Grid.Row="2" Visibility="{x:Bind GetHasLogsVisibility(ViewModel.HasLogs), Mode=OneWay}" 
-                                      HorizontalScrollBarVisibility="Auto" HorizontalScrollMode="Enabled" VerticalScrollBarVisibility="Auto">
-                            <ListView ItemsSource="{x:Bind ViewModel.FilteredLogs, Mode=OneWay}" SelectionMode="None">
+                        <!-- Wrap log entries within the available width. -->
+                        <ListView Grid.Row="2" Visibility="{x:Bind GetHasLogsVisibility(ViewModel.HasLogs), Mode=OneWay}"
+                                  ItemsSource="{x:Bind ViewModel.FilteredLogs, Mode=OneWay}" SelectionMode="None"
+                                  ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <ListView.ItemContainerStyle>
+                                    <Style TargetType="ListViewItem">
+                                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    </Style>
+                                </ListView.ItemContainerStyle>
                                 <ListView.ItemTemplate>
                                     <DataTemplate x:DataType="vm:TaskLogDisplayItem">
                                         <Grid Padding="4,3">
@@ -230,8 +236,7 @@
                                         </Grid>
                                     </DataTemplate>
                                 </ListView.ItemTemplate>
-                            </ListView>
-                        </ScrollViewer>
+                        </ListView>
                     </Grid>
                 </Border>
             </TabViewItem>

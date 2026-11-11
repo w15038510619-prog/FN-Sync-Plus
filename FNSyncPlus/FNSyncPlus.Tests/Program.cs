@@ -280,6 +280,19 @@ namespace FNSyncPlus.Tests
                 bool shutdownLogPersisted = new LogService(shutdownLog.LogsDirectory).GetTaskLogs("shutdown-check").Any(x => x.Message == "pending log marker");
                 Assert(flushWasPending && shutdownTimedOut && stoppedAfterLog && shutdownLogPersisted,
                     "正常退出等待已排队日志写入，超时不误报退出完成");
+                var oldLogEntry = System.Text.Json.JsonSerializer.Deserialize<TaskLogEntry>("{\"task_id\":\"old\",\"msg\":\"old log\"}");
+                Assert(oldLogEntry != null && oldLogEntry.SyncBatchId == null && oldLogEntry.EntryId == null && !oldLogEntry.FormattedDisplay.Contains("批次", StringComparison.Ordinal),
+                    "旧日志没有批次号时仍可读取且不伪造批次");
+                var duplicateLog = new LogService(Path.Combine(root, "batch-dedup-log"));
+                var duplicateTime = DateTimeOffset.Now;
+                var duplicateEntry = new TaskLogEntry { TaskId = "same-time", Timestamp = duplicateTime, Message = "same message", SyncBatchId = "batch-one" };
+                duplicateLog.LogTask(duplicateEntry);
+                duplicateLog.LogTask(duplicateEntry);
+                await duplicateLog.FlushPendingTaskLogsAsync();
+                var sameTimeLogs = duplicateLog.GetTaskLogs("same-time");
+                Assert(sameTimeLogs.Count == 2 && sameTimeLogs.Select(x => x.EntryId).Distinct().Count() == 2 &&
+                    new LogService(duplicateLog.LogsDirectory).GetTaskLogs("same-time").Count == 2,
+                    "同一批次同一时刻的相同日志分别保留，内存与磁盘合并不重复");
                 string previewDir = new string('中', 90);
                 string previewName = new string('中', 98) + "ab.txt";
                 string previewObject = ".fnsync/objects/obj-" + Guid.NewGuid().ToString("N");
@@ -2368,7 +2381,8 @@ namespace FNSyncPlus.Tests
             try
             {
                 Environment.CurrentDirectory = root;
-                using var manager = new TaskManager(settings, new SmbAuthService(), new LogService(Path.Combine(root, "isolated-version-task-logs")));
+                var taskLogService = new LogService(Path.Combine(root, "isolated-version-task-logs"));
+                using var manager = new TaskManager(settings, new SmbAuthService(), taskLogService);
                 manager.UseExperimentalVersionedBackup = true;
                 manager.StorageProviderSupplier = () => provider;
                 manager.AddTask(task);
@@ -2412,6 +2426,12 @@ namespace FNSyncPlus.Tests
                     Directory.GetDirectories(initialProjectionRoot, "candidate-*").Length == candidatesBefore &&
                     Directory.GetDirectories(initialProjectionRoot, "archive-*").Length == 0,
                     "无变化检查保留原版本，不上传或重复生成物理树");
+                await taskLogService.FlushPendingTaskLogsAsync();
+                var persistedBatches = new LogService(taskLogService.LogsDirectory).GetTaskLogs(task.TaskId)
+                    .Where(x => x.Message.Contains("物理目录已发布", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(x.SyncBatchId)).ToList();
+                Assert(persistedBatches.Select(x => x.SyncBatchId).Distinct().Count() == 2 &&
+                    persistedBatches.All(x => x.FormattedDisplay.Contains(x.SyncBatchId!, StringComparison.Ordinal)),
+                    "两次同步写入不同批次号，重启读取后可按批次检索");
                 string currentFile = Path.Combine(root, task.DestinationFolder, "current", "sample.txt");
                 File.WriteAllText(currentFile, "external modification");
                 completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
