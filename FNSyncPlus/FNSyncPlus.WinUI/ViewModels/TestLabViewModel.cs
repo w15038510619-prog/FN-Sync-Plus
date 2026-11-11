@@ -201,6 +201,37 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _restoreSuiteSummary = string.Empty;
 
         [RelayCommand]
+        public async Task RunStressAndFaultSuiteAsync()
+        {
+            IsBusy = true;
+            ExecutionLogs.Clear();
+            RestoreSuiteSummary = string.Empty;
+            var progress = new Progress<string>(msg => ExecutionLogs.Add($"[{DateTime.Now:HH:mm:ss}] {msg}"));
+            try
+            {
+                StatusText = "正在本地隔离目录运行压力与故障注入测试（不访问真实 NAS）...";
+                string workspace = Path.Combine(Path.GetTempPath(), "FNSyncPlus_Stress_" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(workspace);
+                string mockRoot = Path.Combine(workspace, "MockNas");
+                Directory.CreateDirectory(mockRoot);
+                await using var provider = new SmbStorageProvider(rootUncPath: mockRoot);
+                var suite = new StressAndFaultTestSuite();
+                foreach (int count in new[] { 1000, 5000 })
+                {
+                    ExecutionLogs.Add($"开始 {count} 文件压力测试...");
+                    var m = await suite.RunStressAsync(provider, Path.Combine(workspace, "run" + count), count);
+                    ExecutionLogs.Add($"STRESS {m.Scenario}: 首次 {m.InitialSeconds:F2}s / 无变化 {m.UnchangedSeconds:F2}s / 增量 {m.IncrementalSeconds:F2}s · 上传 {m.IncrementalUploadedBytes}B · 源 {m.SourceBytes / 1048576.0:F1}MiB · 峰值内存 {m.PeakWorkingSetBytes / 1048576.0:F0}MiB");
+                }
+                StatusText = "压力测试完成（10000 文件场景请在 CI/命令行运行）。故障注入需要测试专用提供程序，不在界面直接执行。";
+            }
+            catch (Exception ex)
+            {
+                StatusText = $"压力测试异常: {ex.Message}";
+            }
+            finally { IsBusy = false; }
+        }
+
+        [RelayCommand]
         public async Task RunRestoreCenterSuiteAsync()
         {
             IsBusy = true;

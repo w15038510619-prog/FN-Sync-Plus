@@ -57,6 +57,12 @@
                         </StackPanel>
                     </Button>
 
+                    <Button Command="{x:Bind ViewModel.RunStressAndFaultSuiteCommand}" Padding="12,7" ToolTipService.ToolTip="本地隔离开展 1000/5000 文件压力与基准测量">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE9D2;" FontSize="12" />
+                            <TextBlock Text="压力测试" FontSize="12" />
+                        </StackPanel>
+                    </Button>
                     <Button Command="{x:Bind ViewModel.RunRestoreCenterSuiteCommand}" Padding="12,7" ToolTipService.ToolTip="在本地隔离目录运行名称、历史、损坏、安全与取消场景的恢复套件">
                         <StackPanel Orientation="Horizontal" Spacing="6">
                             <FontIcon Glyph="&#xE777;" FontSize="12" />
