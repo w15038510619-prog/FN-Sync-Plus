@@ -21,9 +21,11 @@ namespace FNSyncPlus.WinUI.ViewModels
     {
         public string OriginalRel { get; set; } = string.Empty;
         public string StoredRel { get; set; } = string.Empty;
+        public string StorageText => $"备份位置：{StoredRel}";
         public int Utf8Bytes { get; set; }
         public string Utf8BytesFormatted => $"{Utf8Bytes} B";
         public string Sha256 { get; set; } = string.Empty;
+        public string HashText => $"SHA-256：{Sha256}";
         public string EntryType { get; set; } = "文件"; // 文件 或 目录
         public bool IsOverLimit => Utf8Bytes > 255;
     }
