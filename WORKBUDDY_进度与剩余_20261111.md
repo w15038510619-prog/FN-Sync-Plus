@@ -21,6 +21,7 @@
 | 阶段 3 安装程序脚本 | `FNSyncPlus/installer/FNSyncPlus.iss`（未编译） |
 | 阶段 3 文档与安全审计 | `docs/deployment-guide.md` 等 5 份 |
 | 阶段 4 冻结与矩阵 | `docs/phase4/acceptance-matrix.md` |
+| 推送与 CI | 分支已推送，Draft PR #4；CI runs/42985013182 全绿（465 / 0 / 0） |
 
 ## 2. 关键新增文件
 

@@ -10,7 +10,8 @@
 | # | 项目 | 状态 | 证据 / 原因 |
 |---|---|---|---|
 | 1 | 隔离安全回归（Windows 本机） | **PASS** | 465 PASS / 0 FAIL / 0 SKIP |
-| 2 | 常规离线套件 | **PASS** | 333 PASS / 0 FAIL / 3 SKIP |
+| 1b | 同一套件在 GitHub CI（windows-latest） | **PASS** | 465 PASS / 0 FAIL / 0 SKIP，与本地一致：runs/42985013182 |
+| 2 | 常规离线套件 | **PASS** | 本地 333 PASS / 0 FAIL / 3 SKIP；CI 328 PASS / 0 FAIL / 4 SKIP（CI 少 5 个通过、多 1 个跳过，来自无桌面会话的环境差异） |
 | 3 | 更新引擎（30 项，回环 HTTPS） | **PASS** | `--update-tests` 30/30 |
 | 4 | 容量与保留预览（10 项） | **PASS** | `--capacity-tests` 10/10 |
 | 5 | 真实二进制安装 0.4.1 并切换指针 | **PASS** | `APPLIED 0.4.1`，`current.json`/`previous.json` 同步更新，`update.log` 有记录 |
