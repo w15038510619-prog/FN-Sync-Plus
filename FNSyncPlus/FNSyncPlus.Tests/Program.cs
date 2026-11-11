@@ -1530,6 +1530,58 @@ namespace FNSyncPlus.Tests
                     "版本化模糊改名停止时列出候选文件并说明原备份未改变");
                 Assert(versionAmbiguityRejected && (await versions.LoadAsync(versionProvider, ambiguousVersionFixture.folder))?.Id == ambiguousVersionBase.Id,
                     "版本化同步拒绝多个同内容重命名候选");
+                {
+                    // Enriched details + explicit manual pairing.
+                    var pairFixture = await MakeLegacyAsync("versioned-rename-detail", 4);
+                    var pairBase = await migration.MigrateAsync(versionProvider, pairFixture.folder);
+                    string pairSource = Path.Combine(root, "versioned-rename-detail-source");
+                    Directory.CreateDirectory(pairSource);
+                    File.WriteAllText(Path.Combine(pairSource, "候选甲.txt"), "legacy active");
+                    File.WriteAllText(Path.Combine(pairSource, "候选乙.txt"), "legacy active");
+                    AmbiguousRenameException? pairStop = null;
+                    try { await versionedBackup.RunAsync(versionProvider, pairSource, pairFixture.folder); }
+                    catch (AmbiguousRenameException ex) { pairStop = ex; }
+                    Assert(pairStop != null && pairStop.AmbiguousGroups.Count == 1 &&
+                        pairStop.AmbiguousGroups[0].Sha256.Length == 64 && !string.IsNullOrEmpty(pairStop.AmbiguousGroups[0].Reason) &&
+                        pairStop.UnmatchedAdditionDetails.Count == 2 &&
+                        pairStop.UnmatchedAdditionDetails.All(a => a.Size == "legacy active".Length && a.Sha256.Length == 64) &&
+                        pairStop.PreviousBackupPreserved && pairStop.PreviousManifestId == pairBase.Id,
+                        "模糊改名异常携带原/候选路径、大小、SHA-256、停止原因和旧备份保留状态");
+
+                    string hashOfSource(string rel) => HashHelper.ComputeFileSha256(Path.Combine(pairSource, rel));
+                    var stale = new AmbiguousRenameResolution(new[] { new AmbiguousRenameResolution.Pair(longOriginal, "候选甲.txt") });
+                    var staleProblems = AmbiguousRenameResolution.Validate(pairStop!, stale, pairSource, hashOfSource);
+                    File.WriteAllText(Path.Combine(pairSource, "候选甲.txt"), "changed after scan");
+                    var changedAfterScan = AmbiguousRenameResolution.Validate(pairStop!, stale, pairSource, hashOfSource);
+                    Assert(staleProblems.Count == 0 && changedAfterScan.Count == 1 &&
+                        changedAfterScan[0].Reason.Contains("已变化", StringComparison.Ordinal),
+                        "人工配对确认要求新文件当前内容与停止时一致，变化后必须重新扫描");
+
+                    File.WriteAllText(Path.Combine(pairSource, "候选甲.txt"), "legacy active");
+                    File.Delete(Path.Combine(pairSource, "候选乙.txt"));
+                    File.WriteAllText(Path.Combine(pairSource, "候选丙.txt"), "legacy active");
+                    File.WriteAllText(Path.Combine(pairSource, "候选丁.txt"), "legacy active");
+                    AmbiguousRenameException? secondStop = null;
+                    try { await versionedBackup.RunAsync(versionProvider, pairSource, pairFixture.folder); }
+                    catch (AmbiguousRenameException ex) { secondStop = ex; }
+                    var resolution = new AmbiguousRenameResolution(new[] { new AmbiguousRenameResolution.Pair(longOriginal, "候选丙.txt") });
+                    var resolutionProblems = AmbiguousRenameResolution.Validate(secondStop!, resolution, pairSource, hashOfSource);
+                    var pairConfirmedRun = await versionedBackup.RunAsync(versionProvider, pairSource, pairFixture.folder,
+                        confirmedRenames: resolution.Pairs);
+                    var pairManifest = await versions.LoadAsync(versionProvider, pairFixture.folder);
+                    Assert(secondStop != null && resolutionProblems.Count == 0 && pairConfirmedRun.RenamedFiles == 1 &&
+                        pairManifest!.Manifest.Files.Any(f => f.OriginalRel == "候选丙.txt") &&
+                        !pairManifest.Manifest.Files.Any(f => f.OriginalRel == longOriginal) &&
+                        pairManifest.Manifest.History.Any(h => h.OriginalRel == longOriginal && h.RenamedTo == "候选丙.txt" && h.Sha256 == pairBase.Manifest.Files.Single().Sha256) &&
+                        pairManifest.Manifest.History.Single(h => h.OriginalRel == longOriginal).StoredRel == pairBase.Manifest.Files.Single().StoredRel,
+                        "经确认的配对在内容校验通过后提交，旧内容进入历史而不是被覆盖");
+
+                    string pairRestore = Path.Combine(root, "versioned-rename-detail-restore");
+                    var pairHistory = pairManifest.Manifest.History.Single(h => h.OriginalRel == longOriginal);
+                    bool pairHistoryRestored = await historyEngine.RunRestoreHistoryFileAsync(versionProvider, pairFixture.folder, pairRestore, pairHistory);
+                    Assert(pairHistoryRestored && File.ReadAllText(Path.Combine(pairRestore, longOriginal)) == "legacy active",
+                        "人工确认改名后旧名称历史仍可恢复");
+                }
                 var existingDuplicateFixture = await MakeLegacyAsync("versioned-existing-duplicate", 4);
                 var existingDuplicateManifest = await manifestManager.LoadManifestAsync(versionProvider, existingDuplicateFixture.folder);
                 string existingDuplicatePath = Path.Combine(root, existingDuplicateFixture.folder, "duplicate.txt");
