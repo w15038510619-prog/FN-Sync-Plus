@@ -37,6 +37,12 @@ namespace FNSyncPlus.WinUI.Dialogs
             CopyToClipboard(ViewModel.SourceFolder, "源路径已复制到剪贴板");
         }
 
+        private void BtnConfirmSingleRenamePair_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button button && button.Tag is AmbiguousRenameGroupDisplay group)
+                ViewModel.ConfirmRenamePair(group);
+        }
+
         private void BtnCopyDestPath_Click(object sender, RoutedEventArgs e)
         {
             CopyToClipboard(ViewModel.DestinationFolder, "目标路径已复制到剪贴板");

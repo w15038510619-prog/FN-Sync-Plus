@@ -87,6 +87,32 @@
                 <InfoBar IsOpen="True" Severity="Warning" IsClosable="False"
                          Visibility="{x:Bind GetPendingDifferencesVisibility(ViewModel.HasPendingDifferences), Mode=OneWay}"
                          Message="{x:Bind ViewModel.PendingDifferenceNotice, Mode=OneWay}" />
+
+                <!-- 可确认的改名配对：显示原路径、大小与 SHA-256，由用户显式选择 -->
+                <StackPanel Spacing="6" Visibility="{x:Bind GetPendingDifferencesVisibility(ViewModel.HasRenameCandidates), Mode=OneWay}">
+                    <TextBlock Text="如果确认这是改名，可以为每组旧文件选择一个当前文件；提交前会重新校验内容。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.PendingRenameGroups, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:AmbiguousRenameGroupDisplay">
+                                <Border Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="4" Padding="8" Margin="0,0,0,6">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock FontSize="12" TextWrapping="Wrap">
+                                            <Run Text="原备份文件:" FontWeight="SemiBold" />
+                                            <Run Text="{x:Bind OldPath}" />
+                                        </TextBlock>
+                                        <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap">
+                                            <Run Text="{x:Bind SizeText}" /> <Run Text="字节 · SHA-256 " /><Run Text="{x:Bind Sha256Short}" />
+                                        </TextBlock>
+                                        <TextBlock Text="{x:Bind Reason}" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+                                        <ComboBox ItemsSource="{x:Bind Candidates}" SelectedItem="{x:Bind SelectedCandidate, Mode=TwoWay}" PlaceholderText="选择接替该内容的新文件" HorizontalAlignment="Stretch" />
+                                        <Button Content="确认这一组配对" Click="BtnConfirmSingleRenamePair_Click" Tag="{Binding}" HorizontalAlignment="Right" Style="{ThemeResource SubtleButtonStyle}" />
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{x:Bind ViewModel.RenameConfirmationMessage, Mode=OneWay}" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                </StackPanel>
             </StackPanel>
         </Border>
 

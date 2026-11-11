@@ -370,6 +370,17 @@ namespace FNSyncPlus.Core.Services
         /// <summary>
         /// 触发指定任务立即执行同步
         /// </summary>
+        private readonly Dictionary<string, IReadOnlyDictionary<string, string>> _confirmedRenames = new(StringComparer.Ordinal);
+
+        private IReadOnlyDictionary<string, string>? TakeConfirmedRenames(string taskId)
+        {
+            lock (_taskLifecycleLock)
+            {
+                if (_confirmedRenames.Remove(taskId, out var pairs)) return pairs;
+                return null;
+            }
+        }
+
         public void TriggerSync(string taskId)
         {
             lock (_taskLifecycleLock)
@@ -411,6 +422,23 @@ namespace FNSyncPlus.Core.Services
                     AppendTaskLog(task, "INFO", "任务已加入执行队列，等待调度...");
                 }
             }
+        }
+
+        /// <summary>
+        /// 记录用户对“待处理改名差异”的显式确认配对，然后触发一次同步。配对会在提交前按当前
+        /// 源文件内容重新校验；内容已变化时本次同步仍会停止并要求重新扫描。
+        /// </summary>
+        public void TriggerSyncWithConfirmedRenames(string taskId, AmbiguousRenameResolution resolution)
+        {
+            ArgumentNullException.ThrowIfNull(resolution);
+            lock (_taskLifecycleLock)
+            {
+                var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+                if (task == null) return;
+                _confirmedRenames[taskId] = resolution.Pairs;
+                AppendTaskLog(task, "INFO", $"用户确认了 {resolution.Pairs.Count} 组改名配对，将在提交前重新校验内容");
+            }
+            TriggerSync(taskId);
         }
 
         /// <summary>
@@ -864,7 +892,8 @@ namespace FNSyncPlus.Core.Services
                         ? string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot)
                             ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId, task.MirrorDeletionEnabled).ConfigureAwait(false)
                             : await experimental.CreateNewFromExistingAsync(provider, task.SourceFolder, task.DestinationFolder, task.ExperimentalExistingRoot, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId, task.MirrorDeletionEnabled).ConfigureAwait(false)
-                        : await experimental.RunAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay, task.MirrorDeletionEnabled).ConfigureAwait(false);
+                        : await experimental.RunAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay, task.MirrorDeletionEnabled,
+                            TakeConfirmedRenames(task.TaskId)).ConfigureAwait(false);
                     task.RequiresNewExperimentalBackup = false;
                     if (initializing)
                     {
@@ -989,6 +1018,8 @@ namespace FNSyncPlus.Core.Services
                     task.LastSyncStatus = task.IsExperimentalBackup
                         ? $"{trialLabel}物理目录已发布（复用 {reusedFiles}，上传 {report.UploadedFiles}）"
                         : "同步成功完成 (已最新)";
+                    // A committed run settles any earlier pending rename difference.
+                    task.PendingRenameDetails = null;
                 }
 
                 _settings.Save();
@@ -1011,6 +1042,7 @@ namespace FNSyncPlus.Core.Services
                     // 需要用户检查的差异不是故障：上一份备份完整保留，等待人工整理后重新同步。
                     task.LastError = ambiguous.BuildUserSummary();
                     task.LastSyncStatus = "待处理改名差异";
+                    task.PendingRenameDetails = AmbiguousRenameDetails.Serialize(ambiguous);
                     task.CurrentFile = "待处理改名差异：上一份备份未改变";
                     if (task.LastScannedFiles == 0 && syncEngine.LastScannedCount > 0) task.LastScannedFiles = syncEngine.LastScannedCount;
                     task.LastFailedFiles = 0;

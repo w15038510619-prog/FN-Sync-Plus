@@ -123,6 +123,12 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _pendingDifferenceNotice = string.Empty;
 
         [ObservableProperty]
+        private bool _hasRenameCandidates;
+
+        [ObservableProperty]
+        private string _renameConfirmationMessage = string.Empty;
+
+        [ObservableProperty]
         private bool _hasLongNameMappings;
 
         [ObservableProperty]
@@ -144,6 +150,9 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _statusFeedbackMessage = string.Empty;
 
         public ObservableCollection<LongNameMappingDisplayItem> LongNameMappings { get; } = new();
+
+        /// <summary>Groups from a pending ambiguous-rename stop, for display and explicit confirmation.</summary>
+        public ObservableCollection<AmbiguousRenameGroupDisplay> PendingRenameGroups { get; } = new();
         public ObservableCollection<TaskLogDisplayItem> FilteredLogs { get; } = new();
         private readonly List<TaskLogDisplayItem> _allLoadedLogs = new();
         private readonly List<TaskLogDisplayItem> _recentLoadedLogs = new();
@@ -196,6 +205,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             HasPendingDifferences = string.Equals(task.LastSyncStatus, "待处理改名差异", StringComparison.Ordinal) &&
                 !string.IsNullOrWhiteSpace(task.LastError);
             PendingDifferenceNotice = HasPendingDifferences ? task.LastError! : string.Empty;
+            RefreshPendingRenameGroups(task);
 
             // 1. 加载日志 (支持磁盘持久化与实时流)
             await LoadLogsAsync(task.TaskId);
@@ -509,6 +519,57 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
         }
 
+        /// <summary>
+        /// Confirms the user-selected pairing for one ambiguous group and re-triggers the sync.
+        /// The backup run re-hashes both sides; a stale choice simply stops again.
+        /// </summary>
+        [RelayCommand]
+        public void ConfirmRenamePair(AmbiguousRenameGroupDisplay? group)
+        {
+            if (TaskModel == null || group == null || string.IsNullOrWhiteSpace(group.SelectedCandidate))
+            {
+                RenameConfirmationMessage = "请先为每组旧文件选择一个新文件，或改为整理源目录后重新扫描。";
+                return;
+            }
+            try
+            {
+                var resolution = new AmbiguousRenameResolution(new[]
+                {
+                    new AmbiguousRenameResolution.Pair(group.OldPath, group.SelectedCandidate!)
+                });
+                _taskManager.TriggerSyncWithConfirmedRenames(TaskModel.TaskId, resolution);
+                RenameConfirmationMessage = "已提交确认，将在提交前重新校验内容；若文件已变化会再次停止。";
+            }
+            catch (ArgumentException ex)
+            {
+                RenameConfirmationMessage = ex.Message;
+            }
+        }
+
+        private void RefreshPendingRenameGroups(SyncTask task)
+        {
+            PendingRenameGroups.Clear();
+            RenameConfirmationMessage = string.Empty;
+            var payload = HasPendingDifferences ? AmbiguousRenameDetails.TryParse(task.PendingRenameDetails) : null;
+            if (payload == null)
+            {
+                HasRenameCandidates = false;
+                return;
+            }
+            foreach (var group in payload.Groups)
+                PendingRenameGroups.Add(new AmbiguousRenameGroupDisplay
+                {
+                    OldPath = group.OldPath,
+                    SizeText = FormatBytes(group.Size),
+                    Sha256Short = group.Sha256.Length == 64 ? group.Sha256[..12] + "…" : group.Sha256,
+                    Reason = group.Reason,
+                    Candidates = group.Candidates,
+                    SelectedCandidate = group.Candidates.Count == 1 ? group.Candidates[0] : null
+                });
+            HasRenameCandidates = PendingRenameGroups.Count > 0 &&
+                PendingRenameGroups.All(g => g.Candidates.Count > 0);
+        }
+
         private static string FormatBytes(long bytes)
         {
             if (bytes >= 1024 * 1024 * 1024)
@@ -519,5 +580,16 @@ namespace FNSyncPlus.WinUI.ViewModels
                 return $"{bytes / 1024.0:F1} KiB";
             return $"{bytes} B";
         }
+    }
+
+    /// <summary>One ambiguous rename group shown in task details.</summary>
+    public class AmbiguousRenameGroupDisplay
+    {
+        public string OldPath { get; set; } = "";
+        public string SizeText { get; set; } = "";
+        public string Sha256Short { get; set; } = "";
+        public string Reason { get; set; } = "";
+        public List<string> Candidates { get; set; } = new();
+        public string? SelectedCandidate { get; set; }
     }
 }
