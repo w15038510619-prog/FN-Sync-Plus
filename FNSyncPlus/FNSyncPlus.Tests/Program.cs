@@ -135,6 +135,7 @@ namespace FNSyncPlus.Tests
                 await TestBatchFolderCollisionPlanningAsync();
                 await TestMultiTaskEngineIsolationAsync();
                 await TestRestoreStagingShortNameSafetyAsync();
+                await TestRestoreJunctionTargetSafetyAsync();
                 await TestTestLabEngineSampleGenerationAndSimulationAsync();
                 await TestPersonalSpaceSameNameBackupFolderAndRestoreLifecycleAsync();
                 await TestTargetCreationFailureAbortsTaskAndPreservesErrorsAsync(); // 新增：目标失败立即中止与错误保存测试
@@ -1940,6 +1941,7 @@ namespace FNSyncPlus.Tests
                 await TestVersionedAliasNoOpAsync(root);
                 TestFnOsPersonalStorageProviderPathTraversalSecurity();
                 TestFnOsPersonalSpaceUnknownUidFailsClosed();
+                await TestRestoreJunctionTargetSafetyAsync();
             }
             finally
             {
@@ -5571,6 +5573,57 @@ namespace FNSyncPlus.Tests
             }
             finally
             {
+                try { Directory.Delete(testBase, true); } catch { }
+            }
+        }
+
+        static async Task TestRestoreJunctionTargetSafetyAsync()
+        {
+            Console.WriteLine("\n--- 24b. 恢复目标经过联接点时拒绝写入测试 ---");
+            string testBase = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Test_RestoreJunction_" + Guid.NewGuid().ToString("N"));
+            string nasDir = Path.Combine(testBase, "NasDir");
+            string localRoot = Path.Combine(testBase, "LocalRoot");
+            string outside = Path.Combine(testBase, "Outside");
+            string junctionPath = Path.Combine(localRoot, "linked");
+            string outsideChild = Path.Combine(outside, "child");
+            Directory.CreateDirectory(nasDir);
+            Directory.CreateDirectory(localRoot);
+            Directory.CreateDirectory(outsideChild);
+            try
+            {
+                var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe")) { UseShellExecute = false, CreateNoWindow = true,
+                    RedirectStandardOutput = true, RedirectStandardError = true };
+                foreach (string arg in new[] { "/d", "/c", "mklink", "/J", junctionPath, outside }) start.ArgumentList.Add(arg);
+                using var process = System.Diagnostics.Process.Start(start) ?? throw new IOException("无法启动联接测试");
+                if (!process.WaitForExit(10000)) { process.Kill(); throw new TimeoutException("联接测试创建超时"); }
+                if (process.ExitCode != 0) throw new IOException("无法创建测试联接");
+
+                File.WriteAllText(Path.Combine(nasDir, "payload.txt"), "junction payload");
+                var manifest = new Manifest { SourceRoot = @"D:\MockSource" };
+                manifest.Files.Add(new ManifestFileEntry
+                {
+                    OriginalRel = "linked/child/payload.txt",
+                    StoredRel = "payload.txt",
+                    Sha256 = HashHelper.ComputeStringSha256("junction payload"),
+                    Size = "junction payload".Length
+                });
+                var mfMgr = new ManifestManager();
+                await mfMgr.SaveManifestAtomicAsync(nasDir, manifest);
+
+                bool rejected = false;
+                try
+                {
+                    var report = await new RestoreEngine(mfMgr).RunRestoreAsync(nasDir, localRoot, ConflictResolution.Overwrite);
+                    rejected = report.FailedFiles == 1 && report.RestoredFiles == 0 &&
+                        report.FileResults.Any(r => r.ErrorMessage != null && r.ErrorMessage.Contains("链接或联接点", StringComparison.Ordinal));
+                }
+                catch (Exception ex) when (ex is IOException or AggregateException) { rejected = ex.ToString().Contains("链接或联接点", StringComparison.Ordinal); }
+                Assert(rejected && !File.Exists(Path.Combine(outsideChild, "payload.txt")),
+                    "恢复目标经过联接点时拒绝写入，测试范围外未产生文件");
+            }
+            finally
+            {
+                try { if (Directory.Exists(junctionPath)) Directory.Delete(junctionPath); } catch { }
                 try { Directory.Delete(testBase, true); } catch { }
             }
         }
