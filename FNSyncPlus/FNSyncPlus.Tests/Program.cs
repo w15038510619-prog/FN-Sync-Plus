@@ -3021,6 +3021,22 @@ namespace FNSyncPlus.Tests
             ordinaryManager.TriggerSync(missingAccount.TaskId);
             if (await Task.WhenAny(missingDone.Task, Task.Delay(10000)) != missingDone.Task) throw new TimeoutException("缺少设备地址检查超时");
             Assert(missingAccount.LastSyncStatus == "NAS 设备地址不匹配", "新版任务缺少设备地址时停止备份");
+            await Task.Delay(300);
+            missingAccount.NasUsername = "Fixture-user";
+            missingAccount.NasDeviceId = "fixture-device";
+            missingDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            ordinaryManager.TriggerSync(missingAccount.TaskId);
+            if (await Task.WhenAny(missingDone.Task, Task.Delay(10000)) != missingDone.Task) throw new TimeoutException("账号大小写检查超时");
+            Assert(missingAccount.LastSyncStatus == "NAS 账号不匹配" && !Directory.Exists(Path.Combine(root, missingAccount.DestinationFolder)),
+                "账号仅大小写不同时保守阻止备份，不创建目标");
+            await Task.Delay(300);
+            await using (var recovery = await ordinaryManager.BeginIsolatedRecoveryAsync(missingAccount.TaskId, TimeSpan.FromSeconds(5)))
+            {
+                bool refused = false;
+                try { await recovery!.InspectAsync(); }
+                catch (InvalidOperationException) { refused = true; }
+                Assert(refused, "账号仅大小写不同时也拒绝中断恢复检查");
+            }
             if (!await ordinaryManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("缺少账号测试未停止");
         }
 
@@ -3574,6 +3590,32 @@ namespace FNSyncPlus.Tests
             if (first) gate.Release();
             if (second) gate.Release();
             Assert(first && !second, "断开连接只释放自身持有的互斥锁");
+
+            var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+            listener.Start();
+            try
+            {
+                string address = $"127.0.0.1:{((System.Net.IPEndPoint)listener.LocalEndpoint).Port}";
+                var caseSettings = AppSettings.CreateInMemory();
+                caseSettings.IsolatedCredentialPath = Path.Combine(root, "reconnect-case-credentials.dat");
+                caseSettings.RememberCredentials = true;
+                if (!SmbAuthService.SaveCredentials(address, "Fixture-user", "test-secret", caseSettings.IsolatedCredentialPath))
+                    throw new IOException("无法建立账号大小写测试凭据");
+                using var caseManager = new TaskManager(caseSettings, new SmbAuthService(), new LogService(Path.Combine(root, "reconnect-case-logs")));
+                var caseConnection = new NasConnectionService(new SmbAuthService(), caseSettings, caseManager);
+                var type = typeof(NasConnectionService);
+                type.GetField("_serverAddress", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.SetValue(caseConnection, address);
+                type.GetField("_username", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.SetValue(caseConnection, "fixture-user");
+                var retryField = type.GetField("_reconnectCts", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+                type.GetMethod("StartAutomaticReconnect", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.Invoke(caseConnection, new object[] { 0L });
+                bool started = retryField.GetValue(caseConnection) != null;
+                for (int attempt = 0; attempt < 60 && retryField.GetValue(caseConnection) != null; attempt++) await Task.Delay(100);
+                bool stoppedWithoutConnecting = retryField.GetValue(caseConnection) == null && !listener.Pending();
+                await caseConnection.DisconnectAsync();
+                if (!await caseManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("重连测试未停止");
+                Assert(started && stoppedWithoutConnecting, "保存的账号仅大小写不同时不会自动重连");
+            }
+            finally { listener.Stop(); }
         }
 
         static async Task TestInitialOfflineRetryAsync(string root)

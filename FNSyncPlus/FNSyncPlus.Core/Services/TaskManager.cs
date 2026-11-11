@@ -572,7 +572,7 @@ namespace FNSyncPlus.Core.Services
                 if (provider == null || !provider.IsAuthenticated || provider.ProviderType != StorageProviderType.FnOsPersonal)
                     throw new InvalidOperationException("飞牛未连接，不能检查中断状态");
                 if (provider is FnOsPersonalStorageProvider fn &&
-                    ((!string.IsNullOrWhiteSpace(_task.NasUsername) && !string.Equals(_task.NasUsername, fn.CurrentUsername, StringComparison.OrdinalIgnoreCase)) ||
+                    ((!string.IsNullOrWhiteSpace(_task.NasUsername) && !string.Equals(_task.NasUsername, fn.CurrentUsername, StringComparison.Ordinal)) ||
                      (string.IsNullOrWhiteSpace(_task.NasUsername) && _owner._settings.IsVersionedBetaProfile && !_owner._settings.IsVersionedBetaTestProfile)))
                     throw new InvalidOperationException("当前飞牛账号与任务账号不一致或任务缺少账号信息");
                 if (provider is FnOsPersonalStorageProvider device &&
@@ -775,7 +775,7 @@ namespace FNSyncPlus.Core.Services
                 return;
             }
             if (provider is FnOsPersonalStorageProvider fn &&
-                ((!string.IsNullOrWhiteSpace(task.NasUsername) && !string.Equals(task.NasUsername, fn.CurrentUsername, StringComparison.OrdinalIgnoreCase)) ||
+                ((!string.IsNullOrWhiteSpace(task.NasUsername) && !string.Equals(task.NasUsername, fn.CurrentUsername, StringComparison.Ordinal)) ||
                  (task.IsExperimentalBackup && string.IsNullOrWhiteSpace(task.NasUsername) && _settings.IsVersionedBetaProfile && !_settings.IsVersionedBetaTestProfile)))
             {
                 task.State = TaskSyncState.ConfigurationError;

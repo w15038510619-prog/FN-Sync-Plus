@@ -223,7 +223,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 string currentServer = _connectionService.ServerAddress;
 
                 if (!string.IsNullOrEmpty(_lastConnectedUsername) &&
-                    (!string.Equals(_lastConnectedUsername, currentUser, StringComparison.OrdinalIgnoreCase) ||
+                    (!string.Equals(_lastConnectedUsername, currentUser, StringComparison.Ordinal) ||
                      !string.Equals(_lastConnectedServer, currentServer, StringComparison.OrdinalIgnoreCase)))
                 {
                     ExperimentalExistingRoot = string.Empty;
@@ -697,7 +697,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 // 检查授权用户名与配置是否匹配
                 if (!string.IsNullOrEmpty(fnProvider.CurrentUsername) &&
                     !string.IsNullOrEmpty(_settings.Username) &&
-                    !string.Equals(fnProvider.CurrentUsername, _settings.Username, StringComparison.OrdinalIgnoreCase))
+                    !string.Equals(fnProvider.CurrentUsername, _settings.Username, StringComparison.Ordinal))
                 {
                     StatusMessage = $"当前登录账号 ({fnProvider.CurrentUsername}) 与配置账号 ({_settings.Username}) 不一致，请重新连接。";
                     return 0;

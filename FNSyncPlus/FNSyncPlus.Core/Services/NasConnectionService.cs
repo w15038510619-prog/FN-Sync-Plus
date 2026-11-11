@@ -788,7 +788,7 @@ namespace FNSyncPlus.Core.Services
                     await Task.Delay(TimeSpan.FromSeconds(seconds[Math.Min(attempt, seconds.Length - 1)]), retry.Token).ConfigureAwait(false);
                     var credentials = SmbAuthService.LoadCredentials(_settings.IsolatedCredentialPath);
                     if (credentials == null || !string.Equals(credentials.Value.Server, ServerAddress, StringComparison.OrdinalIgnoreCase) ||
-                        !string.Equals(credentials.Value.Username, Username, StringComparison.OrdinalIgnoreCase)) return;
+                        !string.Equals(credentials.Value.Username, Username, StringComparison.Ordinal)) return;
                     lock (_reconnectLock)
                         if (_disconnectRequested || intentVersion != _connectionIntentVersion) return;
                     var result = await ConnectCoreAsync(credentials.Value.Server, credentials.Value.Username, credentials.Value.Password,
