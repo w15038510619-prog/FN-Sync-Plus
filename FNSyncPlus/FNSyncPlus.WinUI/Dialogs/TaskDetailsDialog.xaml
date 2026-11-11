@@ -166,9 +166,11 @@
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <TextBox Grid.Column="0" PlaceholderText="搜索关键字或批次号..." Text="{x:Bind ViewModel.LogSearchQuery, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                                <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.SelectedLogLevelIndex, Mode=TwoWay}" Width="110">
+                                <Button Grid.Column="1" Content="搜索全部" Click="BtnSearchAllLogs_Click" />
+                                <ComboBox Grid.Column="2" SelectedIndex="{x:Bind ViewModel.SelectedLogLevelIndex, Mode=TwoWay}" Width="110">
                                     <ComboBoxItem Content="全部日志" />
                                     <ComboBoxItem Content="仅看错误" />
                                     <ComboBoxItem Content="错误与警告" />
@@ -201,14 +203,14 @@
                                 </Button>
                             </StackPanel>
                             <TextBlock Text="{x:Bind ViewModel.StatusFeedbackMessage, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="搜索最近 5 个日志文件中的最后 500 条；已保存的完整日志可从目录查看或导出。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="输入后筛选最近日志；点击“搜索全部”可检索该任务已保存的历史日志，最多显示最近 500 条结果。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         </StackPanel>
 
                         <!-- Empty Logs State -->
                         <Grid Grid.Row="2" Visibility="{x:Bind GetEmptyLogsVisibility(ViewModel.HasLogs), Mode=OneWay}" MinHeight="160">
                             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="6">
                                 <FontIcon Glyph="&#xE9CE;" FontSize="32" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
-                                <TextBlock Text="暂无诊断日志记录" FontSize="13" FontWeight="Medium" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
+                                <TextBlock Text="暂无诊断日志或搜索结果" FontSize="13" FontWeight="Medium" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
                                 <TextBlock Text="任务在扫描、上传与校验过程中产生的详细日志将自动持久化至本地硬盘。" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
                             </StackPanel>
                         </Grid>

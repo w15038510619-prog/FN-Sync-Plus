@@ -302,6 +302,57 @@ namespace FNSyncPlus.Core.Services
             return result.OrderBy(r => r.Timestamp).TakeLast(maxCount).ToList();
         }
 
+        /// <summary>Search all saved files for one task, retaining at most the latest matching entries.</summary>
+        public IReadOnlyList<TaskLogEntry> SearchTaskLogs(string taskId, string query, int maxCount = 500, CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(taskId)) throw new ArgumentException("任务 ID 不能为空", nameof(taskId));
+            if (string.IsNullOrWhiteSpace(query)) throw new ArgumentException("请输入搜索内容", nameof(query));
+            if (maxCount <= 0) throw new ArgumentOutOfRangeException(nameof(maxCount));
+
+            var matches = new Queue<TaskLogEntry>();
+            var memory = _inMemoryRecentLogs.TryGetValue(taskId, out var memQueue) ? memQueue.ToArray() : Array.Empty<TaskLogEntry>();
+            var memoryIds = memory.Where(x => x.EntryId != null).Select(x => x.EntryId!).ToHashSet(StringComparer.Ordinal);
+            void AddIfMatch(TaskLogEntry entry)
+            {
+                if (entry.FormattedDisplay.Contains(query, StringComparison.OrdinalIgnoreCase))
+                {
+                    matches.Enqueue(entry);
+                    if (matches.Count > maxCount) matches.Dequeue();
+                }
+            }
+
+            string dir = GetTaskLogDirectory(taskId);
+            if (Directory.Exists(dir))
+            {
+                foreach (string file in Directory.EnumerateFiles(dir, "*.log").OrderBy(f => f, StringComparer.Ordinal))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    using var reader = new StreamReader(stream, Encoding.UTF8);
+                    string? line;
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (string.IsNullOrWhiteSpace(line)) continue;
+                        TaskLogEntry? entry = null;
+                        if (line.TrimStart().StartsWith("{", StringComparison.Ordinal))
+                        {
+                            try { entry = JsonSerializer.Deserialize<TaskLogEntry>(line); }
+                            catch (JsonException) { /* Preserve older or malformed lines as text. */ }
+                        }
+                        entry ??= new TaskLogEntry { TaskId = taskId, Level = line.Contains("[ERROR]") ? "ERROR" : line.Contains("[WARN]") ? "WARN" : "INFO", Message = line };
+                        if (entry.EntryId == null || !memoryIds.Contains(entry.EntryId)) AddIfMatch(entry);
+                    }
+                }
+            }
+            foreach (var entry in memory)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                AddIfMatch(entry);
+            }
+            return matches.OrderBy(x => x.Timestamp).ToList();
+        }
+
         /// <summary>
         /// 将单任务的完整诊断日志与配置环境打包为 zip 文件供用户导出
         /// </summary>

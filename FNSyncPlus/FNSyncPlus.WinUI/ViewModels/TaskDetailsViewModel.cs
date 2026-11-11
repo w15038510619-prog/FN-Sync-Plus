@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -139,6 +140,9 @@ namespace FNSyncPlus.WinUI.ViewModels
         public ObservableCollection<LongNameMappingDisplayItem> LongNameMappings { get; } = new();
         public ObservableCollection<TaskLogDisplayItem> FilteredLogs { get; } = new();
         private readonly List<TaskLogDisplayItem> _allLoadedLogs = new();
+        private readonly List<TaskLogDisplayItem> _recentLoadedLogs = new();
+        private CancellationTokenSource? _logSearchCancellation;
+        private bool _showingArchiveSearch;
 
         public TaskDetailsViewModel(
             TaskManager taskManager, 
@@ -194,6 +198,8 @@ namespace FNSyncPlus.WinUI.ViewModels
         private async Task LoadLogsAsync(string taskId)
         {
             await Task.Yield();
+            _logSearchCancellation?.Cancel();
+            _showingArchiveSearch = false;
             _allLoadedLogs.Clear();
 
             var logs = _taskManager.GetTaskLogs(taskId);
@@ -211,6 +217,9 @@ namespace FNSyncPlus.WinUI.ViewModels
                     Message = logStr
                 });
             }
+
+            _recentLoadedLogs.Clear();
+            _recentLoadedLogs.AddRange(_allLoadedLogs);
 
             bool hasErrors = _allLoadedLogs.Any(l => l.Level == "ERROR");
             SelectedLogLevelIndex = hasErrors ? 1 : 0; // 默认视图显示最新错误（若有错误）
@@ -339,7 +348,54 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         partial void OnLogSearchQueryChanged(string value)
         {
+            if (_logSearchCancellation != null)
+            {
+                _logSearchCancellation.Cancel();
+                StatusFeedbackMessage = "已取消上一次历史搜索。";
+            }
+            if (_showingArchiveSearch)
+            {
+                _allLoadedLogs.Clear();
+                _allLoadedLogs.AddRange(_recentLoadedLogs);
+                _showingArchiveSearch = false;
+                HasLogs = _allLoadedLogs.Count > 0;
+                StatusFeedbackMessage = "已返回最近日志；点击“搜索全部”检索历史。";
+            }
             ApplyLogFilter();
+        }
+
+        public async Task SearchAllLogsAsync()
+        {
+            if (TaskModel == null) return;
+            string query = LogSearchQuery.Trim();
+            if (query.Length == 0) { StatusFeedbackMessage = "请输入关键字或批次号。"; return; }
+            _logSearchCancellation?.Cancel();
+            var cancellation = new CancellationTokenSource();
+            _logSearchCancellation = cancellation;
+            string taskId = TaskModel.TaskId;
+            StatusFeedbackMessage = "正在搜索该任务的已保存日志…";
+            try
+            {
+                var logs = await Task.Run(() => _logService.SearchTaskLogs(taskId, query, cancellationToken: cancellation.Token), cancellation.Token);
+                if (cancellation.IsCancellationRequested || !ReferenceEquals(_logSearchCancellation, cancellation)) return;
+                _allLoadedLogs.Clear();
+                foreach (var log in logs)
+                    _allLoadedLogs.Add(new TaskLogDisplayItem { FullFormattedText = log.FormattedDisplay, Level = log.Level, Message = log.Message });
+                _showingArchiveSearch = true;
+                HasLogs = _allLoadedLogs.Count > 0;
+                ApplyLogFilter();
+                StatusFeedbackMessage = $"已搜索全部已保存日志，找到 {logs.Count} 条（最多显示最近 500 条）；结果受日志级别筛选影响。";
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                if (ReferenceEquals(_logSearchCancellation, cancellation)) StatusFeedbackMessage = $"搜索失败：{ex.Message}";
+            }
+            finally
+            {
+                if (ReferenceEquals(_logSearchCancellation, cancellation)) _logSearchCancellation = null;
+                cancellation.Dispose();
+            }
         }
 
         partial void OnSelectedLogLevelIndexChanged(int value)

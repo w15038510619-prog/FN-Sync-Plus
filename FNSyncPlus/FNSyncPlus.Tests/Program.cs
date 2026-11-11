@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
@@ -293,6 +294,33 @@ namespace FNSyncPlus.Tests
                 Assert(sameTimeLogs.Count == 2 && sameTimeLogs.Select(x => x.EntryId).Distinct().Count() == 2 &&
                     new LogService(duplicateLog.LogsDirectory).GetTaskLogs("same-time").Count == 2,
                     "同一批次同一时刻的相同日志分别保留，内存与磁盘合并不重复");
+                var archiveLog = new LogService(Path.Combine(root, "archive-log-search"));
+                string archiveDir = archiveLog.GetTaskLogDirectory("archive-task");
+                Directory.CreateDirectory(archiveDir);
+                for (int day = 1; day <= 7; day++)
+                {
+                    var sample = new TaskLogEntry { TaskId = "archive-task", Timestamp = new DateTimeOffset(2025, 1, day, 0, 0, 0, TimeSpan.Zero), Message = day == 1 ? "old batch marker" : "other", SyncBatchId = day == 1 ? "archive-batch-abc" : null, EntryId = Guid.NewGuid().ToString("N") };
+                    File.WriteAllText(Path.Combine(archiveDir, $"202501{day:00}.log"), System.Text.Json.JsonSerializer.Serialize(sample) + Environment.NewLine);
+                }
+                archiveLog.LogTask(new TaskLogEntry { TaskId = "archive-task", Message = "memory batch marker", SyncBatchId = "archive-batch-abc" });
+                await archiveLog.FlushPendingTaskLogsAsync();
+                var allSearch = archiveLog.SearchTaskLogs("archive-task", "ARCHIVE-BATCH-ABC");
+                Assert(allSearch.Count == 2 && allSearch.Any(x => x.Message == "old batch marker") && allSearch.Any(x => x.Message == "memory batch marker") &&
+                    !archiveLog.GetTaskLogs("archive-task").Any(x => x.Message == "old batch marker"),
+                    "全历史搜索可找到五个日志文件之前的批次并避免磁盘与内存重复");
+                using (var activeWriter = new FileStream(Path.Combine(archiveDir, "20250101.log"), FileMode.Open, FileAccess.Write, FileShare.ReadWrite))
+                {
+                    Assert(archiveLog.SearchTaskLogs("archive-task", "old batch marker").Count == 1,
+                        "搜索可读取正在写入的日志文件");
+                }
+                using (var cancelledSearch = new CancellationTokenSource())
+                {
+                    cancelledSearch.Cancel();
+                    bool searchCancelled = false;
+                    try { archiveLog.SearchTaskLogs("archive-task", "batch", cancellationToken: cancelledSearch.Token); }
+                    catch (OperationCanceledException) { searchCancelled = true; }
+                    Assert(searchCancelled, "历史日志搜索支持取消");
+                }
                 string previewDir = new string('中', 90);
                 string previewName = new string('中', 98) + "ab.txt";
                 string previewObject = ".fnsync/objects/obj-" + Guid.NewGuid().ToString("N");

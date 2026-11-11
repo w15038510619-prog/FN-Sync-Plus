@@ -63,6 +63,11 @@ namespace FNSyncPlus.WinUI.Dialogs
             await ViewModel.RefreshAllAsync();
         }
 
+        private async void BtnSearchAllLogs_Click(object sender, RoutedEventArgs e)
+        {
+            await ViewModel.SearchAllLogsAsync();
+        }
+
         private void BtnCopyErrors_Click(object sender, RoutedEventArgs e)
         {
             ViewModel.CopyAllErrorsToClipboard();
