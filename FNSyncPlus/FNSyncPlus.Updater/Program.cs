@@ -255,7 +255,10 @@ internal static class Program
                         if (int.TryParse(Next(args, ref i), out int health)) options.HealthTimeoutSeconds = health;
                         break;
                     case "--no-launch": options.NoLaunch = true; break;
-                    case "status": case "apply": case "rollback": case "launch": options.Mode = args[i]; break;
+                    case "status": case "--status": options.Mode = "status"; break;
+                    case "apply": case "--apply": options.Mode = "apply"; break;
+                    case "rollback": case "--rollback": options.Mode = "rollback"; break;
+                    case "launch": case "--launch": options.Mode = "launch"; break;
                 }
             }
             return options;

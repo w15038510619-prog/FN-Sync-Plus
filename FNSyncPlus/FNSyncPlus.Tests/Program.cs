@@ -5378,9 +5378,9 @@ namespace FNSyncPlus.Tests
                 TaskId = "task_test_101",
                 TaskName = "工程图纸",
                 SourceFolder = @"D:\Projects\CAD",
-                NasDeviceId = "192.168.8.120",
-                DestinationRoot = @"\\192.168.8.120\home",
-                DestinationFolder = @"\\192.168.8.120\home\工程图纸",
+                NasDeviceId = "192.0.2.10",
+                DestinationRoot = @"\\192.0.2.10\home",
+                DestinationFolder = @"\\192.0.2.10\home\工程图纸",
                 AutoSyncEnabled = true,
                 RealtimeWatchEnabled = true,
                 IntervalMinutes = 15,
@@ -5389,7 +5389,7 @@ namespace FNSyncPlus.Tests
 
             var settings = AppSettings.CreateInMemory();
             settings.Tasks.Add(task);
-            settings.PreferredBackupRoot = @"\\192.168.8.120\home";
+            settings.PreferredBackupRoot = @"\\192.0.2.10\home";
             settings.MaxConcurrentSyncs = 3;
             settings.AppTheme = "Dark";
 
@@ -5398,16 +5398,16 @@ namespace FNSyncPlus.Tests
 
             Assert(deserialized.Tasks.Count == 1, "多任务模型序列化并正确反序列化");
             Assert(deserialized.Tasks[0].TaskName == "工程图纸", "任务名称正确还原");
-            Assert(deserialized.Tasks[0].DestinationFolder == @"\\192.168.8.120\home\工程图纸", "NAS目标路径正确还原");
+            Assert(deserialized.Tasks[0].DestinationFolder == @"\\192.0.2.10\home\工程图纸", "NAS目标路径正确还原");
             Assert(deserialized.MaxConcurrentSyncs == 3, "并发任务数参数正确保留");
             Assert(deserialized.AppTheme == "Dark", "应用主题正确保留");
 
             // 模拟 v1.0/v2.0 遗留配置迁移
             string legacyJson = @"{
-                ""NasServer"": ""192.168.8.120"",
+                ""NasServer"": ""192.0.2.10"",
                 ""Username"": ""admin"",
                 ""SourceFolder"": ""D:\\重要财务数据"",
-                ""TargetShare"": ""\\\\192.168.8.120\\团队文件-cenco-public\\财务"",
+                ""TargetShare"": ""\\\\192.0.2.10\\团队文件-cenco-public\\财务"",
                 ""AutoSyncEnabled"": true,
                 ""SyncIntervalMinutes"": 10,
                 ""RealtimeWatchEnabled"": true
@@ -5419,7 +5419,7 @@ namespace FNSyncPlus.Tests
             Assert(legacySettings.Tasks.Count == 1, "迁移后自动生成任务列表项");
             Assert(legacySettings.Tasks[0].SourceFolder == @"D:\重要财务数据", "旧版源目录正确迁移为任务源目录");
             Assert(legacySettings.Tasks[0].TaskName == "重要财务数据", "根据源目录自动推导出有意义的任务名称");
-            Assert(legacySettings.Tasks[0].DestinationFolder == @"\\192.168.8.120\团队文件-cenco-public\财务", "旧版目标共享正确迁移");
+            Assert(legacySettings.Tasks[0].DestinationFolder == @"\\192.0.2.10\团队文件-cenco-public\财务", "旧版目标共享正确迁移");
             Assert(legacySettings.Tasks[0].IntervalMinutes == 10, "旧版同步间隔参数正确继承");
         }
 
@@ -5664,24 +5664,24 @@ namespace FNSyncPlus.Tests
             string username = "cenco";
 
             // 1. 私人空间安全判定
-            var sec1 = SmbAuthService.EvaluateShareSecurity(@"\\192.168.8.120\cenco", username, true, null);
+            var sec1 = SmbAuthService.EvaluateShareSecurity(@"\\192.0.2.10\cenco", username, true, null);
             Assert(sec1.State == NasShareSecurityState.VerifiedPersonalSpace, "用户同名私人共享判定为 VerifiedPersonalSpace");
             Assert(!sec1.IsDangerousForPersonalUse, "私人空间不触发危险警示");
             Assert(sec1.BadgeBgHex == "#DCFCE7" && sec1.BadgeColorHex == "#15803D", "私人空间徽章使用安全绿配色");
 
             // 2. 团队公有共享判定
-            var sec2 = SmbAuthService.EvaluateShareSecurity(@"\\192.168.8.120\团队文件-cenco-public", username, true, null);
+            var sec2 = SmbAuthService.EvaluateShareSecurity(@"\\192.0.2.10\团队文件-cenco-public", username, true, null);
             Assert(sec2.State == NasShareSecurityState.TeamShare, "团队文件共享判定为 TeamShare");
             Assert(sec2.IsDangerousForPersonalUse, "团队公有共享标记为存在隐私扩散风险");
             Assert(sec2.Title.Contains("团队公有共享"), "团队共享具备明确的警示标题");
 
             // 3. 普通非私人共享判定
-            var sec3 = SmbAuthService.EvaluateShareSecurity(@"\\192.168.8.120\custom_data", username, true, null);
+            var sec3 = SmbAuthService.EvaluateShareSecurity(@"\\192.0.2.10\custom_data", username, true, null);
             Assert(sec3.State == NasShareSecurityState.UnverifiedSmbShare, "未确认归属的共享判定为 UnverifiedSmbShare");
             Assert(!sec3.IsDangerousForPersonalUse, "普通共享未直接判定为团队危险");
 
             // 4. 无权限共享判定
-            var sec4 = SmbAuthService.EvaluateShareSecurity(@"\\192.168.8.120\admin_only", username, false, "拒绝访问");
+            var sec4 = SmbAuthService.EvaluateShareSecurity(@"\\192.0.2.10\admin_only", username, false, "拒绝访问");
             Assert(sec4.State == NasShareSecurityState.NoPermission, "写权限失败判定为 NoPermission");
             Assert(sec4.IsDangerousForPersonalUse, "无权限共享标记危险状态阻止前进");
 
@@ -6055,12 +6055,12 @@ namespace FNSyncPlus.Tests
 
             // 1. Win32 异常翻译测试
             var ex67 = new IOException("指定的网络名不再可用 (Win32 Error 67)", unchecked((int)0x80070043));
-            var (code67, msg67) = SmbAuthService.TranslateSmbException(ex67, @"\\192.168.8.120\wangxiaoliang");
+            var (code67, msg67) = SmbAuthService.TranslateSmbException(ex67, @"\\192.0.2.10\wangxiaoliang");
             Assert(code67 == 67, "正确识别 Win32 Error 67 (ERROR_BAD_NET_NAME)", $"提取错误码: {code67}");
             Assert(msg67.Contains("找不到网络共享名") && msg67.Contains("Win32 Error 67"), "Win32 67 翻译提示清晰准确", msg67);
 
             var ex5 = new UnauthorizedAccessException("Access is denied");
-            var (code5, msg5) = SmbAuthService.TranslateSmbException(ex5, @"\\192.168.8.120\secret");
+            var (code5, msg5) = SmbAuthService.TranslateSmbException(ex5, @"\\192.0.2.10\secret");
             Assert(code5 == 5, "正确识别 Win32 Error 5 (ERROR_ACCESS_DENIED)", $"提取错误码: {code5}");
             Assert(msg5.Contains("访问被拒绝") && msg5.Contains("Win32 Error 5"), "Win32 5 翻译提示清晰准确", msg5);
 
@@ -6071,12 +6071,12 @@ namespace FNSyncPlus.Tests
 
             // 2. ValidateDirectoryAccessStateAsync 状态分层校验
             // 2.1 服务器根路径
-            var serverRootRes = await service.ValidateDirectoryAccessStateAsync(@"\\192.168.8.120");
+            var serverRootRes = await service.ValidateDirectoryAccessStateAsync(@"\\192.0.2.10");
             Assert(serverRootRes.IsNasAuthenticated && !serverRootRes.DoesShareExist && !serverRootRes.IsDirectoryWritable,
                 "服务器根路径正确识别为非具体共享且不可写", serverRootRes.StateDescription);
 
-            // 2.2 不存在的共享 \\192.168.8.120\wangxiaoliang
-            var nonExistentRes = await service.ValidateDirectoryAccessStateAsync(@"\\192.168.8.120\wangxiaoliang");
+            // 2.2 不存在的共享 \\192.0.2.10\wangxiaoliang
+            var nonExistentRes = await service.ValidateDirectoryAccessStateAsync(@"\\192.0.2.10\wangxiaoliang");
             Assert(!nonExistentRes.DoesShareExist && nonExistentRes.Win32ErrorCode == 67 && !nonExistentRes.IsDirectoryWritable,
                 "不存在的共享精准识别 Win32 67 并标记共享不存在且不可写", nonExistentRes.DetailedMessage);
 
@@ -6084,7 +6084,7 @@ namespace FNSyncPlus.Tests
             bool caught67 = false;
             try
             {
-                await service.CreateSubFolderAsync(@"\\192.168.8.120\wangxiaoliang", "Test", @"\\192.168.8.120\wangxiaoliang");
+                await service.CreateSubFolderAsync(@"\\192.0.2.10\wangxiaoliang", "Test", @"\\192.0.2.10\wangxiaoliang");
             }
             catch (Exception ex)
             {
@@ -6100,7 +6100,7 @@ namespace FNSyncPlus.Tests
             bool caughtRoot = false;
             try
             {
-                await service.CreateSubFolderAsync(@"\\192.168.8.120", "Test", "");
+                await service.CreateSubFolderAsync(@"\\192.0.2.10", "Test", "");
             }
             catch (InvalidOperationException)
             {
@@ -6115,7 +6115,7 @@ namespace FNSyncPlus.Tests
             var service = new SmbAuthService();
 
             // 1. ResolveDefaultBackupRootAsync 未配置且无私人共享时，严禁拼接 \\server\username，严禁自动选择团队共享
-            var (defaultRoot, eval, hasPersonal) = await service.ResolveDefaultBackupRootAsync("192.168.8.120", "wangxiaoliang", "");
+            var (defaultRoot, eval, hasPersonal) = await service.ResolveDefaultBackupRootAsync("192.0.2.10", "wangxiaoliang", "");
             Assert(string.IsNullOrEmpty(defaultRoot), "无私人共享时默认备份根目录为空字符串，严禁硬编码拼接用户名共享", $"实际根目录: '{defaultRoot}'");
             Assert(!hasPersonal, "正确标记不存在可访问的私人共享 (hasPersonal == false)");
             Assert(eval.State == NasShareSecurityState.NotConfigured && eval.Title.Contains("未发现可访问的私人 SMB 目录"),
@@ -6904,7 +6904,7 @@ namespace FNSyncPlus.Tests
                 {
                     TaskId = "t_fn_unc",
                     SourceFolder = localSrc,
-                    DestinationFolder = @"\\192.168.8.120\share",
+                    DestinationFolder = @"\\192.0.2.10\share",
                     ProviderType = StorageProviderType.FnOsPersonal
                 };
                 bool uncOk = uncPersonalTask.ValidateConfiguration(out string errUnc);
@@ -7031,7 +7031,7 @@ namespace FNSyncPlus.Tests
             logService.LogTask(entry2);
 
             // 写入连接日志和崩溃日志测试
-            logService.LogConnection("INFO", "成功连接飞牛 NAS https://192.168.8.120:5666 token=auth_tok_abcdef");
+            logService.LogConnection("INFO", "成功连接飞牛 NAS https://192.0.2.10:5666 token=auth_tok_abcdef");
             logService.LogCrash(new InvalidOperationException("模拟崩溃异常 secret_key=sk_test_xyz"), "单元测试");
 
             // 等待后台队列落盘写入
@@ -7085,7 +7085,7 @@ namespace FNSyncPlus.Tests
             Console.WriteLine("\n--- 46. [新功能测试] 添加向导路径规范化与同源防重复拦截机制 ---");
             await Task.Yield();
             var fakeSettings = AppSettings.CreateInMemory();
-            fakeSettings.NasServer = "192.168.8.120";
+            fakeSettings.NasServer = "192.0.2.10";
             fakeSettings.Username = "wangxiaoliang";
             var smbService = new SmbAuthService();
             var taskManager = new TaskManager(fakeSettings, smbService);
@@ -7248,7 +7248,7 @@ namespace FNSyncPlus.Tests
             Console.WriteLine("   飞牛同步增强版 v0.4.0-beta P0 故障修复与真实 NAS 稳定性线上验证");
             Console.WriteLine("================================================================================");
 
-            string server = Environment.GetEnvironmentVariable("FNOS_SERVER") ?? "192.168.8.120";
+            string server = Environment.GetEnvironmentVariable("FNOS_SERVER") ?? "192.0.2.10";
             string? username = Environment.GetEnvironmentVariable("FNOS_USER");
             string? password = Environment.GetEnvironmentVariable("FNOS_PASS");
 

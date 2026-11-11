@@ -186,8 +186,8 @@ namespace FNSyncPlus.Core.Utils
 
         /// <summary>
         /// 解析 UNC 路径，提取服务器名称、共享名称、共享根 UNC 与是否仅为服务器根路径
-        /// 例如: "\\192.168.8.120\share\sub" -> (ServerName: "192.168.8.120", ShareName: "share", BaseShareUnc: "\\192.168.8.120\share", IsServerRoot: false)
-        ///       "\\192.168.8.120" -> (ServerName: "192.168.8.120", ShareName: "", BaseShareUnc: "\\192.168.8.120", IsServerRoot: true)
+        /// 例如: "\\192.0.2.10\share\sub" -> (ServerName: "192.0.2.10", ShareName: "share", BaseShareUnc: "\\192.0.2.10\share", IsServerRoot: false)
+        ///       "\\192.0.2.10" -> (ServerName: "192.0.2.10", ShareName: "", BaseShareUnc: "\\192.0.2.10", IsServerRoot: true)
         /// </summary>
         public static (string ServerName, string ShareName, string BaseShareUnc, bool IsServerRoot) ParseUncShare(string uncPath)
         {
@@ -201,9 +201,9 @@ namespace FNSyncPlus.Core.Utils
 
         /// <summary>
         /// 获取 UNC 路径的父级路径。
-        /// 如 \\192.168.8.120\share\sub -> \\192.168.8.120\share
-        /// 如 \\192.168.8.120\share -> \\192.168.8.120
-        /// 如 \\192.168.8.120 -> \\192.168.8.120
+        /// 如 \\192.0.2.10\share\sub -> \\192.0.2.10\share
+        /// 如 \\192.0.2.10\share -> \\192.0.2.10
+        /// 如 \\192.0.2.10 -> \\192.0.2.10
         /// </summary>
         public static string GetParentUncPath(string uncPath)
         {

@@ -103,7 +103,54 @@
                     </StackPanel>
                 </Border>
 
-                <!-- Card 4: Software Update -->
+                <!-- Card 4: Backup capacity & retention (read-only) -->
+                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="备份容量与保留策略（只读）" FontSize="14" FontWeight="SemiBold" />
+                        <TextBlock Text="统计当前备份、历史版本与物理对象的占用。程序不会自动删除任何历史版本；预览仅用于人工评估。"
+                                   FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="240" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="备份任务" FontSize="13" FontWeight="Medium" />
+                                <TextBlock Text="选择要统计的备份目标（需先连接 NAS）" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                            <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{x:Bind ViewModel.CapacityTasks, Mode=OneWay}"
+                                      SelectedIndex="{x:Bind ViewModel.CapacityTaskIndex, Mode=TwoWay}" />
+                        </Grid>
+
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Command="{x:Bind ViewModel.AnalyzeCapacityCommand}" IsEnabled="{x:Bind ViewModel.CanRunCapacity, Mode=OneWay}">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE9D9;" FontSize="12" />
+                                    <TextBlock Text="统计容量" FontSize="12" />
+                                </StackPanel>
+                            </Button>
+                            <NumberBox Value="{x:Bind ViewModel.RetentionKeepVersions, Mode=TwoWay}" Minimum="1" Maximum="1000" SmallChange="1"
+                                       SpinButtonPlacementMode="Compact" Width="120" Header="保留版本数" />
+                            <NumberBox Value="{x:Bind ViewModel.RetentionKeepDays, Mode=TwoWay}" Minimum="0" Maximum="3650" SmallChange="1"
+                                       SpinButtonPlacementMode="Compact" Width="120" Header="保留天数" />
+                            <Button Command="{x:Bind ViewModel.PreviewRetentionCommand}" IsEnabled="{x:Bind ViewModel.CanRunCapacity, Mode=OneWay}"
+                                    VerticalAlignment="Bottom">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE81C;" FontSize="12" />
+                                    <TextBlock Text="预览保留策略" FontSize="12" />
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+
+                        <TextBlock Text="{x:Bind ViewModel.CapacitySummary, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" IsTextSelectionEnabled="True" />
+                        <TextBlock Text="{x:Bind ViewModel.RetentionSummary, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" IsTextSelectionEnabled="True" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Card 5: Software Update -->
                 <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
                     <StackPanel Spacing="12">
                         <Grid ColumnSpacing="12">

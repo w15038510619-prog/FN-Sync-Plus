@@ -1,10 +1,13 @@
 using System;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Linq;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
 using FNSyncPlus.Core.Updates;
 
@@ -15,6 +18,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private readonly AppSettings _settings;
         private readonly NasConnectionService _connectionService;
         private readonly UpdateService _updates;
+        private readonly BackupCapacityAnalyzer _capacity = new();
         private CancellationTokenSource? _updateCts;
 
         public bool CanConfigureStartup => !_settings.IsVersionedBetaProfile && !_settings.IsInMemoryOnly && _settings.IsolatedSessionPath == null;
@@ -72,12 +76,40 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private string _installBlockedReason = string.Empty;
 
+        // ---- 备份容量与保留策略（只读） ----
+
+        public ObservableCollection<string> CapacityTasks { get; } = new();
+
+        [ObservableProperty]
+        private int _capacityTaskIndex = -1;
+
+        [ObservableProperty]
+        private string _capacitySummary = "选择一个备份任务后可查看 NAS 上的空间占用。";
+
+        [ObservableProperty]
+        private string _retentionSummary = string.Empty;
+
+        [ObservableProperty]
+        private double _retentionKeepVersions = 5;
+
+        [ObservableProperty]
+        private double _retentionKeepDays = 30;
+
+        [ObservableProperty]
+        private bool _isCapacityBusy;
+
         public bool CanCheckUpdate => _updates.CanCheck;
+
+        public bool CanRunCapacity => CapacityTasks.Count > 0 && !IsCapacityBusy;
 
         /// <summary>Unattended install only makes sense for the unattended mode.</summary>
         public bool UnattendedSelectable => UpdateModeIndex == (int)AutoUpdateMode.UnattendedInstall;
 
         partial void OnUpdateModeIndexChanged(int value) => OnPropertyChanged(nameof(UnattendedSelectable));
+
+        partial void OnIsCapacityBusyChanged(bool value) => OnPropertyChanged(nameof(CanRunCapacity));
+
+        partial void OnCapacityTaskIndexChanged(int value) => OnPropertyChanged(nameof(CanRunCapacity));
 
         public SettingsViewModel(AppSettings settings, NasConnectionService connectionService, UpdateService updates)
         {
@@ -112,6 +144,67 @@ namespace FNSyncPlus.WinUI.ViewModels
                 ? $"上次检查：{last.ToLocalTime():yyyy-MM-dd HH:mm}　结果：{update.LastResult}"
                 : "尚未检查更新";
             _updateStatus = update.LastResult;
+
+            foreach (var task in settings.Tasks)
+                CapacityTasks.Add($"{task.TaskName} → {task.DestinationFolder}");
+            if (CapacityTasks.Count > 0) CapacityTaskIndex = 0;
+        }
+
+        private SyncTask? SelectedCapacityTask =>
+            CapacityTaskIndex >= 0 && CapacityTaskIndex < _settings.Tasks.Count ? _settings.Tasks[CapacityTaskIndex] : null;
+
+        [RelayCommand]
+        public async Task AnalyzeCapacityAsync()
+        {
+            var task = SelectedCapacityTask;
+            if (task == null) { CapacitySummary = "请先选择一个备份任务。"; return; }
+            var provider = _connectionService.CurrentStorageProvider;
+            if (provider == null || !provider.IsAuthenticated) { CapacitySummary = "请先连接 NAS 后再统计容量。"; return; }
+            IsCapacityBusy = true;
+            CapacitySummary = "正在统计容量（只读，不会修改任何备份）…";
+            try
+            {
+                var report = await _capacity.AnalyzeAsync(provider, task.DestinationFolder).ConfigureAwait(true);
+                CapacitySummary = report.ToSummary();
+            }
+            catch (Exception ex)
+            {
+                CapacitySummary = $"统计失败：{ex.Message}";
+            }
+            finally { IsCapacityBusy = false; }
+        }
+
+        [RelayCommand]
+        public async Task PreviewRetentionAsync()
+        {
+            var task = SelectedCapacityTask;
+            if (task == null) { RetentionSummary = "请先选择一个备份任务。"; return; }
+            var provider = _connectionService.CurrentStorageProvider;
+            if (provider == null || !provider.IsAuthenticated) { RetentionSummary = "请先连接 NAS 后再预览保留策略。"; return; }
+            IsCapacityBusy = true;
+            RetentionSummary = "正在评估保留策略（只读预览）…";
+            try
+            {
+                var policy = new RetentionPolicy
+                {
+                    KeepVersions = Math.Max(1, (int)RetentionKeepVersions),
+                    KeepDays = Math.Max(0, (int)RetentionKeepDays)
+                };
+                var preview = await _capacity.PreviewRetentionAsync(provider, task.DestinationFolder, policy).ConfigureAwait(true);
+                var text = new System.Text.StringBuilder();
+                text.AppendLine(preview.Summary);
+                foreach (var version in preview.Versions)
+                    text.AppendLine($"  版本 #{version.Sequence} {version.CommittedAt.ToLocalTime():yyyy-MM-dd HH:mm} " +
+                                    $"{CapacityReport.Format(version.ObjectBytes)} → {(version.Keep ? "保留" : "可清理")}（{version.Reason}）");
+                if (preview.Blockers.Count > 0)
+                    foreach (string blocker in preview.Blockers) text.AppendLine($"  阻止原因：{blocker}");
+                RetentionSummary = text.ToString().TrimEnd();
+            }
+            catch (Exception ex)
+            {
+                RetentionSummary = $"评估失败：{ex.Message}";
+            }
+            finally { IsCapacityBusy = false; }
         }
 
         [RelayCommand]

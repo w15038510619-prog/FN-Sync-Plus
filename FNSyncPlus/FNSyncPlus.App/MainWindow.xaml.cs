@@ -336,7 +336,7 @@ namespace FNSyncPlus.App
             string rootUnc = TxtRestoreScanRoot.Text.Trim();
             if (string.IsNullOrEmpty(rootUnc) || !Directory.Exists(rootUnc))
             {
-                WpfMessageBox.Show("请指定有效的 NAS 备份根目录（如 \\\\192.168.8.120\\私人备份）", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                WpfMessageBox.Show("请指定有效的 NAS 备份根目录（如 \\\\192.0.2.10\\私人备份）", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
