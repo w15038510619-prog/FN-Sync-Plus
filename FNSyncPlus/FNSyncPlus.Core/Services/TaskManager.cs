@@ -45,6 +45,7 @@ namespace FNSyncPlus.Core.Services
         private readonly CancellationTokenSource _managerCts = new();
         private readonly Task _queueWorkerTask;
 
+        private volatile bool _maintenanceHold;
         private volatile bool _isNasOnline = true;
         private bool _nasStateInitialized;
         private bool _stopping;
@@ -658,6 +659,15 @@ namespace FNSyncPlus.Core.Services
                 try
                 {
                     await _queueSignal.WaitAsync(token).ConfigureAwait(false);
+
+                    if (_maintenanceHold)
+                    {
+                        // An update is being installed: keep the queued work pending and do not
+                        // start anything new. Running tasks are not touched.
+                        _queueSignal.Release();
+                        await Task.Delay(250, token).ConfigureAwait(false);
+                        continue;
+                    }
 
                     if (_taskQueue.TryDequeue(out string? taskId))
                     {
@@ -1498,6 +1508,55 @@ namespace FNSyncPlus.Core.Services
             _ = completion.ContinueWith(_ => DisposeResources(), CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             return completion;
+        }
+
+        /// <summary>
+        /// Stops the queue from starting new backups. Used while an update is being installed so a
+        /// fresh task cannot begin in the middle of the pointer swap. Running tasks are never
+        /// interrupted: they are allowed to finish on their own.
+        /// </summary>
+        public void EnterMaintenanceHold()
+        {
+            _maintenanceHold = true;
+            _logService.LogTask(new TaskLogEntry
+            {
+                TaskId = "system", Level = "INFO", Stage = "UPDATE",
+                Message = "已进入更新维护状态，暂停启动新的备份任务"
+            });
+        }
+
+        public void ExitMaintenanceHold() => _maintenanceHold = false;
+
+        public bool IsMaintenanceHoldActive => _maintenanceHold;
+
+        /// <summary>True when any task is scanning, syncing, queued or still completing.</summary>
+        public bool HasRunningOrQueuedWork
+        {
+            get
+            {
+                lock (_taskLifecycleLock)
+                {
+                    if (_runningCompletions.Count > 0) return true;
+                    return _settings.Tasks.Any(t => t.IsRunning || t.State == TaskSyncState.Queued);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Conservative proxy for "the last run did not end in a known-good state": a recovery
+        /// session is open or a task stopped in a configuration/uncertain state. Callers must defer
+        /// an update rather than guess.
+        /// </summary>
+        public bool HasUnclearCommitOrLock
+        {
+            get
+            {
+                lock (_taskLifecycleLock)
+                {
+                    if (_recoverySessions.Count > 0) return true;
+                    return _settings.Tasks.Any(t => t.State == TaskSyncState.ConfigurationError);
+                }
+            }
         }
 
         /// <summary>Stops scheduling and waits for all running tasks to actually finish. Timeout leaves the manager stopped.</summary>

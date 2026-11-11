@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using FNSyncPlus.Core.Services;
+using FNSyncPlus.Core.Updates;
 using FNSyncPlus.WinUI.Services;
 using Microsoft.UI.Xaml;
 
@@ -56,6 +57,9 @@ namespace FNSyncPlus.WinUI
                     return;
                 }
 
+                // 数据格式守卫：更高版本写入的配置不允许旧程序再写入
+                if (!EnsureDataFormatCompatible()) return;
+
                 // 初始化依赖注入容器与底层 Core 业务引擎
                 AppServices.Initialize();
 
@@ -86,6 +90,7 @@ namespace FNSyncPlus.WinUI
                 Helpers.UIThreadHelper.Initialize(win.DispatcherQueue);
 
                 win.Activate();
+                MarkLaunchedHealthy();
                 _singleInstance.StartListening(() =>
                 {
                     try
@@ -108,6 +113,44 @@ namespace FNSyncPlus.WinUI
                 LogCrashException(ex, "App.OnLaunched");
                 ShowStartupMessage("软件启动失败或无法确认是否已经运行。请检查系统托盘和日志后重试。");
                 Exit();
+            }
+        }
+
+        /// <summary>Configuration format this build understands. Bump only with a migration.</summary>
+        private const int SupportedDataFormat = 1;
+
+        /// <summary>
+        /// Refuses to run when the local configuration was written by a newer build. Rolling the
+        /// binary back must never be allowed to rewrite data it does not understand.
+        /// </summary>
+        private static bool EnsureDataFormatCompatible()
+        {
+            string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "FNSyncPlus", "data-format.json");
+            var guard = new DataFormatGuard(path, SupportedDataFormat);
+            if (guard.TryClaim(UpdateService.CurrentVersion.ToString(), out string error)) return true;
+            LogCrashException(new InvalidOperationException(error), "App.DataFormatGuard");
+            ShowStartupMessage(error);
+            return false;
+        }
+
+        /// <summary>
+        /// Tells the updater that this version really became usable. Only a managed installation
+        /// (app-{version} under a root with current.json) takes part in the update protocol.
+        /// </summary>
+        private static void MarkLaunchedHealthy()
+        {
+            try
+            {
+                string? root = VersionedInstallLayout.TryFindRootFromAppDirectory(AppContext.BaseDirectory);
+                if (root == null) return;
+                var layout = new VersionedInstallLayout(root);
+                if (layout.ActiveVersion is { } version)
+                    new LaunchHealthTracker(root).MarkHealthy(version, Environment.ProcessId);
+            }
+            catch (Exception ex)
+            {
+                LogCrashException(ex, "App.MarkLaunchedHealthy");
             }
         }
 

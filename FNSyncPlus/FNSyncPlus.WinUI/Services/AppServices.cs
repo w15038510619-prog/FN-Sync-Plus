@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Services;
+using FNSyncPlus.Core.Updates;
 using FNSyncPlus.WinUI.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -95,7 +96,17 @@ namespace FNSyncPlus.WinUI.Services
             var fnOsService = new FnOsIntegrationService(smbService);
             services.AddSingleton(fnOsService);
 
-            // 2. ViewModels
+            // 2. Auto update (phase 2). A managed installation is required for in-place upgrades;
+            //    an unpacked ZIP run can still check but never replaces itself.
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string updateSettingsPath = IsIsolatedTestSession
+                ? Path.Combine(settings.GetIsolatedLogDirectory(), "updates.json")
+                : Path.Combine(localAppData, "FNSyncPlus", "updates.json");
+            var updateSettings = UpdateService.LoadSettings(updateSettingsPath);
+            var updateService = new UpdateService(updateSettings, updateSettingsPath, AppContext.BaseDirectory, taskManager);
+            services.AddSingleton(updateService);
+
+            // 3. ViewModels
             services.AddSingleton<MainViewModel>();
             services.AddSingleton<TasksViewModel>();
             services.AddTransient<AddFolderWizardViewModel>();

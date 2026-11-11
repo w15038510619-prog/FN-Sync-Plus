@@ -15,4 +15,11 @@
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
   </ItemGroup>
 
+  <!-- The pinned update-signing public key is embedded by the release build (see build-winui.ps1).
+       Without it the update verifier refuses to be created, so an unpacked dev build never accepts
+       an unsigned manifest. -->
+  <ItemGroup Condition="Exists('Updates\update-public.pem')">
+    <EmbeddedResource Include="Updates\update-public.pem" LogicalName="FNSyncPlus.update-public.pem" />
+  </ItemGroup>
+
 </Project>

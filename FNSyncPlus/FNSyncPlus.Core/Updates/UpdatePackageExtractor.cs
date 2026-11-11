@@ -66,8 +66,6 @@ public static class UpdatePackageExtractor
             string payload = FlattenSingleRoot(staging);
             if (!File.Exists(Path.Combine(payload, "FNSyncPlus.WinUI.exe")))
                 return ExtractOutcome.Fail("更新包缺少主程序 FNSyncPlus.WinUI.exe");
-            if (!File.Exists(Path.Combine(payload, "FNSyncPlus.Updater.exe")))
-                return ExtractOutcome.Fail("更新包缺少更新器 FNSyncPlus.Updater.exe");
             return new ExtractOutcome(true, payload, "", files, total);
         }
         catch (OperationCanceledException)
