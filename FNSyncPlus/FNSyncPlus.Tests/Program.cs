@@ -281,6 +281,43 @@ namespace FNSyncPlus.Tests
                 bool shutdownLogPersisted = new LogService(shutdownLog.LogsDirectory).GetTaskLogs("shutdown-check").Any(x => x.Message == "pending log marker");
                 Assert(flushWasPending && shutdownTimedOut && stoppedAfterLog && shutdownLogPersisted,
                     "正常退出等待已排队日志写入，超时不误报退出完成");
+                string failedLogDir = Path.Combine(root, "failed-task-log");
+                var failedLog = new LogService(failedLogDir);
+                string blockingTasksPath = Path.Combine(failedLogDir, "tasks");
+                File.WriteAllText(blockingTasksPath, "blocks log directory creation");
+                int writeFailures = 0;
+                failedLog.TaskLogWriteFailed += () => Interlocked.Increment(ref writeFailures);
+                using var failedLogManager = new TaskManager(AppSettings.CreateInMemory(), new SmbAuthService(), failedLog);
+                failedLog.LogTask(new TaskLogEntry { TaskId = "write-failure", Message = "retained failure marker" });
+                bool failureReported = false;
+                try { await failedLogManager.ShutdownAsync(TimeSpan.FromSeconds(10)); }
+                catch (IOException) { failureReported = true; }
+                Assert(failureReported && failedLog.FailedTaskWriteCount == 1 && writeFailures > 0,
+                    "日志目录不可写时退出报告错误并保留失败记录");
+                File.Move(blockingTasksPath, Path.Combine(failedLogDir, "original-blocking-file"));
+                bool recoveredShutdown = await failedLogManager.ShutdownAsync(TimeSpan.FromSeconds(10));
+                Assert(recoveredShutdown && failedLog.FailedTaskWriteCount == 0 && new LogService(failedLogDir).GetTaskLogs("write-failure").Any(x => x.Message == "retained failure marker"),
+                    "日志目录恢复后重新退出可持久化失败记录");
+                string floodLogDir = Path.Combine(root, "many-failed-task-logs");
+                var floodLog = new LogService(floodLogDir);
+                string floodBlocker = Path.Combine(floodLogDir, "tasks");
+                File.WriteAllText(floodBlocker, "blocks log directory creation");
+                for (int i = 0; i < 305; i++) floodLog.LogTask(new TaskLogEntry { TaskId = "flood", Message = $"retained-{i}" });
+                try { await floodLog.FlushPendingTaskLogsAsync(); }
+                catch (TaskLogPersistenceException) { }
+                bool allFailuresRetained = floodLog.FailedTaskWriteCount == 305;
+                File.Move(floodBlocker, Path.Combine(floodLogDir, "original-blocking-file"));
+                await floodLog.FlushPendingTaskLogsAsync();
+                Assert(allFailuresRetained && floodLog.FailedTaskWriteCount == 0 && new LogService(floodLogDir).GetTaskLogs("flood").Count == 305,
+                    "超过普通内存缓存的连续失败日志仍能在恢复后全部写入");
+                var partialLog = new LogService(Path.Combine(root, "partial-task-log"));
+                string partialDir = partialLog.GetTaskLogDirectory("partial");
+                Directory.CreateDirectory(partialDir);
+                File.WriteAllText(Path.Combine(partialDir, $"{DateTime.Now:yyyyMMdd}.log"), "partial unclosed log line");
+                partialLog.LogTask(new TaskLogEntry { TaskId = "partial", Message = "next valid record" });
+                await partialLog.FlushPendingTaskLogsAsync();
+                Assert(new LogService(partialLog.LogsDirectory).GetTaskLogs("partial").Any(x => x.Message == "next valid record"),
+                    "已有不完整日志行时后续记录仍独立可读");
                 var oldLogEntry = System.Text.Json.JsonSerializer.Deserialize<TaskLogEntry>("{\"task_id\":\"old\",\"msg\":\"old log\"}");
                 Assert(oldLogEntry != null && oldLogEntry.SyncBatchId == null && oldLogEntry.EntryId == null && !oldLogEntry.FormattedDisplay.Contains("批次", StringComparison.Ordinal),
                     "旧日志没有批次号时仍可读取且不伪造批次");
@@ -312,6 +349,11 @@ namespace FNSyncPlus.Tests
                 {
                     Assert(archiveLog.SearchTaskLogs("archive-task", "old batch marker").Count == 1,
                         "搜索可读取正在写入的日志文件");
+                }
+                using (var activeWriter = new FileStream(Path.Combine(archiveDir, $"{DateTime.Now:yyyyMMdd}.log"), FileMode.Open, FileAccess.Write, FileShare.ReadWrite))
+                {
+                    Assert(archiveLog.GetTaskLogs("archive-task").Any(x => x.Message == "memory batch marker"),
+                        "最近日志读取不阻断正在写入的日志文件");
                 }
                 using (var cancelledSearch = new CancellationTokenSource())
                 {

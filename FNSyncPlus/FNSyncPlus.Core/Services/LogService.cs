@@ -13,6 +13,11 @@ using FNSyncPlus.Core.Models;
 
 namespace FNSyncPlus.Core.Services
 {
+    public sealed class TaskLogPersistenceException : IOException
+    {
+        public TaskLogPersistenceException(string message) : base(message) { }
+    }
+
     /// <summary>
     /// 统一持久化任务与系统诊断日志服务
     /// 存储路径: %LOCALAPPDATA%\FNSyncPlus\logs\
@@ -26,6 +31,8 @@ namespace FNSyncPlus.Core.Services
         private readonly string _baseLogsDir;
         private readonly ConcurrentDictionary<string, ConcurrentQueue<TaskLogEntry>> _inMemoryRecentLogs = new();
         private readonly ConcurrentDictionary<long, Task> _pendingTaskWrites = new();
+        private readonly ConcurrentDictionary<string, TaskLogEntry> _failedTaskWrites = new();
+        private readonly SemaphoreSlim _flushTaskWritesLock = new(1, 1);
         private long _nextTaskWriteId;
         private readonly object _fileWriteLock = new();
 
@@ -59,6 +66,8 @@ namespace FNSyncPlus.Core.Services
         }
 
         public string LogsDirectory => _baseLogsDir;
+        public int FailedTaskWriteCount => _failedTaskWrites.Count;
+        public event Action? TaskLogWriteFailed;
         public string GetTaskLogDirectory(string taskId) => Path.Combine(_baseLogsDir, "tasks", SanitizeFileName(taskId));
 
         #region 任务日志记录与持久化
@@ -95,8 +104,21 @@ namespace FNSyncPlus.Core.Services
                 CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
 
-        /// <summary>Waits for task-log writes already queued; the writer does not report disk-write failures.</summary>
-        public Task FlushPendingTaskLogsAsync() => Task.WhenAll(_pendingTaskWrites.Values.ToArray());
+        /// <summary>Waits for queued writes and retries retained failures; throws if records remain unsaved.</summary>
+        public async Task FlushPendingTaskLogsAsync()
+        {
+            await _flushTaskWritesLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                await Task.WhenAll(_pendingTaskWrites.Values.ToArray()).ConfigureAwait(false);
+                var failed = _failedTaskWrites.Values.ToArray();
+                if (failed.Length > 0)
+                    await Task.Run(() => { foreach (var entry in failed) WriteTaskLogToFile(entry); }).ConfigureAwait(false);
+                if (!_failedTaskWrites.IsEmpty)
+                    throw new TaskLogPersistenceException($"{_failedTaskWrites.Count} 条任务日志未能保存，请检查日志目录的磁盘空间和写入权限。");
+            }
+            finally { _flushTaskWritesLock.Release(); }
+        }
 
         /// <summary>
         /// 便捷任务日志记录
@@ -160,12 +182,28 @@ namespace FNSyncPlus.Core.Services
 
                 lock (_fileWriteLock)
                 {
-                    File.AppendAllText(logFile, jsonLine, Encoding.UTF8);
+                    using var stream = new FileStream(logFile, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+                    if (stream.Length > 0)
+                    {
+                        stream.Seek(-1, SeekOrigin.End);
+                        if (stream.ReadByte() != '\n')
+                        {
+                            stream.Seek(0, SeekOrigin.End);
+                            byte[] separator = Encoding.UTF8.GetBytes(Environment.NewLine);
+                            stream.Write(separator, 0, separator.Length);
+                        }
+                    }
+                    stream.Seek(0, SeekOrigin.End);
+                    byte[] bytes = Encoding.UTF8.GetBytes(jsonLine);
+                    stream.Write(bytes, 0, bytes.Length);
                 }
+                _failedTaskWrites.TryRemove(entry.EntryId!, out _);
             }
             catch
             {
-                // 磁盘写入异常时绝不向上崩溃抛出，内存队列中依然保留
+                _failedTaskWrites[entry.EntryId!] = entry;
+                try { TaskLogWriteFailed?.Invoke(); }
+                catch { /* A notification failure must not discard the retained entry. */ }
             }
         }
 
@@ -250,8 +288,10 @@ namespace FNSyncPlus.Core.Services
 
                     foreach (var file in files)
                     {
-                        var lines = File.ReadAllLines(file, Encoding.UTF8);
-                        foreach (var line in lines)
+                        using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                        using var reader = new StreamReader(stream, Encoding.UTF8);
+                        string? line;
+                        while ((line = reader.ReadLine()) != null)
                         {
                             if (string.IsNullOrWhiteSpace(line)) continue;
 

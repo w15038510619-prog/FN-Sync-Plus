@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
 using FNSyncPlus.WinUI.Dialogs;
@@ -18,15 +19,18 @@ namespace FNSyncPlus.WinUI
         public MainViewModel ViewModel { get; }
         private readonly AppSettings _settings;
         private readonly AppWindow _appWindow;
+        private readonly LogService _logService;
         private TrayIcon? _trayIcon;
         private bool _explicitExit;
         private bool _shutdownInProgress;
         private bool _shutdownComplete;
+        private int _logWarningQueued;
 
         public MainWindow(string initialView = "Tasks", int wizardStep = 0)
         {
             ViewModel = AppServices.GetService<MainViewModel>();
             _settings = AppServices.GetService<AppSettings>();
+            _logService = AppServices.GetService<LogService>();
             InitializeComponent();
 
             string title = AppServices.IsIsolatedTestSession
@@ -34,6 +38,7 @@ namespace FNSyncPlus.WinUI
                 : AppServices.IsVersionedBetaSession ? "飞牛同步增强版 v0.4.0-beta [新版备份试用]" : "飞牛同步增强版 v0.4.0-beta [旧版引擎·仅供诊断]";
             WindowHelper.ConfigureWindow(this, title, 1200, 780);
             AppTitleText.Text = title;
+            _logService.TaskLogWriteFailed += OnTaskLogWriteFailed;
             _appWindow = AppWindow.GetFromWindowId(Microsoft.UI.Win32Interop.GetWindowIdFromWindow(WindowHelper.GetHandle(this)));
             InitializeTrayIcon();
             _appWindow.Closing += OnAppWindowClosing;
@@ -238,6 +243,24 @@ namespace FNSyncPlus.WinUI
                 };
                 await dialog.ShowAsync();
             }
+            catch (TaskLogPersistenceException ex)
+            {
+                AppTitleText.Text = "任务日志未保存，请检查磁盘空间和权限";
+                var dialog = new ContentDialog
+                {
+                    Title = "有任务日志未保存",
+                    Content = $"{ex.Message}\n\n日志暂时保留在本程序内存中。请检查磁盘空间和日志目录权限，然后再次选择退出以重试。若仍要退出，这些日志可能丢失。",
+                    PrimaryButtonText = "稍后重试",
+                    SecondaryButtonText = "仍要退出",
+                    DefaultButton = ContentDialogButton.Primary,
+                    XamlRoot = Content.XamlRoot
+                };
+                if (await dialog.ShowAsync() == ContentDialogResult.Secondary)
+                {
+                    _shutdownComplete = true;
+                    Close();
+                }
+            }
             catch (Exception ex)
             {
                 App.LogCrashException(ex, "MainWindow.Shutdown");
@@ -263,8 +286,19 @@ namespace FNSyncPlus.WinUI
             if (_trayIcon != null) _appWindow.Hide();
         }
 
+        private void OnTaskLogWriteFailed()
+        {
+            if (Interlocked.Exchange(ref _logWarningQueued, 1) != 0) return;
+            if (!DispatcherQueue.TryEnqueue(() =>
+            {
+                Interlocked.Exchange(ref _logWarningQueued, 0);
+                if (!_shutdownInProgress) AppTitleText.Text = "任务日志未保存，请检查磁盘空间和权限";
+            })) Interlocked.Exchange(ref _logWarningQueued, 0);
+        }
+
         private void OnWindowClosed(object sender, WindowEventArgs args)
         {
+            _logService.TaskLogWriteFailed -= OnTaskLogWriteFailed;
             try
             {
                 _trayIcon?.Dispose();
