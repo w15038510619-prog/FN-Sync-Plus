@@ -74,9 +74,20 @@ namespace FNSyncPlus.Core.Services
         [JsonIgnore]
         private bool RequiresIsolatedTestBoundary { get; set; }
 
+        [JsonIgnore]
+        private string? EphemeralIsolatedLogDirectory { get; set; }
+
         public static AppSettings CreateInMemory() => new AppSettings { IsInMemoryOnly = true };
         public static AppSettings CreateUnboundedIsolatedSession() => new AppSettings { IsInMemoryOnly = true, RequiresIsolatedTestBoundary = true };
         public static AppSettings CreateForTest(string testFilePath) => new AppSettings { CustomConfigPath = testFilePath };
+
+        public string GetIsolatedLogDirectory()
+        {
+            string? profile = IsolatedSessionPath ?? (IsVersionedBetaTestProfile ? VersionedBetaProfilePath : null);
+            if (profile != null) return Path.Combine(Path.GetDirectoryName(profile)!, "logs");
+            if (!RequiresIsolatedTestBoundary) throw new InvalidOperationException("当前配置不是隔离测试会话");
+            return EphemeralIsolatedLogDirectory ??= Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"WinUiLogs_{Guid.NewGuid():N}");
+        }
 
         public static AppSettings LoadVersionedBetaProfile() => LoadVersionedProfileAt(
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "versioned-beta"),

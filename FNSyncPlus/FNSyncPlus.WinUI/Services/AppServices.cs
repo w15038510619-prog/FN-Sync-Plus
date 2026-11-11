@@ -13,6 +13,7 @@ namespace FNSyncPlus.WinUI.Services
         public static bool IsIsolatedTestSession { get; private set; }
         public static bool IsVersionedBetaSession { get; private set; }
         public static bool IsLegacyEngineSession { get; private set; }
+        public static string? IsolatedLogsDirectory { get; private set; }
 
         public static IServiceProvider Provider => _serviceProvider 
             ?? throw new InvalidOperationException("AppServices has not been initialized.");
@@ -65,6 +66,10 @@ namespace FNSyncPlus.WinUI.Services
             }
             services.AddSingleton(settings);
 
+            IsolatedLogsDirectory = IsIsolatedTestSession ? settings.GetIsolatedLogDirectory() : null;
+            var logService = IsolatedLogsDirectory != null ? new LogService(IsolatedLogsDirectory) : LogService.Default;
+            services.AddSingleton(logService);
+
             var smbService = new SmbAuthService();
             services.AddSingleton(smbService);
 
@@ -75,7 +80,7 @@ namespace FNSyncPlus.WinUI.Services
             services.AddSingleton(manifestManager);
 
             var taskManager = new TaskManager(settings, longNameEngine, manifestManager, smbService,
-                experimentalVersionedBackup: IsIsolatedTestSession || IsVersionedBetaSession);
+                logService, experimentalVersionedBackup: IsIsolatedTestSession || IsVersionedBetaSession);
             services.AddSingleton(taskManager);
 
             var connectionService = new NasConnectionService(smbService, settings, taskManager);

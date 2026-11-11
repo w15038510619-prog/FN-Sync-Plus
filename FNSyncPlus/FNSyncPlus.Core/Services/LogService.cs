@@ -57,6 +57,7 @@ namespace FNSyncPlus.Core.Services
         }
 
         public string LogsDirectory => _baseLogsDir;
+        public string GetTaskLogDirectory(string taskId) => Path.Combine(_baseLogsDir, "tasks", SanitizeFileName(taskId));
 
         #region 任务日志记录与持久化
 
@@ -133,8 +134,7 @@ namespace FNSyncPlus.Core.Services
         {
             try
             {
-                string safeTaskId = SanitizeFileName(entry.TaskId);
-                string taskLogDir = Path.Combine(_baseLogsDir, "tasks", safeTaskId);
+                string taskLogDir = GetTaskLogDirectory(entry.TaskId);
                 if (!Directory.Exists(taskLogDir))
                 {
                     Directory.CreateDirectory(taskLogDir);
@@ -224,8 +224,7 @@ namespace FNSyncPlus.Core.Services
             var result = new List<TaskLogEntry>();
             if (string.IsNullOrWhiteSpace(taskId)) return result;
 
-            string safeTaskId = SanitizeFileName(taskId);
-            string taskLogDir = Path.Combine(_baseLogsDir, "tasks", safeTaskId);
+            string taskLogDir = GetTaskLogDirectory(taskId);
 
             // 1. 从磁盘文件读取最近的日志
             if (Directory.Exists(taskLogDir))
@@ -294,13 +293,7 @@ namespace FNSyncPlus.Core.Services
         /// </summary>
         public string ExportTaskDiagnosticZip(string taskId, string targetZipPath)
         {
-            string safeTaskId = SanitizeFileName(taskId);
-            string taskLogDir = Path.Combine(_baseLogsDir, "tasks", safeTaskId);
-
-            if (File.Exists(targetZipPath))
-            {
-                File.Delete(targetZipPath);
-            }
+            string taskLogDir = GetTaskLogDirectory(taskId);
 
             string tempDir = Path.Combine(Path.GetTempPath(), "FNSync_Diag_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(tempDir);
@@ -366,7 +359,7 @@ namespace FNSyncPlus.Core.Services
         {
             var invalid = Path.GetInvalidFileNameChars();
             var clean = new string(name.Select(c => invalid.Contains(c) ? '_' : c).ToArray());
-            return string.IsNullOrWhiteSpace(clean) ? "default_task" : clean;
+            return string.IsNullOrWhiteSpace(clean) || clean is "." or ".." ? "default_task" : clean;
         }
 
         #endregion

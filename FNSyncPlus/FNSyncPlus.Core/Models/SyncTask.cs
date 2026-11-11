@@ -158,6 +158,10 @@ namespace FNSyncPlus.Core.Models
         [JsonPropertyName("last_transferred_bytes")]
         public long LastTransferredBytes { get; set; }
 
+        [JsonPropertyName("last_versioned_uploaded_bytes")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public long? LastVersionedUploadedBytes { get; set; }
+
         // --- 纯内存运行态属性 ---
 
         [JsonIgnore]

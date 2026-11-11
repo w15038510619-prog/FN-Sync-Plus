@@ -912,6 +912,7 @@ namespace FNSyncPlus.Core.Services
                         State = SyncState.Completed, TotalFiles = result.Snapshot.Manifest.Files.Count,
                         ScannedFiles = result.Snapshot.Manifest.Files.Count, UploadedFiles = result.UploadedFiles,
                         UnchangedFiles = result.UnchangedFiles,
+                        BytesTransferred = result.UploadedBytes,
                         LongNameFiles = result.Snapshot.Manifest.Files.Count(f => f.IsLongName)
                     };
                 }
@@ -936,6 +937,7 @@ namespace FNSyncPlus.Core.Services
                 task.LastLongNameFiles = report.LongNameFiles;
                 task.LastFailedFiles = report.FailedFiles;
                 task.LastTransferredBytes = report.BytesTransferred;
+                if (task.IsExperimentalBackup) task.LastVersionedUploadedBytes = report.BytesTransferred;
 
                 task.CurrentSpeedBytesPerSec = 0;
 

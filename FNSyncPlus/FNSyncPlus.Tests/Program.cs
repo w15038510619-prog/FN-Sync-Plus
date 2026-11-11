@@ -246,6 +246,24 @@ namespace FNSyncPlus.Tests
                     catch (InvalidOperationException) { rejectedLabParents++; }
                 }
                 Assert(unboundedLabRejected && rejectedLabParents == 3, "隔离测试实验室只接受已授权沙盒或其子目录");
+                string isolatedLogDir = boundedLab.GetIsolatedLogDirectory();
+                var otherIsolated = AppSettings.LoadVersionedBetaTestProfile(Guid.NewGuid());
+                string ephemeralLogDir = unboundedSession.GetIsolatedLogDirectory();
+                var ephemeralOther = AppSettings.CreateUnboundedIsolatedSession();
+                var isolatedLog = new LogService(isolatedLogDir);
+                Assert(isolatedLogDir != otherIsolated.GetIsolatedLogDirectory() &&
+                    ephemeralLogDir == unboundedSession.GetIsolatedLogDirectory() && ephemeralLogDir != ephemeralOther.GetIsolatedLogDirectory() &&
+                    isolatedLog.GetTaskLogDirectory("..") == Path.Combine(isolatedLogDir, "tasks", "default_task"),
+                    "隔离会话使用独立稳定的日志目录，异常任务标识不能越界");
+                isolatedLog.LogTask(new TaskLogEntry { TaskId = "isolated-log-check", Level = "INFO", Stage = "TEST", Message = "isolated log marker" });
+                var diskLog = new LogService(isolatedLogDir);
+                bool logPersisted = false;
+                for (int attempt = 0; attempt < 100 && !logPersisted; attempt++)
+                {
+                    await Task.Delay(50);
+                    logPersisted = diskLog.GetTaskLogs("isolated-log-check").Any(x => x.Message == "isolated log marker");
+                }
+                Assert(logPersisted, "隔离任务日志写入测试目录后可由新实例读取");
                 string previewDir = new string('中', 90);
                 string previewName = new string('中', 98) + "ab.txt";
                 string previewObject = ".fnsync/objects/obj-" + Guid.NewGuid().ToString("N");
@@ -269,6 +287,13 @@ namespace FNSyncPlus.Tests
                 try { ManifestMappingPreview.Create(previewManifest, versioned: true); }
                 catch (InvalidDataException) { unsafePreviewRejected = true; }
                 Assert(unsafePreviewRejected, "新版详情拒绝展示无效的备份对象路径");
+                string existingDiagnostic = Path.Combine(root, "existing-diagnostic.zip");
+                File.WriteAllText(existingDiagnostic, "preserve existing file");
+                bool existingDiagnosticRejected = false;
+                try { new LogService(Path.Combine(root, "diagnostic-test-logs")).ExportTaskDiagnosticZip("test-task", existingDiagnostic); }
+                catch (IOException) { existingDiagnosticRejected = true; }
+                Assert(existingDiagnosticRejected && File.ReadAllText(existingDiagnostic) == "preserve existing file",
+                    "诊断包目标已存在时拒绝覆盖并保留原文件");
                 string config = Path.Combine(root, "settings.json");
                 var settings = AppSettings.CreateForTest(config);
                 settings.Tasks.Add(new SyncTask { TaskName = "失败测试", TaskId = "task_fail_legitimate", SourceFolder = @"C:\Fake" });
@@ -722,6 +747,11 @@ namespace FNSyncPlus.Tests
                     File.ReadAllText(Path.Combine(reusedRestore, newLongName)) == "long name only on local" &&
                     File.ReadAllText(Path.Combine(reuseExisting, "different.txt")) == "same size remoteB",
                     "新备份复用内容一致的已有文件，缺失或不同文件上传且原目录保留");
+                long expectedUploadedBytes = new FileInfo(Path.Combine(reuseSource, "different.txt")).Length +
+                    new FileInfo(Path.Combine(reuseSource, newLongName)).Length +
+                    new FileInfo(Path.Combine(reuseSource, "missing-folder", "sample.txt")).Length;
+                Assert(reuse.UploadedBytes == expectedUploadedBytes,
+                    "新版上传字节数只统计本地上传，排除飞牛内部复用文件");
                 Assert(reuseProgress.Any(m => m.Contains("核对并尝试复用", StringComparison.Ordinal)) &&
                     reuseProgress.Any(m => m.Contains("上传本地文件", StringComparison.Ordinal)),
                     "复用备份报告校验和上传阶段，避免长时间无反馈");
@@ -2336,6 +2366,10 @@ namespace FNSyncPlus.Tests
                 Assert(task.State == TaskSyncState.Completed && task.DisplayStatus.Contains("隔离试验", StringComparison.Ordinal) &&
                     first?.Manifest.Files.Count == 1 && first.Manifest.Files[0].Sha256 == HashHelper.ComputeFileSha256(Path.Combine(source, "sample.txt")),
                     "内存隔离任务首次同步提交版本化清单并明确显示试验状态");
+                Assert(task.LastVersionedUploadedBytes == new FileInfo(Path.Combine(source, "sample.txt")).Length &&
+                    AppSettings.FromJson(settings.ToJson()).Tasks.Single().LastVersionedUploadedBytes == task.LastVersionedUploadedBytes &&
+                    AppSettings.FromJson("{\"Tasks\":[{}]}").Tasks.Single().LastVersionedUploadedBytes == null,
+                    "新版任务持久保存本地上传字节数，旧配置显示未记录");
                 Assert(File.ReadAllText(Path.Combine(root, task.DestinationFolder, "current", "sample.txt")) == "version one",
                     "隔离任务完成时首次物理目录已发布并可读取");
                 string initialProjectionRoot = Path.Combine(root, task.DestinationFolder, ".fnsync", "projections");
@@ -2358,6 +2392,7 @@ namespace FNSyncPlus.Tests
                     "再次同步开始时清除上次完成的 100% 进度和文件状态");
                 var unchangedVersion = await versions.LoadAsync(provider, task.DestinationFolder);
                 Assert(task.State == TaskSyncState.Completed && unchangedVersion?.Id == first?.Id && task.LastUploadedFiles == 0 &&
+                    task.LastVersionedUploadedBytes == 0 &&
                     Directory.GetDirectories(initialProjectionRoot, "candidate-*").Length == candidatesBefore &&
                     Directory.GetDirectories(initialProjectionRoot, "archive-*").Length == 0,
                     "无变化检查保留原版本，不上传或重复生成物理树");

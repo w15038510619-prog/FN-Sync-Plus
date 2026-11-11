@@ -60,6 +60,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private readonly TaskManager _taskManager;
         private readonly ManifestManager _manifestManager;
         private readonly NasConnectionService _connectionService;
+        private readonly LogService _logService;
 
         public SyncTask? TaskModel { get; private set; }
 
@@ -94,7 +95,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _transferredBytesFormatted = "0 B";
 
         [ObservableProperty]
-        private string _transferredSummaryText = "累计传输: 0 B";
+        private string _transferredSummaryText = "上次统计传输: 0 B";
 
         [ObservableProperty]
         private string _scannedFilesText = "扫描: 0";
@@ -142,11 +143,13 @@ namespace FNSyncPlus.WinUI.ViewModels
         public TaskDetailsViewModel(
             TaskManager taskManager, 
             ManifestManager manifestManager,
-            NasConnectionService connectionService)
+            NasConnectionService connectionService,
+            LogService logService)
         {
             _taskManager = taskManager;
             _manifestManager = manifestManager;
             _connectionService = connectionService;
+            _logService = logService;
         }
 
         public async Task LoadTaskAsync(SyncTask task)
@@ -166,9 +169,13 @@ namespace FNSyncPlus.WinUI.ViewModels
             UnchangedFiles = task.LastUnchangedFiles;
             LongNameFiles = task.LastLongNameFiles;
             FailedFiles = task.LastFailedFiles;
-            TransferredBytesFormatted = FormatBytes(task.LastTransferredBytes);
+            TransferredBytesFormatted = task.IsExperimentalBackup
+                ? (task.LastVersionedUploadedBytes.HasValue ? FormatBytes(task.LastVersionedUploadedBytes.Value) : "未记录")
+                : FormatBytes(task.LastTransferredBytes);
 
-            TransferredSummaryText = $"累计传输: {TransferredBytesFormatted}";
+            TransferredSummaryText = task.IsExperimentalBackup
+                ? $"上次成功上传: {TransferredBytesFormatted}"
+                : $"上次统计传输: {TransferredBytesFormatted}";
             ScannedFilesText = $"扫描: {ScannedFiles}";
             UploadedFilesText = $"上传: {UploadedFiles}";
             UnchangedFilesText = $"跳过未改: {UnchangedFiles}";
@@ -376,7 +383,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         public void OpenLogsDirectory()
         {
             if (TaskModel == null) return;
-            string logsDir = Path.Combine(LogService.Default.LogsDirectory, "tasks", TaskModel.TaskId);
+            string logsDir = _logService.GetTaskLogDirectory(TaskModel.TaskId);
             try
             {
                 if (!Directory.Exists(logsDir))
@@ -421,11 +428,11 @@ namespace FNSyncPlus.WinUI.ViewModels
             if (TaskModel == null) return;
             string targetZip = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
-                $"FNSync_Diag_{TaskModel.TaskId}_{DateTime.Now:yyyyMMdd_HHmmss}.zip");
+                $"FNSync_Diag_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}.zip");
 
             try
             {
-                LogService.Default.ExportTaskDiagnosticZip(TaskModel.TaskId, targetZip);
+                _logService.ExportTaskDiagnosticZip(TaskModel.TaskId, targetZip);
                 StatusFeedbackMessage = $"诊断包已导出至桌面: {Path.GetFileName(targetZip)}";
             }
             catch (Exception ex)
@@ -437,11 +444,11 @@ namespace FNSyncPlus.WinUI.ViewModels
         private static string FormatBytes(long bytes)
         {
             if (bytes >= 1024 * 1024 * 1024)
-                return $"{bytes / (1024.0 * 1024 * 1024):F2} GB";
+                return $"{bytes / (1024.0 * 1024 * 1024):F2} GiB";
             if (bytes >= 1024 * 1024)
-                return $"{bytes / (1024.0 * 1024 * 1024):F2} MB";
+                return $"{bytes / (1024.0 * 1024):F2} MiB";
             if (bytes >= 1024)
-                return $"{bytes / (1024.0 * 1024):F1} KB";
+                return $"{bytes / 1024.0:F1} KiB";
             return $"{bytes} B";
         }
     }

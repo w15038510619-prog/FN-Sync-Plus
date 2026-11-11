@@ -12,7 +12,7 @@ namespace FNSyncPlus.Core.Services;
 /// </summary>
 public sealed class ExperimentalVersionedBackup
 {
-    public sealed record Result(VersionedManifestStore.Snapshot Snapshot, int UploadedFiles, int UnchangedFiles, int RenamedFiles, int DeletedFiles, int ReusedFiles = 0, bool HasNewVersion = true, bool ResumedInitialization = false);
+    public sealed record Result(VersionedManifestStore.Snapshot Snapshot, int UploadedFiles, int UnchangedFiles, int RenamedFiles, int DeletedFiles, int ReusedFiles = 0, bool HasNewVersion = true, bool ResumedInitialization = false, long UploadedBytes = 0);
     private sealed record SourceFile(string RelativePath, string FullPath, long Size, long ModifiedTicks, string Sha256);
     private sealed record SourceTree(List<string> Directories, List<(string RelativePath, string FullPath)> Files);
     private sealed record TreeStamp(string[] Directories, (string RelativePath, long Size, long ModifiedTicks)[] Files);
@@ -229,6 +229,7 @@ public sealed class ExperimentalVersionedBackup
             var preparedFiles = new List<SourceFile>();
             var nextFiles = new List<ManifestFileEntry>();
             int uploaded = 0, unchanged = 0, renamed = 0, reused = 0;
+            long uploadedBytes = 0;
             void AddHistory(ManifestFileEntry old, string reason, string? renamedTo = null)
             {
                 manifest.History.Add(new ManifestHistoryEntry {
@@ -322,6 +323,7 @@ public sealed class ExperimentalVersionedBackup
                     ProgressChanged?.Invoke($"正在上传本地文件：{source.RelativePath}");
                     content = await _objects.PrepareAsync(provider, target, source.FullPath, token).ConfigureAwait(false);
                     uploaded++;
+                    uploadedBytes = checked(uploadedBytes + content.Size);
                 }
                 if (content.Size != baseline.Size || !string.Equals(content.Sha256, baseline.Sha256, StringComparison.OrdinalIgnoreCase) ||
                     content.ModifiedUtc.Ticks != baseline.ModifiedTicks)
@@ -381,13 +383,13 @@ public sealed class ExperimentalVersionedBackup
             manifest.BackupPolicy = strategy.ToString();
             token.ThrowIfCancellationRequested();
             if (oldSnapshot != null && ComparableManifest(manifest, provider).AsSpan().SequenceEqual(ComparableManifest(oldSnapshot.Manifest, provider)))
-                return new Result(oldSnapshot, uploaded, unchanged, renamed, strategy is BackupStrategy.Smart or BackupStrategy.Mirror ? deleted.Count : 0, reused, HasNewVersion: false);
+                return new Result(oldSnapshot, uploaded, unchanged, renamed, strategy is BackupStrategy.Smart or BackupStrategy.Mirror ? deleted.Count : 0, reused, HasNewVersion: false, UploadedBytes: uploadedBytes);
             manifest.UpdatedAt = DateTimeOffset.UtcNow;
             token.ThrowIfCancellationRequested();
             commitMayHaveStarted = true;
             var snapshot = await _versions.SaveAsync(provider, target, manifest, oldSnapshot?.Id, token).ConfigureAwait(false);
             committed = true;
-            return new Result(snapshot, uploaded, unchanged, renamed, strategy is BackupStrategy.Smart or BackupStrategy.Mirror ? deleted.Count : 0, reused);
+            return new Result(snapshot, uploaded, unchanged, renamed, strategy is BackupStrategy.Smart or BackupStrategy.Mirror ? deleted.Count : 0, reused, UploadedBytes: uploadedBytes);
         }
         catch (Exception ex)
         {

@@ -126,8 +126,10 @@ namespace FNSyncPlus.WinUI
         {
             try
             {
-                string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                string logDir = Path.Combine(localApp, "FNSyncPlus", "logs");
+                bool isolated = Array.Exists(Environment.GetCommandLineArgs(), arg => arg.Equals("--isolated-test-session", StringComparison.Ordinal));
+                string logDir = isolated
+                    ? AppServices.IsolatedLogsDirectory ?? Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", "startup-crashes")
+                    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "logs");
                 Directory.CreateDirectory(logDir);
 
                 string logFile = Path.Combine(logDir, $"crash_{DateTime.Now:yyyyMMdd}.log");
