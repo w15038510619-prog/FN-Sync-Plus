@@ -19,6 +19,48 @@ namespace FNSyncPlus.Core.Storage
         LocalFileSystem
     }
 
+    public enum ExclusiveDirectoryResult { Created, AlreadyExists }
+
+    /// <summary>
+    /// Experimental capability. A provider must distinguish creating a new directory from an existing one.
+    /// Callers must still evaluate the server's concurrency and durability guarantees.
+    /// </summary>
+    public interface IExclusiveDirectoryProvider
+    {
+        Task<ExclusiveDirectoryResult> TryCreateDirectoryExclusiveAsync(string relativePath, CancellationToken ct = default);
+    }
+
+    public enum VerifiedMoveOutcome { Moved, DestinationExists, NotMoved }
+
+    /// <summary>Experimental only. A timeout after a move request leaves the remote outcome uncertain.</summary>
+    public interface IExperimentalFileMoveProvider
+    {
+        Task<VerifiedMoveOutcome> MoveFileVerifiedAsync(string sourcePath, string destinationDirectory,
+            string expectedSha256, long expectedSize, CancellationToken ct = default);
+    }
+
+    /// <summary>Experimental first publication only; a sent move may have an uncertain outcome.</summary>
+    public interface IExperimentalCandidateDirectoryMover
+    {
+        Task<VerifiedMoveOutcome> MoveCandidateDirectoryAsync(string backupRoot, string candidateDirectory,
+            CancellationToken ct = default);
+        Task<VerifiedMoveOutcome> MoveCurrentToArchiveAsync(string backupRoot, string archiveDirectory,
+            CancellationToken ct = default);
+    }
+
+    /// <summary>Experimental server-side copy into a new, independently verified object.</summary>
+    public interface IExperimentalContentReuseProvider
+    {
+        // Returns null only when the source was absent or did not match, before any copy was requested.
+        Task<string?> CopyIntoNewObjectAsync(string sourcePath, string backupRoot, string expectedSha256,
+            long expectedSize, CancellationToken ct = default);
+    }
+
+    public sealed class RemoteMoveUncertainException : IOException
+    {
+        public RemoteMoveUncertainException(string message, Exception? inner = null) : base(message, inner) { }
+    }
+
     /// <summary>
     /// NAS 存储项目元数据模型
     /// </summary>
@@ -108,7 +150,7 @@ namespace FNSyncPlus.Core.Storage
         Task<NasStorageItem?> GetItemAsync(string relativePath, CancellationToken ct = default);
 
         /// <summary>
-        /// 流式上传文件（支持 SHA-256 完整性校验、修改时间保留与进度回调）
+        /// 流式上传文件（支持修改时间保留与进度回调）。overwrite=false 不保证跨客户端原子独占，不能用作锁。
         /// </summary>
         Task<StorageOperationResult> UploadFileAsync(
             string relativePath,

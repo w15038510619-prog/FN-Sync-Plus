@@ -74,11 +74,23 @@ namespace FNSyncPlus.Core.Models
         [JsonPropertyName("nas_username")]
         public string NasUsername { get; set; } = string.Empty;
 
+        /// <summary>
+        /// 创建任务时登录账号的权威 UID (来自 user.info)。重连后若 UID 不一致则停止任务，
+        /// 防止同名重建或账号切换把任务写入他人个人空间。
+        /// </summary>
+        [JsonPropertyName("nas_account_uid")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? NasAccountUid { get; set; }
+
         [JsonPropertyName("sync_mode")]
         public SyncMode Mode { get; set; } = SyncMode.OneWayBackup;
 
         [JsonPropertyName("enabled")]
         public bool Enabled { get; set; } = true;
+
+        // Explicit user pause is persistent; transient runtime states are not.
+        [JsonPropertyName("is_paused")]
+        public bool IsUserPaused { get; set; }
 
         [JsonPropertyName("auto_sync_enabled")]
         public bool AutoSyncEnabled { get; set; } = true;
@@ -94,6 +106,9 @@ namespace FNSyncPlus.Core.Models
 
         [JsonPropertyName("backup_strategy")]
         public BackupStrategy Strategy { get; set; } = BackupStrategy.Smart;
+
+        [JsonPropertyName("mirror_deletion_enabled")]
+        public bool MirrorDeletionEnabled { get; set; }
 
         [JsonPropertyName("settling_delay_seconds")]
         public int SettlingDelaySeconds { get; set; } = 3;
@@ -151,6 +166,10 @@ namespace FNSyncPlus.Core.Models
         [JsonPropertyName("last_transferred_bytes")]
         public long LastTransferredBytes { get; set; }
 
+        [JsonPropertyName("last_versioned_uploaded_bytes")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public long? LastVersionedUploadedBytes { get; set; }
+
         // --- 纯内存运行态属性 ---
 
         [JsonIgnore]
@@ -170,6 +189,35 @@ namespace FNSyncPlus.Core.Models
 
         [JsonIgnore]
         public bool IsPaused => State == TaskSyncState.Paused;
+
+        [JsonIgnore]
+        public bool IsExperimentalBackup { get; internal set; }
+
+        // Persisted independently of runtime flags so a versioned task cannot fall back to the legacy engine.
+        [JsonPropertyName("backup_storage_format")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        [JsonInclude]
+        public string? BackupStorageFormat { get; internal set; }
+
+        /// <summary>Only for an explicitly selected source in an isolated experiment.</summary>
+        [JsonPropertyName("experimental_existing_root")]
+        public string? ExperimentalExistingRoot { get; set; }
+
+        [JsonPropertyName("experimental_pending_initialization")]
+        [JsonInclude]
+        public bool ExperimentalPendingInitialization { get; internal set; }
+
+        [JsonPropertyName("experimental_first_publication_pending")]
+        [JsonInclude]
+        public bool ExperimentalFirstPublicationPending { get; internal set; }
+
+        [JsonPropertyName("experimental_initialization_id")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        [JsonInclude]
+        public string? ExperimentalInitializationId { get; internal set; }
+
+        [JsonIgnore]
+        public bool RequiresNewExperimentalBackup { get; internal set; }
 
         /// <summary>
         /// 自动化状态友好摘要（展示调度模式、监听状态、下次检查时间与排队情况）
@@ -236,7 +284,7 @@ namespace FNSyncPlus.Core.Models
             TaskSyncState.Syncing => $"正在同步备份 ({CurrentProgress:F0}%)...",
             TaskSyncState.Paused => "已暂停",
             TaskSyncState.OfflineWaiting => "NAS离线等待恢复",
-            TaskSyncState.Completed => "已就绪 (已最新)",
+            TaskSyncState.Completed => IsExperimentalBackup ? LastSyncStatus : "已就绪 (已最新)",
             TaskSyncState.Error => !string.IsNullOrEmpty(LastSyncStatus) && LastSyncStatus.Contains("失败")
                 ? LastSyncStatus
                 : (string.IsNullOrEmpty(LastError) ? (string.IsNullOrEmpty(LastSyncStatus) ? "同步出错" : LastSyncStatus) : $"出错: {LastError}"),

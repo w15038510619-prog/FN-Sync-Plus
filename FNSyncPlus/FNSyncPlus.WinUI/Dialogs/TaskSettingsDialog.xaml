@@ -7,13 +7,13 @@
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     Title="备份任务设置"
     PrimaryButtonText="保存设置"
-    SecondaryButtonText="仅移除任务配置"
     CloseButtonText="取消"
     DefaultButton="Primary"
     mc:Ignorable="d">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="600">
-        <Grid MinWidth="540" MaxWidth="620" RowSpacing="14" Padding="0,4,0,0">
+        <StackPanel MinWidth="540" MaxWidth="620" Spacing="14" Padding="0,4,0,0">
+            <TextBlock x:Name="TxtSaveError" Visibility="Collapsed" TextWrapping="Wrap" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
             <!-- 1. Task Name and Paths Card -->
             <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -100,7 +100,7 @@
                     BorderThickness="1" CornerRadius="8" Padding="14,12">
                 <StackPanel Spacing="10">
                     <TextBlock Text="防写抖动延迟 (Settling Delay)" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                    <TextBlock Text="检测到本地文件正在被保存或持续写入时，等待文件句柄释放且大小平稳后再上传，严禁上传半截损坏文件。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <TextBlock Text="检测到本地文件变化后等待设定时间，并检查文件是否被占用。对于分段写入的应用，请设置足够长的等待时间。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
 
                     <ComboBox x:Name="CmbSettlingDelay" HorizontalAlignment="Stretch">
                         <ComboBoxItem Content="1 秒 (极速响应)" Tag="1" />
@@ -118,7 +118,7 @@
                 <StackPanel Spacing="10">
                     <TextBlock Text="远端重命名与备份策略" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
 
-                    <ComboBox x:Name="CmbStrategy" HorizontalAlignment="Stretch">
+                    <ComboBox x:Name="CmbStrategy" HorizontalAlignment="Stretch" SelectionChanged="CmbStrategy_SelectionChanged">
                         <ComboBoxItem Tag="Smart">
                             <StackPanel Spacing="2">
                                 <TextBlock Text="智能备份 (默认推荐)" FontWeight="SemiBold" FontSize="12" />
@@ -131,13 +131,18 @@
                                 <TextBlock Text="只增不减，旧文件全部保留在远端与历史记录中，新旧共存" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                         </ComboBoxItem>
-                        <ComboBoxItem Tag="Mirror">
+                        <ComboBoxItem x:Name="MirrorStrategyItem" Tag="Mirror">
                             <StackPanel Spacing="2">
                                 <TextBlock Text="镜像备份" FontWeight="SemiBold" FontSize="12" />
-                                <TextBlock Text="NAS 严格镜像本地目录树，远端有效结构与本地完全一致" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="当前树跟随本地变更并保留历史；发现未知远端项目或源目录变空时停止。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                         </ComboBoxItem>
                     </ComboBox>
+                    <TextBlock x:Name="MirrorUnavailableNotice" Visibility="Collapsed" Text="当前任务不支持镜像备份，请选择智能备份或归档备份。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <CheckBox x:Name="MirrorDeletionConsent" Visibility="Collapsed" Checked="MirrorDeletionConsent_Checked">
+                        <TextBlock Text="我明确允许将本地已删除的受管理文件从当前目录移入历史；仅限手动同步，发现额外远端文件或源目录变空时停止。" TextWrapping="Wrap" MaxWidth="520" />
+                    </CheckBox>
+                    <TextBlock x:Name="MirrorConsentError" Visibility="Collapsed" Text="请先明确勾选允许移入历史。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
                 </StackPanel>
             </Border>
 
@@ -148,6 +153,6 @@
                     <TextBlock Text="点击「仅移除任务配置」仅在当前软件中移除该任务的自动化调度，绝对不会删除或修改您的本地源文件或 NAS 已有的任何备份数据。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                 </StackPanel>
             </Border>
-        </Grid>
+        </StackPanel>
     </ScrollViewer>
 </ContentDialog>

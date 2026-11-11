@@ -165,6 +165,24 @@ namespace FNSyncPlus.WinUI.Pages
             }
         }
 
+        private async void BtnSelectExistingFolder_Click(object sender, RoutedEventArgs e)
+        {
+            var dialog = new Dialogs.NasBrowserDialog
+            {
+                XamlRoot = this.XamlRoot,
+                Title = AppServices.IsVersionedBetaSession ? "选择已有飞牛同步文件夹" : "选择已有飞牛同步文件夹（隔离试验）"
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+            string selected = !string.IsNullOrWhiteSpace(dialog.ViewModel.ConfirmedSelectedPath)
+                ? dialog.ViewModel.ConfirmedSelectedPath : dialog.ViewModel.CurrentUncPath;
+            if (!string.IsNullOrWhiteSpace(selected)) ViewModel.ExperimentalExistingRoot = selected;
+        }
+
+        private void BtnClearExistingFolder_Click(object sender, RoutedEventArgs e)
+        {
+            ViewModel.ExperimentalExistingRoot = string.Empty;
+        }
+
         private void BtnPreviousStep_Click(object sender, RoutedEventArgs e)
         {
             ViewModel.PreviousStep();

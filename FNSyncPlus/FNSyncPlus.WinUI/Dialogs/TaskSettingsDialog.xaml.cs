@@ -1,6 +1,7 @@
 using System;
 using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
+using FNSyncPlus.WinUI.Services;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
@@ -10,9 +11,9 @@ namespace FNSyncPlus.WinUI.Dialogs
     {
         private readonly SyncTask _task;
         private readonly TaskManager _taskManager;
+        private readonly bool _canTestMirror;
 
         public bool WasConfigSaved { get; private set; }
-        public bool WasTaskRemoved { get; private set; }
 
         public TaskSettingsDialog(SyncTask task, TaskManager taskManager)
         {
@@ -21,8 +22,13 @@ namespace FNSyncPlus.WinUI.Dialogs
 
             InitializeComponent();
 
+            var settings = AppServices.GetService<AppSettings>();
+            _canTestMirror = _task.IsExperimentalBackup && (AppServices.IsVersionedBetaSession ||
+                (AppServices.IsIsolatedTestSession && settings.IsVersionedBetaTestProfile && settings.HasIsolatedTestBoundary));
+            MirrorStrategyItem.IsEnabled = _canTestMirror;
+            MirrorUnavailableNotice.Visibility = _canTestMirror ? Visibility.Collapsed : Visibility.Visible;
+
             PrimaryButtonClick += OnPrimaryButtonClick;
-            SecondaryButtonClick += OnSecondaryButtonClick;
 
             LoadTaskSettings();
         }
@@ -60,7 +66,9 @@ namespace FNSyncPlus.WinUI.Dialogs
                 BackupStrategy.Mirror => 2,
                 _ => 0
             };
+            MirrorDeletionConsent.IsChecked = _task.MirrorDeletionEnabled;
             CmbStrategy.SelectedIndex = stratIdx;
+            UpdateMirrorConsentVisibility();
 
             UpdateIntervalPanelVisibility();
         }
@@ -82,6 +90,20 @@ namespace FNSyncPlus.WinUI.Dialogs
             UpdateIntervalPanelVisibility();
         }
 
+        private void CmbStrategy_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateMirrorConsentVisibility();
+
+        private void MirrorDeletionConsent_Checked(object sender, RoutedEventArgs e)
+        {
+            if (MirrorConsentError != null) MirrorConsentError.Visibility = Visibility.Collapsed;
+        }
+
+        private void UpdateMirrorConsentVisibility()
+        {
+            if (MirrorDeletionConsent != null)
+                MirrorDeletionConsent.Visibility = _canTestMirror && CmbStrategy.SelectedIndex == 2 ? Visibility.Visible : Visibility.Collapsed;
+            if (MirrorConsentError != null && CmbStrategy.SelectedIndex != 2) MirrorConsentError.Visibility = Visibility.Collapsed;
+        }
+
         private void UpdateIntervalPanelVisibility()
         {
             if (PnlInterval == null) return;
@@ -92,6 +114,14 @@ namespace FNSyncPlus.WinUI.Dialogs
 
         private void OnPrimaryButtonClick(ContentDialog sender, ContentDialogButtonClickEventArgs args)
         {
+            if (CmbStrategy.SelectedIndex == 2 && (!_canTestMirror || MirrorDeletionConsent.IsChecked != true))
+            {
+                TxtSaveError.Text = "镜像备份需要明确勾选允许移入历史。";
+                TxtSaveError.Visibility = Visibility.Visible;
+                if (_canTestMirror) MirrorConsentError.Visibility = Visibility.Visible;
+                args.Cancel = true;
+                return;
+            }
             string newName = TxtTaskName.Text?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(newName))
             {
@@ -99,10 +129,20 @@ namespace FNSyncPlus.WinUI.Dialogs
                 return;
             }
 
-            _task.TaskName = newName;
+            var edited = new SyncTask
+            {
+                TaskId = _task.TaskId,
+                TaskName = newName,
+                Enabled = _task.Enabled,
+                AutoSyncEnabled = _task.AutoSyncEnabled,
+                RealtimeWatchEnabled = _task.RealtimeWatchEnabled,
+                Mode = _task.Mode,
+                IntervalMinutes = _task.IntervalMinutes,
+                SettlingDelaySeconds = _task.SettlingDelaySeconds
+            };
 
             // 调度模式
-            _task.ScheduleMode = CmbScheduleMode.SelectedIndex switch
+            edited.ScheduleMode = CmbScheduleMode.SelectedIndex switch
             {
                 0 => TaskSyncScheduleMode.SmartAuto,
                 1 => TaskSyncScheduleMode.RealtimeOnly,
@@ -114,40 +154,42 @@ namespace FNSyncPlus.WinUI.Dialogs
             // 周期
             if (CmbInterval.SelectedItem is ComboBoxItem intervalItem && int.TryParse(intervalItem.Tag?.ToString(), out int intervalVal))
             {
-                _task.IntervalMinutes = intervalVal;
+                edited.IntervalMinutes = intervalVal;
             }
 
             // 防抖
             if (CmbSettlingDelay.SelectedItem is ComboBoxItem delayItem && int.TryParse(delayItem.Tag?.ToString(), out int delayVal))
             {
-                _task.SettlingDelaySeconds = delayVal;
+                edited.SettlingDelaySeconds = delayVal;
             }
 
             // 策略
-            _task.Strategy = CmbStrategy.SelectedIndex switch
+            edited.Strategy = CmbStrategy.SelectedIndex switch
             {
                 0 => BackupStrategy.Smart,
                 1 => BackupStrategy.Archive,
                 2 => BackupStrategy.Mirror,
                 _ => BackupStrategy.Smart
             };
+            edited.MirrorDeletionEnabled = edited.Strategy == BackupStrategy.Mirror && MirrorDeletionConsent.IsChecked == true;
+            if (edited.Strategy == BackupStrategy.Mirror && edited.ScheduleMode != TaskSyncScheduleMode.ManualOnly)
+            {
+                TxtSaveError.Text = "镜像备份目前只支持仅手动模式。";
+                TxtSaveError.Visibility = Visibility.Visible;
+                args.Cancel = true;
+                return;
+            }
 
-            _taskManager.UpdateTask(_task);
-            WasConfigSaved = true;
-        }
-
-        private async void OnSecondaryButtonClick(ContentDialog sender, ContentDialogButtonClickEventArgs args)
-        {
-            // 拦截默认关闭，改为安全移除
-            var deferral = args.GetDeferral();
             try
             {
-                await _taskManager.RemoveTaskAsync(_task.TaskId);
-                WasTaskRemoved = true;
+                _taskManager.UpdateTask(edited);
+                WasConfigSaved = true;
             }
-            finally
+            catch (Exception ex)
             {
-                deferral.Complete();
+                args.Cancel = true;
+                TxtSaveError.Text = $"设置未完全应用，请检查任务状态：{ex.Message}";
+                TxtSaveError.Visibility = Visibility.Visible;
             }
         }
     }

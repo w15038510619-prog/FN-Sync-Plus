@@ -8,6 +8,8 @@ namespace FNSyncPlus.Core.Models
     /// </summary>
     public class TaskLogEntry
     {
+        internal TaskLogEntry Copy() => (TaskLogEntry)MemberwiseClone();
+
         [JsonPropertyName("time")]
         public DateTimeOffset Timestamp { get; set; } = DateTimeOffset.Now;
 
@@ -16,6 +18,14 @@ namespace FNSyncPlus.Core.Models
 
         [JsonPropertyName("task_id")]
         public string TaskId { get; set; } = string.Empty;
+
+        [JsonPropertyName("entry_id")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? EntryId { get; set; }
+
+        [JsonPropertyName("sync_batch_id")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? SyncBatchId { get; set; }
 
         [JsonPropertyName("stage")]
         public string Stage { get; set; } = "GENERAL"; // SCAN, PLAN, UPLOAD, MANIFEST, VERIFY, RESTORE, CLEANUP
@@ -68,6 +78,7 @@ namespace FNSyncPlus.Core.Models
                 var sb = new System.Text.StringBuilder();
                 string filePart = !string.IsNullOrEmpty(LocalRelPath) ? LocalRelPath : "-";
                 sb.Append($"{FormattedTimestamp} | {Level,-5} | {Stage,-8} | {filePart} | {Message}");
+                if (!string.IsNullOrEmpty(SyncBatchId)) sb.Append($" [批次: {SyncBatchId}]");
                 if (!string.IsNullOrEmpty(NasMappedName)) sb.Append($" (映射: {NasMappedName})");
                 if (Utf8Bytes.HasValue) sb.Append($" ({Utf8Bytes} B)");
                 if (!string.IsNullOrEmpty(RpcName)) sb.Append($" [接口: {RpcName}]");

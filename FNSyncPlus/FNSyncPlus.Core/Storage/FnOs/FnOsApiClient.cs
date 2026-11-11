@@ -41,8 +41,13 @@ namespace FNSyncPlus.Core.Storage.FnOs
         private ClientWebSocket? _webSocket;
         private readonly SemaphoreSlim _wsLock = new(1, 1);
         private readonly Dictionary<string, TaskCompletionSource<string>> _pendingRequests = new();
+        private readonly Dictionary<string, TaskCompletionSource<string>> _pendingTaskRequests = new();
+        private readonly Dictionary<string, List<FnOsFileEntry>> _pendingFileLists = new();
         private CancellationTokenSource? _receiveCts;
         private Task? _receiveLoopTask;
+        private CancellationTokenSource? _heartbeatCts;
+        private Task? _heartbeatTask;
+        private long _lastHeartbeatUtcTicks;
 
         private string? _host;
         private int _port;
@@ -56,7 +61,13 @@ namespace FNSyncPlus.Core.Storage.FnOs
         private byte[]? _hmacKeyBytes;
 
         public bool IsConnected => _webSocket?.State == WebSocketState.Open;
-        public bool IsAuthenticated { get; private set; }
+        private volatile bool _isAuthenticated;
+        public bool IsAuthenticated { get => _isAuthenticated; private set => _isAuthenticated = value; }
+        public DateTime? LastSuccessfulHeartbeatUtc
+        {
+            get { long ticks = Interlocked.Read(ref _lastHeartbeatUtcTicks); return ticks == 0 ? null : new DateTime(ticks, DateTimeKind.Utc); }
+        }
+        public event Action? ConnectionLost;
         public string? AuthToken { get; private set; }
         public string? LongToken { get; private set; }
         public string? AuthenticatedUser { get; private set; }
@@ -69,6 +80,15 @@ namespace FNSyncPlus.Core.Storage.FnOs
             AuthenticatedUser = user;
             CurrentUid = uid;
             CurrentVolumeId = volId;
+        }
+
+        /// <summary>模拟 user.info 未能返回权威 UID 的已认证会话，用于验证 fail-closed 行为。</summary>
+        public void SetAuthenticatedWithoutUidForTesting(string user)
+        {
+            IsAuthenticated = true;
+            AuthenticatedUser = user;
+            CurrentUid = null;
+            CurrentVolumeId = null;
         }
 
         public static Func<string, string, bool>? TrustedThumbprintValidator { get; set; }
@@ -187,6 +207,27 @@ namespace FNSyncPlus.Core.Storage.FnOs
         /// </summary>
         public async Task ConnectAsync(string host, int port, bool useSsl, CancellationToken ct = default)
         {
+            if (!useSsl) throw new InvalidOperationException("飞牛连接必须使用 HTTPS 加密；请将地址改为 https:// 或省略协议前缀。");
+            await StopHeartbeatAsync().ConfigureAwait(false);
+            _receiveCts?.Cancel();
+            if (_receiveLoopTask != null)
+            {
+                try { await _receiveLoopTask.ConfigureAwait(false); } catch (OperationCanceledException) { }
+            }
+            _receiveCts?.Dispose();
+            _webSocket?.Dispose();
+            IsAuthenticated = false;
+            AuthToken = null;
+            LongToken = null;
+            AuthenticatedUser = null;
+            CurrentUid = null;
+            CurrentVolumeId = null;
+            _rsaPublicKeyPem = null;
+            _sessionId = null;
+            _aesKey = null;
+            _iv = null;
+            _hmacKeyBytes = null;
+            Interlocked.Exchange(ref _lastHeartbeatUtcTicks, 0);
             _host = host;
             _port = port;
             _useSsl = useSsl;
@@ -194,7 +235,6 @@ namespace FNSyncPlus.Core.Storage.FnOs
             string scheme = useSsl ? "wss" : "ws";
             var uri = new Uri($"{scheme}://{host}:{port}/websocket?type=main");
 
-            _webSocket?.Dispose();
             _webSocket = new ClientWebSocket();
             if (useSsl)
             {
@@ -208,9 +248,10 @@ namespace FNSyncPlus.Core.Storage.FnOs
             await _webSocket.ConnectAsync(uri, ct);
 
             // 启动消息接收循环
-            _receiveCts?.Cancel();
             _receiveCts = new CancellationTokenSource();
-            _receiveLoopTask = Task.Run(() => ReceiveLoopAsync(_receiveCts.Token));
+            var activeSocket = _webSocket;
+            var receiveToken = _receiveCts.Token;
+            _receiveLoopTask = Task.Run(() => ReceiveLoopAsync(activeSocket, receiveToken));
 
             // 发送首个握手请求获取 RSA 公钥 (util.crypto.getRSAPub)
             string getPubMsg = $"{{\"reqid\":\"{FnOsCryptoHelper.GenerateReqId()}\",\"req\":\"util.crypto.getRSAPub\"}}";
@@ -232,20 +273,20 @@ namespace FNSyncPlus.Core.Storage.FnOs
             }
         }
 
-        private async Task ReceiveLoopAsync(CancellationToken ct)
+        private async Task ReceiveLoopAsync(ClientWebSocket socket, CancellationToken ct)
         {
             var buffer = new byte[64 * 1024];
             var ms = new MemoryStream();
 
             try
             {
-                while (!ct.IsCancellationRequested && _webSocket != null && _webSocket.State == WebSocketState.Open)
+                while (!ct.IsCancellationRequested && socket.State == WebSocketState.Open)
                 {
                     ms.SetLength(0);
                     WebSocketReceiveResult result;
                     do
                     {
-                        result = await _webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                        result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
                         if (result.MessageType == WebSocketMessageType.Close)
                         {
                             return;
@@ -258,7 +299,73 @@ namespace FNSyncPlus.Core.Storage.FnOs
                     ProcessIncomingMessage(text);
                 }
             }
-            catch { }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+            catch (Exception) { /* The caller receives an explicit connection-lost signal below. */ }
+            finally { MarkControlChannelStopped(socket, ct.IsCancellationRequested); ms.Dispose(); }
+        }
+
+        private void MarkControlChannelStopped(ClientWebSocket socket, bool intentional)
+        {
+            List<TaskCompletionSource<string>> pending;
+            bool wasAuthenticated;
+            lock (_pendingRequests)
+            {
+                if (!ReferenceEquals(_webSocket, socket)) return;
+                wasAuthenticated = IsAuthenticated;
+                IsAuthenticated = false;
+                pending = _pendingRequests.Values.Concat(_pendingTaskRequests.Values).ToList();
+                _pendingRequests.Clear();
+                _pendingTaskRequests.Clear();
+                _pendingFileLists.Clear();
+            }
+            foreach (var request in pending)
+                request.TrySetException(new IOException("飞牛控制连接已中断，已发送的远端操作结果可能不确定"));
+            if (!intentional && wasAuthenticated) ConnectionLost?.Invoke();
+        }
+
+        private void StartHeartbeat()
+        {
+            if (_webSocket == null || !IsAuthenticated || (_heartbeatTask != null && !_heartbeatTask.IsCompleted)) return;
+            _heartbeatCts = new CancellationTokenSource();
+            var socket = _webSocket;
+            var token = _heartbeatCts.Token;
+            _heartbeatTask = Task.Run(() => HeartbeatLoopAsync(socket, token));
+        }
+
+        private async Task HeartbeatLoopAsync(ClientWebSocket socket, CancellationToken token)
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+            try
+            {
+                while (await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
+                {
+                    if (!ReferenceEquals(_webSocket, socket) || !IsAuthenticated) return;
+                    string response = await SendSignedRpcAsync("user.info", new Dictionary<string, object?>(), token).ConfigureAwait(false);
+                    using var document = JsonDocument.Parse(response);
+                    if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                        (document.RootElement.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.String && result.GetString() == "fail") ||
+                        (document.RootElement.TryGetProperty("errno", out var error) && error.ValueKind == JsonValueKind.Number && error.TryGetInt32(out int code) && code != 0))
+                        throw new IOException("飞牛会话检查失败");
+                    Interlocked.Exchange(ref _lastHeartbeatUtcTicks, DateTime.UtcNow.Ticks);
+                }
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+            catch (Exception)
+            {
+                if (ReferenceEquals(_webSocket, socket))
+                {
+                    try { socket.Abort(); } catch (ObjectDisposedException) { }
+                }
+            }
+        }
+
+        private async Task StopHeartbeatAsync()
+        {
+            _heartbeatCts?.Cancel();
+            if (_heartbeatTask != null) await _heartbeatTask.ConfigureAwait(false);
+            _heartbeatCts?.Dispose();
+            _heartbeatCts = null;
+            _heartbeatTask = null;
         }
 
         private void ProcessIncomingMessage(string rawMessage)
@@ -295,14 +402,65 @@ namespace FNSyncPlus.Core.Storage.FnOs
                     string? reqId = reqIdProp.GetString();
                     if (!string.IsNullOrEmpty(reqId))
                     {
+                        TaskCompletionSource<string>? completed = null;
+                        Exception? listError = null;
+                        string response = jsonBody;
                         lock (_pendingRequests)
                         {
-                            if (_pendingRequests.TryGetValue(reqId, out var tcs))
+                            if (_pendingFileLists.TryGetValue(reqId, out var fileList) && _pendingRequests.TryGetValue(reqId, out var listCompletion))
+                            {
+                                try
+                                {
+                                    if (doc.RootElement.TryGetProperty("files", out var files))
+                                    {
+                                        if (files.ValueKind != JsonValueKind.Array) throw new InvalidDataException("飞牛目录列表批次无效");
+                                        var batch = JsonSerializer.Deserialize<List<FnOsFileEntry>>(files.GetRawText())
+                                            ?? throw new InvalidDataException("飞牛目录列表批次为空");
+                                        if (batch.Any(item => item == null || string.IsNullOrWhiteSpace(item.Name)))
+                                            throw new InvalidDataException("飞牛目录列表包含无效条目");
+                                        fileList.AddRange(batch);
+                                    }
+                                    var frame = JsonSerializer.Deserialize<FnOsFileListResponse>(jsonBody)
+                                        ?? throw new InvalidDataException("飞牛目录列表响应无效");
+                                    if (frame.Result != null || (frame.ErrNo.HasValue && frame.ErrNo.Value != 0))
+                                    {
+                                        if (frame.IsSuccess && fileList.Select(item => item.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != fileList.Count)
+                                            throw new InvalidDataException("飞牛目录列表包含重复条目，拒绝使用不确定的结果");
+                                        frame.Files = fileList;
+                                        response = JsonSerializer.Serialize(frame);
+                                        _pendingFileLists.Remove(reqId);
+                                        _pendingRequests.Remove(reqId);
+                                        completed = listCompletion;
+                                    }
+                                }
+                                catch (Exception ex) when (ex is JsonException or InvalidDataException or NotSupportedException)
+                                {
+                                    _pendingFileLists.Remove(reqId);
+                                    _pendingRequests.Remove(reqId);
+                                    completed = listCompletion;
+                                    listError = ex;
+                                }
+                            }
+                            else if (_pendingTaskRequests.TryGetValue(reqId, out var taskCompletion))
+                            {
+                                bool terminalResult = doc.RootElement.TryGetProperty("result", out var result) &&
+                                    result.ValueKind == JsonValueKind.String && result.GetString() is "succ" or "fail" or "partialCompleted" or "canceled";
+                                bool terminalError = doc.RootElement.TryGetProperty("errno", out var error) &&
+                                    error.ValueKind == JsonValueKind.Number && error.TryGetInt32(out int code) && code != 0;
+                                if (terminalResult || terminalError)
+                                {
+                                    _pendingTaskRequests.Remove(reqId);
+                                    completed = taskCompletion;
+                                }
+                            }
+                            else if (_pendingRequests.TryGetValue(reqId, out var tcs))
                             {
                                 _pendingRequests.Remove(reqId);
-                                tcs.TrySetResult(jsonBody);
+                                completed = tcs;
                             }
                         }
+                        if (listError != null) completed?.TrySetException(listError);
+                        else completed?.TrySetResult(response);
                     }
                 }
             }
@@ -356,19 +514,26 @@ namespace FNSyncPlus.Core.Storage.FnOs
 
             string envelopeJson = JsonSerializer.Serialize(envelope);
 
-            var tcs = new TaskCompletionSource<string>();
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             lock (_pendingRequests)
             {
                 _pendingRequests[reqId] = tcs;
             }
 
-            await SendRawTextAsync(envelopeJson, ct);
-
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            using var reg = linked.Token.Register(() => tcs.TrySetCanceled());
-
-            string responseJson = await tcs.Task;
+            string responseJson;
+            try
+            {
+                await SendRawTextAsync(envelopeJson, ct).ConfigureAwait(false);
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+                using var reg = linked.Token.Register(() => tcs.TrySetCanceled());
+                responseJson = await tcs.Task.ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_pendingRequests)
+                    if (_pendingRequests.TryGetValue(reqId, out var pending) && ReferenceEquals(pending, tcs)) _pendingRequests.Remove(reqId);
+            }
             var loginResp = JsonSerializer.Deserialize<FnOsLoginResponse>(responseJson);
 
             if (loginResp?.Result == "succ" && !string.IsNullOrEmpty(loginResp.EncryptedSecretBase64))
@@ -377,10 +542,14 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 byte[] rawSecretCipher = Convert.FromBase64String(loginResp.EncryptedSecretBase64);
                 _hmacKeyBytes = FnOsCryptoHelper.DecryptAesCbc(rawSecretCipher, _aesKey, _iv);
 
-                AuthToken = loginResp.Token;
-                LongToken = loginResp.LongToken;
-                AuthenticatedUser = username;
-                IsAuthenticated = true;
+                lock (_pendingRequests)
+                {
+                    if (!IsConnected) throw new IOException("登录时飞牛控制连接已中断");
+                    AuthToken = loginResp.Token;
+                    LongToken = loginResp.LongToken;
+                    AuthenticatedUser = username;
+                    IsAuthenticated = true;
+                }
 
                 // 登录成功后立即通过 user.info 获取当前用户的权威 UID 与账户信息
                 try
@@ -393,7 +562,10 @@ namespace FNSyncPlus.Core.Storage.FnOs
                         CurrentUid = uidProp.GetInt32();
                     }
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch { }
+                if (!IsAuthenticated || !IsConnected) throw new IOException("登录后飞牛控制连接已中断");
+                StartHeartbeat();
             }
 
             return loginResp ?? new FnOsLoginResponse { Result = "failed", ErrMsg = "Empty response" };
@@ -434,19 +606,26 @@ namespace FNSyncPlus.Core.Storage.FnOs
             };
 
             string envelopeJson = JsonSerializer.Serialize(envelope);
-            var tcs = new TaskCompletionSource<string>();
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             lock (_pendingRequests)
             {
                 _pendingRequests[reqId] = tcs;
             }
 
-            await SendRawTextAsync(envelopeJson, ct).ConfigureAwait(false);
-
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            using var reg = linked.Token.Register(() => tcs.TrySetCanceled());
-
-            string responseJson = await tcs.Task.ConfigureAwait(false);
+            string responseJson;
+            try
+            {
+                await SendRawTextAsync(envelopeJson, ct).ConfigureAwait(false);
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+                using var reg = linked.Token.Register(() => tcs.TrySetCanceled());
+                responseJson = await tcs.Task.ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_pendingRequests)
+                    if (_pendingRequests.TryGetValue(reqId, out var pending) && ReferenceEquals(pending, tcs)) _pendingRequests.Remove(reqId);
+            }
             var loginResp = JsonSerializer.Deserialize<FnOsLoginResponse>(responseJson);
 
             if (loginResp?.Result == "succ" && !string.IsNullOrEmpty(loginResp.EncryptedSecretBase64))
@@ -454,10 +633,14 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 byte[] rawSecretCipher = Convert.FromBase64String(loginResp.EncryptedSecretBase64);
                 _hmacKeyBytes = FnOsCryptoHelper.DecryptAesCbc(rawSecretCipher, _aesKey, _iv);
 
-                AuthToken = loginResp.Token;
-                LongToken = loginResp.LongToken;
-                AuthenticatedUser = username;
-                IsAuthenticated = true;
+                lock (_pendingRequests)
+                {
+                    if (!IsConnected) throw new IOException("登录时飞牛控制连接已中断");
+                    AuthToken = loginResp.Token;
+                    LongToken = loginResp.LongToken;
+                    AuthenticatedUser = username;
+                    IsAuthenticated = true;
+                }
 
                 try
                 {
@@ -469,7 +652,10 @@ namespace FNSyncPlus.Core.Storage.FnOs
                         CurrentUid = uidProp.GetInt32();
                     }
                 }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                 catch { }
+                if (!IsAuthenticated || !IsConnected) throw new IOException("登录后飞牛控制连接已中断");
+                StartHeartbeat();
             }
 
             return loginResp ?? new FnOsLoginResponse { Result = "failed", ErrMsg = "Empty response" };
@@ -495,10 +681,19 @@ namespace FNSyncPlus.Core.Storage.FnOs
         /// <summary>
         /// 发送带 HMAC-SHA256 签名的 WebSocket RPC 请求并等待响应
         /// </summary>
-        public async Task<string> SendSignedRpcAsync(string method, Dictionary<string, object?> payload, CancellationToken ct = default)
+        public Task<string> SendSignedRpcAsync(string method, Dictionary<string, object?> payload, CancellationToken ct = default)
+            => SendSignedRpcCoreAsync(method, payload, false, TimeSpan.FromSeconds(15), ct);
+
+        /// <summary>Waits for the terminal response of a long-running RPC; cancellation or timeout leaves the remote outcome unknown.</summary>
+        public Task<string> SendSignedTaskRpcAsync(string method, Dictionary<string, object?> payload, TimeSpan timeout, CancellationToken ct = default)
+            => SendSignedRpcCoreAsync(method, payload, true, timeout, ct);
+
+        private async Task<string> SendSignedRpcCoreAsync(string method, Dictionary<string, object?> payload,
+            bool waitForTerminalResult, TimeSpan timeout, CancellationToken ct, bool collectFileList = false)
         {
             if (!IsAuthenticated || _hmacKeyBytes == null)
                 throw new InvalidOperationException("未鉴权或缺少 HMAC 签名密钥，无法发送 RPC。");
+            if (timeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
 
             string reqId = FnOsCryptoHelper.GenerateReqId();
             payload["req"] = method;
@@ -507,19 +702,29 @@ namespace FNSyncPlus.Core.Storage.FnOs
             string jsonStr = JsonSerializer.Serialize(payload);
             string signedMessage = FnOsCryptoHelper.FormatSignedRpcMessage(_hmacKeyBytes, jsonStr);
 
-            var tcs = new TaskCompletionSource<string>();
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             lock (_pendingRequests)
             {
-                _pendingRequests[reqId] = tcs;
+                (waitForTerminalResult ? _pendingTaskRequests : _pendingRequests).Add(reqId, tcs);
+                if (collectFileList) _pendingFileLists.Add(reqId, new List<FnOsFileEntry>());
             }
-
-            await SendRawTextAsync(signedMessage, ct);
-
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-            using var reg = linked.Token.Register(() => tcs.TrySetCanceled());
-
-            return await tcs.Task;
+            try
+            {
+                using var timeoutCts = new CancellationTokenSource(timeout);
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+                using var reg = linked.Token.Register(() => tcs.TrySetCanceled(linked.Token));
+                await SendRawTextAsync(signedMessage, linked.Token).ConfigureAwait(false);
+                return await tcs.Task.ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_pendingRequests)
+                {
+                    var pending = waitForTerminalResult ? _pendingTaskRequests : _pendingRequests;
+                    if (pending.TryGetValue(reqId, out var current) && ReferenceEquals(current, tcs)) pending.Remove(reqId);
+                    if (collectFileList) _pendingFileLists.Remove(reqId);
+                }
+            }
         }
 
         /// <summary>
@@ -533,16 +738,27 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 payload["path"] = subPath;
             }
 
-            string responseJson = await SendSignedRpcAsync("file.ls", payload, ct).ConfigureAwait(false);
+            string responseJson;
+            try
+            {
+                responseJson = await SendSignedRpcCoreAsync("file.ls", payload, false, TimeSpan.FromSeconds(60), ct, collectFileList: true).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                throw new TimeoutException("飞牛目录列表未在时限内完整返回，已停止读取。", ex);
+            }
             var result = JsonSerializer.Deserialize<FnOsFileListResponse>(responseJson);
 
-            // 若在根目录下，自动捕获当前系统 VolumeId 与 UID
-            if (string.IsNullOrWhiteSpace(subPath) && result?.Files != null)
+            // 根目录条目里可能混有他人所有的共享内容，条目 uid 不能代表当前登录账号；
+            // 当前 UID 只以 user.info 的结果为准，这里绝不回写。
+            // 卷号只从归属当前账号的条目中学习，且不覆盖已确认的值。
+            if (string.IsNullOrWhiteSpace(subPath) && result?.Files != null && CurrentUid.HasValue)
             {
                 foreach (var f in result.Files)
                 {
-                    if (f.VolumeId.HasValue) CurrentVolumeId = f.VolumeId.Value;
-                    if (f.Uid.HasValue) CurrentUid = f.Uid.Value;
+                    if (CurrentVolumeId.HasValue) break;
+                    if (f.VolumeId.HasValue && (!f.Uid.HasValue || f.Uid.Value == CurrentUid.Value))
+                        CurrentVolumeId = f.VolumeId.Value;
                 }
             }
 
@@ -581,11 +797,6 @@ namespace FNSyncPlus.Core.Storage.FnOs
             };
 
             string responseJson = await SendSignedRpcAsync("file.checkUpload", payload, ct).ConfigureAwait(false);
-            if (responseJson.Contains("fail") || responseJson.Contains("err") || remotePath.Contains("25"))
-            {
-                Console.WriteLine($"[DEBUG checkUpload] path: {canonicalPath}, resp: {responseJson}");
-            }
-
             var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             using var doc = JsonDocument.Parse(responseJson);
             var resp = new FnOsCheckUploadResponse
@@ -671,7 +882,6 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 var checkRes = await CheckUploadAsync(canonicalPath, fileSize, mtim, ct).ConfigureAwait(false);
                 if (checkRes.Result == "fail" || (checkRes.ErrNo.HasValue && checkRes.ErrNo.Value != 0))
                 {
-                    Console.WriteLine($"[DEBUG checkUpload Failed] errno: {checkRes.ErrNo}, msg: {checkRes.ErrMsg}, path: {canonicalPath}");
                     if (checkRes.ErrNo == 4104)
                     {
                         return FnOsUploadResult.Fail(499, "fail", 4104, "Path Is Too Long", $"checkUpload 预检失败：文件名超长 (errno: 4104, errmsg: {checkRes.ErrMsg ?? "Path Is Too Long"})");
@@ -691,6 +901,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
                     uploadPath = string.IsNullOrEmpty(parentDir) ? checkRes.ErrMsg : $"{parentDir}/{checkRes.ErrMsg}";
                 }
             }
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
                 if (ex.Message.Contains("4104") || ex.Message.Contains("Path Is Too Long"))
@@ -772,7 +983,6 @@ namespace FNSyncPlus.Core.Storage.FnOs
                     errMsg ??= "Path Is Too Long";
                 }
 
-                Console.WriteLine($"[DEBUG Upload Failed] HTTP {httpCode} {resp.ReasonPhrase}: {errContent}, uploadPath: {uploadPath}");
                 return FnOsUploadResult.Fail(httpCode, result, errNo, errMsg, $"HTTP {httpCode} {resp.ReasonPhrase}: {errContent}");
             }
 
@@ -789,7 +999,6 @@ namespace FNSyncPlus.Core.Storage.FnOs
 
                     if (resStr == "fail" || (errNo.HasValue && errNo.Value != 0))
                     {
-                        Console.WriteLine($"[DEBUG Upload Body Failed] {respBody}, uploadPath: {uploadPath}");
                         return FnOsUploadResult.Fail(200, resStr ?? "fail", errNo, errMsg, respBody);
                     }
                 }
@@ -871,13 +1080,13 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 ["moveToTrashbin"] = moveToTrash
             };
             string responseJson = await SendSignedRpcAsync("file.rm", payload, ct).ConfigureAwait(false);
-            Console.WriteLine($"[DEBUG file.rm] payload: {canonicalPath}, resp: {responseJson}");
             return JsonSerializer.Deserialize<FnOsGenericRpcResponse>(responseJson)
                    ?? new FnOsGenericRpcResponse { Result = "failed" };
         }
 
         public async ValueTask DisposeAsync()
         {
+            await StopHeartbeatAsync().ConfigureAwait(false);
             _receiveCts?.Cancel();
             if (_receiveLoopTask != null)
             {

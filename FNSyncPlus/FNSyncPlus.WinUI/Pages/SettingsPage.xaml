@@ -34,9 +34,9 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                                 <TextBlock Text="开机自动启动" FontSize="13" FontWeight="Medium" />
-                                <TextBlock Text="随 Windows 开机在后台静默启动并常驻，持续监测文件夹变动" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="随 Windows 开机在后台启动；试用或测试配置暂不支持此选项" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
-                            <ToggleSwitch Grid.Column="1" IsOn="{x:Bind ViewModel.StartWithWindows, Mode=TwoWay}" OnContent="" OffContent="" />
+                            <ToggleSwitch Grid.Column="1" IsOn="{x:Bind ViewModel.StartWithWindows, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanConfigureStartup}" OnContent="" OffContent="" />
                         </Grid>
 
                         <MenuFlyoutSeparator Margin="0,4" />

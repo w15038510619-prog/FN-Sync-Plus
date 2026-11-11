@@ -8,6 +8,9 @@ namespace FNSyncPlus.WinUI.ViewModels
     public partial class SettingsViewModel : ObservableObject
     {
         private readonly AppSettings _settings;
+        private readonly NasConnectionService _connectionService;
+
+        public bool CanConfigureStartup => !_settings.IsVersionedBetaProfile && !_settings.IsInMemoryOnly && _settings.IsolatedSessionPath == null;
 
         [ObservableProperty]
         private bool _startWithWindows;
@@ -21,11 +24,12 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private string _statusNotice = string.Empty;
 
-        public SettingsViewModel(AppSettings settings)
+        public SettingsViewModel(AppSettings settings, NasConnectionService connectionService)
         {
             _settings = settings;
+            _connectionService = connectionService;
 
-            _startWithWindows = settings.StartWithWindows;
+            _startWithWindows = CanConfigureStartup && settings.StartWithWindows;
             _minimizeToTray = settings.MinimizeToTray;
 
             _maxConcurrentSyncsIndex = settings.MaxConcurrentSyncs switch
@@ -41,7 +45,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         [RelayCommand]
         public void SaveSettings()
         {
-            _settings.StartWithWindows = StartWithWindows;
+            _settings.StartWithWindows = CanConfigureStartup && StartWithWindows;
             _settings.MinimizeToTray = MinimizeToTray;
             _settings.MaxConcurrentSyncs = MaxConcurrentSyncsIndex switch
             {
@@ -52,14 +56,14 @@ namespace FNSyncPlus.WinUI.ViewModels
                 _ => 2
             };
             _settings.Save();
-            StatusNotice = "设置已保存成功。";
+            StatusNotice = CanConfigureStartup ? "设置已保存成功。" : "设置已保存；此试用或测试配置暂不支持开机自动启动。";
         }
 
         [RelayCommand]
-        public void ClearCredentials()
+        public async System.Threading.Tasks.Task ClearCredentials()
         {
-            SmbAuthService.ClearSavedCredentials();
-            StatusNotice = "已成功清除本机使用 Windows DPAPI 加密保存的所有 NAS 登录密码。";
+            var result = await _connectionService.ForgetSavedCredentialsAsync();
+            StatusNotice = result.Message;
         }
     }
 }

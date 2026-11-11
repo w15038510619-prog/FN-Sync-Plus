@@ -73,16 +73,16 @@
                 <StackPanel Grid.Column="0" Spacing="4">
                     <TextBlock Text="测试运行模式" FontSize="11" FontWeight="Medium" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     <ComboBox SelectedIndex="{x:Bind ViewModel.SelectedModeIndex, Mode=TwoWay}" HorizontalAlignment="Stretch">
-                        <ComboBoxItem Content="1. 本地模拟环境测试 (安全零风险)" />
-                        <ComboBoxItem Content="2. 真实飞牛 NAS 个人空间端到端测试 (推荐)" />
+                        <ComboBoxItem Content="1. 本地独立临时目录测试" />
+                        <ComboBoxItem Content="2. 真实飞牛 NAS 个人空间端到端测试" />
                         <ComboBoxItem Content="3. 真实飞牛 NAS SMB 网络共享测试" />
                     </ComboBox>
                 </StackPanel>
 
                 <!-- Target NAS Share (for Mode 2) -->
                 <StackPanel Grid.Column="1" Spacing="4">
-                    <TextBlock Text="真实 NAS 目标位置 (测试时自动建立 FN_TEST_* 隔离目录)" FontSize="11" FontWeight="Medium" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBox Text="{x:Bind ViewModel.TargetNasShare, Mode=TwoWay}" PlaceholderText="例如: \\192.168.8.120\cenco" FontFamily="Consolas, Segoe UI" FontSize="12" />
+                    <TextBlock Text="真实测试：请填写已授权的测试父目录（测试子目录将保留）" FontSize="11" FontWeight="Medium" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBox Text="{x:Bind ViewModel.TargetNasShare, Mode=TwoWay}" PlaceholderText="个人空间：我的文件/测试目录；SMB：\\服务器\共享\测试目录" FontFamily="Consolas, Segoe UI" FontSize="12" />
                 </StackPanel>
 
                 <!-- Status Text -->

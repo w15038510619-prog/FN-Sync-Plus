@@ -1,0 +1,557 @@
+using System.Security.Cryptography;
+using System.Text.Json;
+using FNSyncPlus.Core.Models;
+using FNSyncPlus.Core.Storage;
+using FNSyncPlus.Core.Utils;
+
+namespace FNSyncPlus.Core.Services;
+
+/// <summary>
+/// Versioned backup experiment used by isolated tasks. Physical publication is coordinated
+/// separately; mirror removal requires explicit authorization and retains history.
+/// </summary>
+public sealed class ExperimentalVersionedBackup
+{
+    public sealed record Result(VersionedManifestStore.Snapshot Snapshot, int UploadedFiles, int UnchangedFiles, int RenamedFiles, int DeletedFiles, int ReusedFiles = 0, bool HasNewVersion = true, bool ResumedInitialization = false, long UploadedBytes = 0);
+    private sealed record SourceFile(string RelativePath, string FullPath, long Size, long ModifiedTicks, string Sha256);
+    private sealed record SourceTree(List<string> Directories, List<(string RelativePath, string FullPath)> Files);
+    private sealed record TreeStamp(string[] Directories, (string RelativePath, long Size, long ModifiedTicks)[] Files);
+    private readonly VersionedManifestStore _versions = new();
+    private readonly ImmutableContentStore _objects = new();
+    public event Action<string>? ProgressChanged;
+
+    /// <summary>Validates that an existing source and a new backup target do not overlap.</summary>
+    public static (string Target, string ExistingRoot) ValidateReuseLocations(INasStorageProvider provider, string target, string existingRoot)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        if (!PathHelper.IsSafeRelativePath(target) || !PathHelper.IsSafeRelativePath(existingRoot))
+            throw new ArgumentException("已有文件目录和新备份目录必须是安全的相对路径");
+        string targetRoot = PathHelper.NormalizeRelPath(target);
+        string sourceRoot = PathHelper.NormalizeRelPath(existingRoot);
+        if (provider is FnOsPersonalStorageProvider fnOs)
+        {
+            targetRoot = fnOs.NormalizeRelativePath(targetRoot);
+            sourceRoot = fnOs.NormalizeRelativePath(sourceRoot);
+        }
+        if (string.IsNullOrEmpty(sourceRoot) || string.IsNullOrEmpty(targetRoot))
+            throw new ArgumentException("已有目录和新备份目录不能是个人空间根目录");
+        if (sourceRoot.Equals(targetRoot, StringComparison.OrdinalIgnoreCase) ||
+            sourceRoot.StartsWith(targetRoot + "/", StringComparison.OrdinalIgnoreCase) ||
+            targetRoot.StartsWith(sourceRoot + "/", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("已有文件目录和新备份目录不能相同或嵌套");
+        return (targetRoot, sourceRoot);
+    }
+
+    public Task<Result> RunAsync(INasStorageProvider provider, string sourceDirectory, string target,
+        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0, bool mirrorDeletionEnabled = false)
+        => RunCoreAsync(provider, sourceDirectory, target, false, null, token, strategy, settlingDelaySeconds, mirrorDeletionEnabled);
+
+    /// <summary>Creates a destination, or resumes only one with a matching initialization record.</summary>
+    public async Task<Result> CreateNewAsync(INasStorageProvider provider, string sourceDirectory, string target,
+        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0, string? initializationId = null, bool mirrorDeletionEnabled = false)
+        => await CreateNewCoreAsync(provider, sourceDirectory, target, null, token, strategy, settlingDelaySeconds, initializationId, mirrorDeletionEnabled).ConfigureAwait(false);
+
+    /// <summary>Experimental import from an existing independent NAS directory; the existing directory is read-only.</summary>
+    public async Task<Result> CreateNewFromExistingAsync(INasStorageProvider provider, string sourceDirectory, string target,
+        string existingRoot, CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0, string? initializationId = null, bool mirrorDeletionEnabled = false)
+        => await CreateNewCoreAsync(provider, sourceDirectory, target, existingRoot, token, strategy, settlingDelaySeconds, initializationId, mirrorDeletionEnabled).ConfigureAwait(false);
+
+    private async Task<Result> CreateNewCoreAsync(INasStorageProvider provider, string sourceDirectory, string target,
+        string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds, string? initializationId, bool mirrorDeletionEnabled)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("备份目标必须是安全的相对路径", nameof(target));
+        if (string.IsNullOrWhiteSpace(sourceDirectory) || !Directory.Exists(sourceDirectory))
+            throw new DirectoryNotFoundException("备份源目录不存在");
+        ValidateStrategy(strategy, mirrorDeletionEnabled);
+        if (provider is not IExclusiveDirectoryProvider exclusive)
+            throw new NotSupportedException("存储不支持独占创建新的备份目录");
+        if (initializationId != null && (!Guid.TryParseExact(initializationId, "N", out var ownerId) || ownerId == Guid.Empty))
+            throw new ArgumentException("首次备份归属标识无效", nameof(initializationId));
+        if (existingRoot != null)
+        {
+            if (provider is not IExperimentalContentReuseProvider) throw new NotSupportedException("存储不支持已验证的服务端复制");
+            var locations = ValidateReuseLocations(provider, target, existingRoot);
+            existingRoot = locations.ExistingRoot;
+            if (provider is FnOsPersonalStorageProvider) target = locations.Target;
+            var existingDirectory = await provider.GetItemAsync(existingRoot, token).ConfigureAwait(false);
+            if (existingDirectory == null || !existingDirectory.IsDirectory) throw new DirectoryNotFoundException("已有文件目录不存在");
+        }
+        string sourceRoot = PathHelper.EnsureLongPathPrefix(sourceDirectory);
+        await WaitForTreeSettlingAsync(sourceRoot, settlingDelaySeconds, token).ConfigureAwait(false);
+        var preflight = Scan(sourceRoot, token);
+        foreach (var file in preflight.Files)
+        {
+            ProgressChanged?.Invoke($"正在预检本地文件：{file.RelativePath}");
+            await HashSourceAsync(file.RelativePath, file.FullPath, token).ConfigureAwait(false);
+        }
+        token.ThrowIfCancellationRequested();
+        string canonicalTarget = provider is FnOsPersonalStorageProvider fn ? fn.NormalizeRelativePath(target) : PathHelper.NormalizeRelPath(target);
+        if (!PathHelper.IsSafeRelativePath(canonicalTarget)) throw new ArgumentException("备份目标不能是个人空间根目录");
+        byte[]? ownership = initializationId == null ? null : InitializationOwnership(sourceDirectory, canonicalTarget, existingRoot, strategy, initializationId);
+        string? ownershipPath = initializationId == null ? null : $"{canonicalTarget}/.fnsync-init-{initializationId}.json";
+        var created = await exclusive.TryCreateDirectoryExclusiveAsync(target, token).ConfigureAwait(false);
+        if (created == ExclusiveDirectoryResult.Created)
+        {
+            if (ownership != null)
+                await ExperimentalFirstProjection.WriteRecordAsync(provider, ownershipPath!, ownership, token).ConfigureAwait(false);
+        }
+        else
+        {
+            if (ownership == null) throw new IOException("备份目标已存在，拒绝复用或覆盖");
+            byte[] recorded = await ExperimentalProjectionRecoveryInspector.ReadBoundedAsync(provider, ownershipPath!, 512 * 1024, token).ConfigureAwait(false);
+            if (!ownership.AsSpan().SequenceEqual(recorded)) throw new InvalidDataException("首次备份归属记录不匹配，拒绝接管目标");
+        }
+        ProgressChanged?.Invoke(ownership != null ? "已核验首次备份目标归属，准备同步" : "已创建首次备份目标，准备同步");
+        var committed = await _versions.LoadForWritingAsync(provider, canonicalTarget, token).ConfigureAwait(false);
+        if (created == ExclusiveDirectoryResult.Created && committed != null)
+            throw new InvalidDataException("新目标出现了已有版本，拒绝接管");
+        var result = await RunCoreAsync(provider, sourceDirectory, target, committed == null, existingRoot, token, strategy, 0, mirrorDeletionEnabled, ownershipPath, ownership).ConfigureAwait(false);
+        return result with { ResumedInitialization = created != ExclusiveDirectoryResult.Created };
+    }
+
+    internal static byte[] InitializationOwnership(string source, string target, string? existing, BackupStrategy strategy, string id) =>
+        JsonSerializer.SerializeToUtf8Bytes(new { schema = 1, id, source = PathHelper.NormalizeLocalPath(source), target, existing, strategy = (int)strategy });
+
+    private async Task<Result> RunCoreAsync(INasStorageProvider provider, string sourceDirectory, string target,
+        bool creating, string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds, bool mirrorDeletionEnabled,
+        string? ownershipPath = null, byte[]? ownership = null)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("备份目标必须是安全的相对路径", nameof(target));
+        if (string.IsNullOrWhiteSpace(sourceDirectory) || !Directory.Exists(sourceDirectory))
+            throw new DirectoryNotFoundException("备份源目录不存在");
+        ValidateStrategy(strategy, mirrorDeletionEnabled);
+        string sourceRoot = PathHelper.EnsureLongPathPrefix(sourceDirectory);
+        await WaitForTreeSettlingAsync(sourceRoot, settlingDelaySeconds, token).ConfigureAwait(false);
+        var initial = await _versions.LoadForWritingAsync(provider, target, token).ConfigureAwait(false);
+        if (creating && initial != null) throw new InvalidDataException("新目标已出现版本化清单，拒绝覆盖");
+        if (!creating && initial == null) throw new InvalidDataException("目标没有版本化清单，必须先进行安全迁移");
+        var lease = await ExperimentalRemoteLease.TryAcquireAsync(provider, target, token).ConfigureAwait(false)
+            ?? throw new IOException("目标被其他写入者占用或存在未释放的锁");
+        bool commitMayHaveStarted = false;
+        bool committed = false;
+        Exception? primaryFailure = null;
+        try
+        {
+            if (ownership != null)
+            {
+                byte[] recorded = await ExperimentalProjectionRecoveryInspector.ReadBoundedAsync(provider, ownershipPath!, 512 * 1024, token).ConfigureAwait(false);
+                if (!ownership.AsSpan().SequenceEqual(recorded)) throw new InvalidDataException("获取锁后首次备份归属记录发生变化，拒绝写入");
+            }
+            var oldSnapshot = await _versions.LoadForWritingAsync(provider, target, token).ConfigureAwait(false);
+            if (!string.Equals(initial?.Id, oldSnapshot?.Id, StringComparison.Ordinal))
+                throw new IOException("获取锁期间备份版本发生变化，请重新扫描");
+            var manifest = oldSnapshot == null ? new Manifest() :
+                JsonSerializer.Deserialize<Manifest>(JsonSerializer.SerializeToUtf8Bytes(oldSnapshot.Manifest))
+                    ?? throw new InvalidDataException("无法复制版本化清单");
+            if (manifest.Files == null || manifest.Directories == null || manifest.History == null)
+                throw new InvalidDataException("版本化清单字段不完整");
+            if (!string.IsNullOrWhiteSpace(manifest.SourceRoot) &&
+                !string.Equals(PathHelper.NormalizeLocalPath(manifest.SourceRoot), PathHelper.NormalizeLocalPath(sourceDirectory), StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("当前源目录与备份记录不一致，拒绝同步");
+
+            var previous = new Dictionary<string, ManifestFileEntry>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in manifest.Files)
+            {
+                if (item == null || !PathHelper.IsSafeRelativePath(item.OriginalRel) || !IsObject(item.StoredRel) ||
+                    item.Size < 0 || !IsHash(item.Sha256) || !previous.TryAdd(PathHelper.NormalizeRelPath(item.OriginalRel), item))
+                    throw new InvalidDataException("活动清单包含不安全、重复或未迁移的文件");
+            }
+            foreach (var history in manifest.History)
+                if (history == null || !PathHelper.IsSafeRelativePath(history.OriginalRel) || !IsObject(history.StoredRel) ||
+                    history.Size < 0 || !IsHash(history.Sha256))
+                    throw new InvalidDataException("历史清单包含不安全或未迁移的文件");
+            var previousDirectories = new Dictionary<string, ManifestDirEntry>(StringComparer.OrdinalIgnoreCase);
+            foreach (var directory in manifest.Directories)
+                if (directory == null || !PathHelper.IsSafeRelativePath(directory.OriginalRel) || !PathHelper.IsSafeRelativePath(directory.StoredRel) ||
+                    !previousDirectories.TryAdd(PathHelper.NormalizeRelPath(directory.OriginalRel), directory))
+                    throw new InvalidDataException("目录清单包含不安全或重复的路径");
+
+            var verifiedObjects = new Dictionary<string, (long Size, string Hash)>(StringComparer.OrdinalIgnoreCase);
+            async Task VerifyPreviousObjectAsync(string storedRel, long size, string hash)
+            {
+                if (verifiedObjects.TryGetValue(storedRel, out var verified))
+                {
+                    if (verified.Size != size || !string.Equals(verified.Hash, hash, StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException("同一备份对象存在冲突的校验信息");
+                    return;
+                }
+                string path = $"{PathHelper.NormalizeRelPath(target)}/{storedRel}";
+                ProgressChanged?.Invoke("正在校验已有备份对象");
+                var item = await provider.GetItemAsync(path, token).ConfigureAwait(false);
+                if (item == null || item.IsDirectory || item.Size != size)
+                    throw new InvalidDataException($"已有备份对象不存在或大小不符: {storedRel}");
+                bool valid = await provider.VerifyFileIntegrityAsync(path, hash, size, token).ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
+                if (!valid) throw new InvalidDataException($"已有备份对象校验失败: {storedRel}");
+                verifiedObjects[storedRel] = (size, hash);
+            }
+            foreach (var old in previous.Values) await VerifyPreviousObjectAsync(old.StoredRel, old.Size, old.Sha256).ConfigureAwait(false);
+            foreach (var history in manifest.History) await VerifyPreviousObjectAsync(history.StoredRel, history.Size, history.Sha256).ConfigureAwait(false);
+
+            SourceTree tree = Scan(sourceRoot, token);
+            if (strategy == BackupStrategy.Mirror &&
+                ((previous.Count > 0 && tree.Files.Count == 0) ||
+                 (previous.Count == 0 && previousDirectories.Count > 0 && tree.Files.Count == 0 && tree.Directories.Count == 0)))
+                throw new IOException("镜像源目录突然变空，已停止；请检查源目录后再处理。");
+            var currentNames = new HashSet<string>(tree.Files.Select(f => f.RelativePath), StringComparer.OrdinalIgnoreCase);
+            var baselines = new Dictionary<string, SourceFile>(StringComparer.OrdinalIgnoreCase);
+            foreach (var source in tree.Files)
+            {
+                ProgressChanged?.Invoke($"正在计算本地文件校验值：{source.RelativePath}");
+                baselines[source.RelativePath] = await HashSourceAsync(source.RelativePath, source.FullPath, token).ConfigureAwait(false);
+            }
+
+            var missing = previous.Values.Where(old => !currentNames.Contains(old.OriginalRel)).ToList();
+            var additions = baselines.Values.Where(source => !previous.ContainsKey(source.RelativePath)).ToList();
+            var renames = new Dictionary<string, ManifestFileEntry>(StringComparer.OrdinalIgnoreCase);
+            var matchedOld = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var ambiguousGroups = new List<AmbiguousRenameException.Group>();
+            foreach (var group in missing.GroupBy(old => (old.Size, Hash: old.Sha256.ToUpperInvariant())))
+            {
+                var matches = additions.Where(source => source.Size == group.Key.Size &&
+                    string.Equals(source.Sha256, group.Key.Hash, StringComparison.OrdinalIgnoreCase)).ToList();
+                if (matches.Count == 0) continue;
+                int oldContentCount = previous.Values.Count(old => old.Size == group.Key.Size &&
+                    string.Equals(old.Sha256, group.Key.Hash, StringComparison.OrdinalIgnoreCase));
+                int currentContentCount = baselines.Values.Count(source => source.Size == group.Key.Size &&
+                    string.Equals(source.Sha256, group.Key.Hash, StringComparison.OrdinalIgnoreCase));
+                if (matches.Count != 1 || group.Count() != 1 || oldContentCount != 1 || currentContentCount != 1)
+                {
+                    ambiguousGroups.Add(new AmbiguousRenameException.Group(
+                        group.Count() == 1 ? group.Single().OriginalRel : string.Join(", ", group.Select(old => old.OriginalRel)),
+                        group.Key.Size, group.Key.Hash, matches.Select(source => source.RelativePath).ToList()));
+                    continue;
+                }
+                var old = group.Single();
+                renames.Add(matches[0].RelativePath, old);
+                matchedOld.Add(old.OriginalRel);
+            }
+            var deleted = missing.Where(old => !matchedOld.Contains(old.OriginalRel)).ToList();
+            var unmatchedAdditions = additions.Where(source => !renames.ContainsKey(source.RelativePath)).Select(source => source.RelativePath).ToList();
+            if (ambiguousGroups.Count > 0 || (deleted.Count > 0 && unmatchedAdditions.Count > 0))
+            {
+                var difference = new AmbiguousRenameException(string.Empty, ambiguousGroups, unmatchedAdditions);
+                throw new AmbiguousRenameException(difference.BuildUserSummary(), ambiguousGroups, unmatchedAdditions);
+            }
+
+            var preparedFiles = new List<SourceFile>();
+            var nextFiles = new List<ManifestFileEntry>();
+            int uploaded = 0, unchanged = 0, renamed = 0, reused = 0;
+            long uploadedBytes = 0;
+            void AddHistory(ManifestFileEntry old, string reason, string? renamedTo = null)
+            {
+                manifest.History.Add(new ManifestHistoryEntry {
+                    OriginalRel = old.OriginalRel, StoredRel = old.StoredRel, Size = old.Size, Sha256 = old.Sha256,
+                    Reason = reason, RenamedTo = renamedTo, IsLongName = old.IsLongName, Utf8Bytes = old.Utf8Bytes,
+                    StoredUtf8Bytes = old.StoredUtf8Bytes
+                });
+            }
+            async Task<string?> FindExistingCandidateAsync(SourceFile expected)
+            {
+                if (existingRoot == null) return null;
+                string current = existingRoot;
+                string[] parts = expected.RelativePath.Split('/');
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    current += "/" + parts[i];
+                    var item = await provider.GetItemAsync(current, token).ConfigureAwait(false);
+                    if (item == null || (i < parts.Length - 1 && !item.IsDirectory)) return null;
+                    if (i == parts.Length - 1)
+                    {
+                        if (item.IsDirectory || item.Size != expected.Size) return null;
+                        return current;
+                    }
+                }
+                return null;
+            }
+            foreach (var missingEntry in missing)
+            {
+                if (strategy == BackupStrategy.Archive) nextFiles.Add(missingEntry);
+                else if (matchedOld.Contains(missingEntry.OriginalRel))
+                    AddHistory(missingEntry, "renamed", renames.Single(kv => ReferenceEquals(kv.Value, missingEntry)).Key);
+                else AddHistory(missingEntry, "deleted");
+            }
+            foreach (var source in tree.Files)
+            {
+                token.ThrowIfCancellationRequested();
+                var baseline = baselines[source.RelativePath];
+                previous.TryGetValue(source.RelativePath, out var old);
+                if (renames.TryGetValue(source.RelativePath, out var renamedFrom))
+                {
+                    nextFiles.Add(new ManifestFileEntry {
+                        OriginalRel = source.RelativePath, StoredRel = renamedFrom.StoredRel, Size = baseline.Size,
+                        Sha256 = baseline.Sha256, ModTimeUtcTicks = baseline.ModifiedTicks,
+                        ModTimeIso = new DateTimeOffset(baseline.ModifiedTicks, TimeSpan.Zero), IsActive = true,
+                        PreviousRel = renamedFrom.OriginalRel,
+                        IsLongName = PathHelper.GetUtf8ByteCount(Path.GetFileName(source.RelativePath)) > LongNameEngine.FnOsUploadMaxUtf8Bytes,
+                        Utf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(source.RelativePath)),
+                        StoredUtf8Bytes = renamedFrom.StoredUtf8Bytes
+                    });
+                    preparedFiles.Add(baseline);
+                    renamed++;
+                    continue;
+                }
+                bool caseOnlyRename = old != null && !string.Equals(old.OriginalRel, source.RelativePath, StringComparison.Ordinal);
+                if (caseOnlyRename && strategy == BackupStrategy.Archive)
+                    throw new InvalidDataException("归档策略不能同时表示仅大小写不同的文件名");
+                if (old != null && old.Size == baseline.Size && string.Equals(old.Sha256, baseline.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (caseOnlyRename)
+                    {
+                        string oldName = old.OriginalRel;
+                        AddHistory(old, "renamed", source.RelativePath);
+                        old.OriginalRel = source.RelativePath;
+                        old.PreviousRel = oldName;
+                        old.IsLongName = PathHelper.GetUtf8ByteCount(Path.GetFileName(source.RelativePath)) > LongNameEngine.FnOsUploadMaxUtf8Bytes;
+                        old.Utf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(source.RelativePath));
+                        renamed++;
+                    }
+                    else unchanged++;
+                    old.ModTimeUtcTicks = baseline.ModifiedTicks;
+                    old.ModTimeIso = new DateTimeOffset(baseline.ModifiedTicks, TimeSpan.Zero);
+                    nextFiles.Add(old);
+                    preparedFiles.Add(baseline);
+                    continue;
+                }
+
+                string? existingMatch = await FindExistingCandidateAsync(baseline).ConfigureAwait(false);
+                ImmutableContentStore.PreparedContent content;
+                if (existingMatch != null) ProgressChanged?.Invoke($"正在核对并尝试复用飞牛文件：{source.RelativePath}");
+                string? stored = existingMatch == null ? null : await ((IExperimentalContentReuseProvider)provider).CopyIntoNewObjectAsync(
+                    existingMatch, target, baseline.Sha256, baseline.Size, token).ConfigureAwait(false);
+                if (stored != null)
+                {
+                    if (!IsObject(stored)) throw new InvalidDataException("复用内容对象路径无效");
+                    content = new ImmutableContentStore.PreparedContent(stored, baseline.Size, baseline.Sha256,
+                        new DateTime(baseline.ModifiedTicks, DateTimeKind.Utc));
+                    reused++;
+                }
+                else
+                {
+                    ProgressChanged?.Invoke($"正在上传本地文件：{source.RelativePath}");
+                    content = await _objects.PrepareAsync(provider, target, source.FullPath, token).ConfigureAwait(false);
+                    uploaded++;
+                    uploadedBytes = checked(uploadedBytes + content.Size);
+                }
+                if (content.Size != baseline.Size || !string.Equals(content.Sha256, baseline.Sha256, StringComparison.OrdinalIgnoreCase) ||
+                    content.ModifiedUtc.Ticks != baseline.ModifiedTicks)
+                    throw new IOException($"文件在扫描和上传之间发生变化: {source.RelativePath}");
+                if (old != null)
+                {
+                    AddHistory(old, caseOnlyRename ? "renamed" : "superseded", caseOnlyRename ? source.RelativePath : null);
+                    if (caseOnlyRename) renamed++;
+                }
+                nextFiles.Add(new ManifestFileEntry {
+                    OriginalRel = source.RelativePath, StoredRel = content.StoredRel, Size = content.Size,
+                    Sha256 = content.Sha256, ModTimeUtcTicks = content.ModifiedUtc.Ticks,
+                    ModTimeIso = new DateTimeOffset(content.ModifiedUtc), IsActive = true,
+                    IsLongName = PathHelper.GetUtf8ByteCount(Path.GetFileName(source.RelativePath)) > LongNameEngine.FnOsUploadMaxUtf8Bytes,
+                    Utf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(source.RelativePath)),
+                    StoredUtf8Bytes = PathHelper.GetUtf8ByteCount(Path.GetFileName(content.StoredRel)),
+                    PreviousRel = caseOnlyRename ? old?.OriginalRel : null
+                });
+                preparedFiles.Add(baseline);
+            }
+
+            var finalTree = Scan(sourceRoot, token);
+            if (!tree.Directories.SequenceEqual(finalTree.Directories, StringComparer.OrdinalIgnoreCase) ||
+                !tree.Files.Select(f => f.RelativePath).SequenceEqual(finalTree.Files.Select(f => f.RelativePath), StringComparer.OrdinalIgnoreCase))
+                throw new IOException("备份期间源目录结构发生变化，未提交新清单");
+            foreach (var expected in preparedFiles)
+            {
+                ProgressChanged?.Invoke($"正在复核本地文件：{expected.RelativePath}");
+                var actual = await HashSourceAsync(expected.RelativePath, expected.FullPath, token).ConfigureAwait(false);
+                if (actual.Size != expected.Size || actual.ModifiedTicks != expected.ModifiedTicks || actual.Sha256 != expected.Sha256)
+                    throw new IOException($"备份期间源文件发生变化，未提交新清单: {expected.RelativePath}");
+            }
+            manifest.Files = nextFiles;
+            var nextDirectories = tree.Directories.ToDictionary(d => d, d => new ManifestDirEntry { OriginalRel = d, StoredRel = d }, StringComparer.OrdinalIgnoreCase);
+            if (strategy == BackupStrategy.Archive)
+                foreach (var entry in previousDirectories) nextDirectories.TryAdd(entry.Key, entry.Value);
+            var filePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in nextFiles)
+                if (!filePaths.Add(PathHelper.NormalizeRelPath(file.OriginalRel)))
+                    throw new InvalidDataException("备份结果包含重复的文件路径，未提交新清单");
+            foreach (string directory in nextDirectories.Keys)
+                if (filePaths.Contains(directory))
+                    throw new InvalidDataException("备份结果中的文件与目录同名，未提交新清单");
+            foreach (string path in filePaths.Concat(nextDirectories.Keys))
+            {
+                int slash = path.IndexOf('/');
+                while (slash >= 0)
+                {
+                    if (filePaths.Contains(path[..slash]))
+                        throw new InvalidDataException("备份结果中的文件被用作目录，未提交新清单");
+                    slash = path.IndexOf('/', slash + 1);
+                }
+            }
+            manifest.Directories = nextDirectories.Values.ToList();
+            manifest.SourceRoot = PathHelper.RemoveLongPathPrefix(sourceDirectory);
+            manifest.TargetRoot = PathHelper.NormalizeRelPath(target);
+            manifest.BackupPolicy = strategy.ToString();
+            token.ThrowIfCancellationRequested();
+            if (oldSnapshot != null && ComparableManifest(manifest, provider).AsSpan().SequenceEqual(ComparableManifest(oldSnapshot.Manifest, provider)))
+                return new Result(oldSnapshot, uploaded, unchanged, renamed, strategy is BackupStrategy.Smart or BackupStrategy.Mirror ? deleted.Count : 0, reused, HasNewVersion: false, UploadedBytes: uploadedBytes);
+            manifest.UpdatedAt = DateTimeOffset.UtcNow;
+            token.ThrowIfCancellationRequested();
+            commitMayHaveStarted = true;
+            var snapshot = await _versions.SaveAsync(provider, target, manifest, oldSnapshot?.Id, token).ConfigureAwait(false);
+            committed = true;
+            return new Result(snapshot, uploaded, unchanged, renamed, strategy is BackupStrategy.Smart or BackupStrategy.Mirror ? deleted.Count : 0, reused, UploadedBytes: uploadedBytes);
+        }
+        catch (Exception ex)
+        {
+            primaryFailure = ex;
+            if (commitMayHaveStarted && !committed)
+                throw new IOException("版本化同步提交结果不确定，已保留锁；请先检查提交状态", ex);
+            throw;
+        }
+        finally
+        {
+            if (committed || !commitMayHaveStarted)
+            {
+                using var releaseTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                try { await lease.ReleaseAsync(releaseTimeout.Token).ConfigureAwait(false); }
+                catch (Exception releaseError)
+                {
+                    string message = committed ? "同步清单已提交，但释放锁失败；请先检查锁状态" : "同步未提交，且释放锁失败；请先检查锁状态";
+                    throw new IOException(message, primaryFailure == null ? releaseError : new AggregateException(primaryFailure, releaseError));
+                }
+            }
+        }
+    }
+
+    private static byte[] ComparableManifest(Manifest manifest, INasStorageProvider provider)
+    {
+        var copy = JsonSerializer.Deserialize<Manifest>(JsonSerializer.SerializeToUtf8Bytes(manifest))
+            ?? throw new InvalidDataException("无法比较版本清单");
+        copy.Files = copy.Files.OrderBy(f => f.OriginalRel, StringComparer.Ordinal).ToList();
+        copy.Directories = copy.Directories.OrderBy(d => d.OriginalRel, StringComparer.Ordinal).ToList();
+        if (provider is FnOsPersonalStorageProvider fn)
+            copy.TargetRoot = fn.NormalizeRelativePath(copy.TargetRoot);
+        else if (provider.ProviderType == StorageProviderType.FnOsPersonal)
+        {
+            copy.TargetRoot = PathHelper.NormalizeRelPath(copy.TargetRoot);
+            if (copy.TargetRoot.StartsWith("我的文件/", StringComparison.OrdinalIgnoreCase))
+                copy.TargetRoot = copy.TargetRoot["我的文件/".Length..];
+        }
+        copy.UpdatedAt = DateTimeOffset.UnixEpoch;
+        return JsonSerializer.SerializeToUtf8Bytes(copy);
+    }
+
+    private static void ValidateStrategy(BackupStrategy strategy, bool mirrorDeletionEnabled)
+    {
+        if (strategy is not (BackupStrategy.Smart or BackupStrategy.Archive or BackupStrategy.Mirror))
+            throw new NotSupportedException("备份策略不受支持");
+        if (strategy == BackupStrategy.Mirror && !mirrorDeletionEnabled)
+            throw new NotSupportedException("镜像删除未明确启用，已停止备份");
+    }
+
+    private static bool IsHash(string? value) => value != null && value.Length == 64 && value.All(Uri.IsHexDigit);
+    private static bool IsObject(string? value)
+    {
+        const string prefix = ".fnsync/objects/obj-";
+        if (value == null || !PathHelper.IsSafeRelativePath(value) || !value.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        string tail = value[prefix.Length..];
+        if (!tail.Contains('/')) return true; // Existing v1 object paths.
+        int separator = tail.IndexOf('/');
+        return separator == 32 && tail.Length > 33 && !tail[(separator + 1)..].Contains('/') &&
+            Guid.TryParseExact(tail[..32], "N", out _);
+    }
+
+    private static SourceTree Scan(string root, CancellationToken token)
+    {
+        var directories = new List<string>();
+        var files = new List<(string RelativePath, string FullPath)>();
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Walk(DirectoryInfo directory)
+        {
+            token.ThrowIfCancellationRequested();
+            if ((directory.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("源目录包含链接或联接点，拒绝同步");
+            foreach (var item in directory.EnumerateFileSystemInfos())
+            {
+                token.ThrowIfCancellationRequested();
+                if ((item.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException($"源目录包含链接或联接点: {item.Name}");
+                string relative = PathHelper.NormalizeRelPath(Path.GetRelativePath(root, item.FullName));
+                if (!PathHelper.IsSafeRelativePath(relative) || !names.Add(relative)) throw new InvalidDataException("源目录包含不安全或重复的路径");
+                if (item is DirectoryInfo sub) { directories.Add(relative); Walk(sub); }
+                else if (item is FileInfo) files.Add((relative, item.FullName));
+                else throw new IOException($"无法识别源项目类型: {relative}");
+            }
+        }
+        Walk(new DirectoryInfo(root));
+        directories.Sort(StringComparer.OrdinalIgnoreCase);
+        files.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.RelativePath, b.RelativePath));
+        return new SourceTree(directories, files);
+    }
+
+    private async Task WaitForTreeSettlingAsync(string root, int seconds, CancellationToken token)
+    {
+        if (seconds == 0) return;
+        if (seconds < 0 || seconds > 60) throw new ArgumentOutOfRangeException(nameof(seconds));
+        ProgressChanged?.Invoke($"正在等待源文件稳定 {seconds} 秒");
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var required = TimeSpan.FromSeconds(seconds);
+        var timeout = TimeSpan.FromSeconds(Math.Max(seconds + 10, seconds * 3));
+        var interval = TimeSpan.FromMilliseconds(Math.Min(1000, seconds * 500));
+        TreeStamp? previous = null;
+        TimeSpan stableSince = TimeSpan.Zero;
+        TreeStamp Capture()
+        {
+            var tree = Scan(root, token);
+            var files = tree.Files.Select(file =>
+            {
+                var info = new FileInfo(file.FullPath);
+                info.Refresh();
+                if (!info.Exists) throw new IOException("源文件在稳定性检查期间消失");
+                return (file.RelativePath, info.Length, info.LastWriteTimeUtc.Ticks);
+            }).ToArray();
+            return new TreeStamp(tree.Directories.ToArray(), files);
+        }
+        static bool Same(TreeStamp a, TreeStamp b) =>
+            a.Directories.SequenceEqual(b.Directories, StringComparer.Ordinal) && a.Files.SequenceEqual(b.Files);
+        while (clock.Elapsed < timeout)
+        {
+            token.ThrowIfCancellationRequested();
+            try
+            {
+                var current = Capture();
+                if (previous == null || !Same(previous, current)) stableSince = clock.Elapsed;
+                else if (clock.Elapsed - stableSince >= required)
+                {
+                    // Exclusive writers cause this open to fail; reopen again later rather
+                    // than treating a temporarily readable or missing file as stable.
+                    foreach (var file in current.Files)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        string path = Path.Combine(root, file.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+                        using var read = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    }
+                    if (Same(current, Capture())) return;
+                    stableSince = clock.Elapsed;
+                    current = Capture();
+                }
+                previous = current;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                previous = null;
+                stableSince = clock.Elapsed;
+            }
+            await Task.Delay(interval, token).ConfigureAwait(false);
+        }
+        throw new IOException("源文件持续变化或被占用，未开始提交备份；请稍后重试");
+    }
+
+    private static async Task<SourceFile> HashSourceAsync(string relative, string fullPath, CancellationToken token)
+    {
+        await using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        long size = stream.Length;
+        long modified = File.GetLastWriteTimeUtc(fullPath).Ticks;
+        string hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, token).ConfigureAwait(false)).ToLowerInvariant();
+        return new SourceFile(relative, fullPath, size, modified, hash);
+    }
+}

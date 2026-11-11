@@ -13,6 +13,11 @@ using FNSyncPlus.Core.Models;
 
 namespace FNSyncPlus.Core.Services
 {
+    public sealed class TaskLogPersistenceException : IOException
+    {
+        public TaskLogPersistenceException(string message) : base(message) { }
+    }
+
     /// <summary>
     /// 统一持久化任务与系统诊断日志服务
     /// 存储路径: %LOCALAPPDATA%\FNSyncPlus\logs\
@@ -25,6 +30,10 @@ namespace FNSyncPlus.Core.Services
 
         private readonly string _baseLogsDir;
         private readonly ConcurrentDictionary<string, ConcurrentQueue<TaskLogEntry>> _inMemoryRecentLogs = new();
+        private readonly ConcurrentDictionary<long, Task> _pendingTaskWrites = new();
+        private readonly ConcurrentDictionary<string, TaskLogEntry> _failedTaskWrites = new();
+        private readonly SemaphoreSlim _flushTaskWritesLock = new(1, 1);
+        private long _nextTaskWriteId;
         private readonly object _fileWriteLock = new();
 
         private static readonly Regex SensitivePatterns = new(
@@ -57,6 +66,9 @@ namespace FNSyncPlus.Core.Services
         }
 
         public string LogsDirectory => _baseLogsDir;
+        public int FailedTaskWriteCount => _failedTaskWrites.Count;
+        public event Action? TaskLogWriteFailed;
+        public string GetTaskLogDirectory(string taskId) => Path.Combine(_baseLogsDir, "tasks", SanitizeFileName(taskId));
 
         #region 任务日志记录与持久化
 
@@ -66,6 +78,8 @@ namespace FNSyncPlus.Core.Services
         public void LogTask(TaskLogEntry entry)
         {
             if (entry == null || string.IsNullOrWhiteSpace(entry.TaskId)) return;
+            entry = entry.Copy();
+            entry.EntryId = Guid.NewGuid().ToString("N");
 
             // 敏感信息安全脱敏
             entry.Message = Sanitize(entry.Message);
@@ -83,7 +97,27 @@ namespace FNSyncPlus.Core.Services
             }
 
             // 2. 异步持久化到磁盘
-            _ = Task.Run(() => WriteTaskLogToFile(entry));
+            long writeId = Interlocked.Increment(ref _nextTaskWriteId);
+            Task write = Task.Run(() => WriteTaskLogToFile(entry));
+            _pendingTaskWrites[writeId] = write;
+            _ = write.ContinueWith(completed => { _pendingTaskWrites.TryRemove(writeId, out _); },
+                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+
+        /// <summary>Waits for queued writes and retries retained failures; throws if records remain unsaved.</summary>
+        public async Task FlushPendingTaskLogsAsync()
+        {
+            await _flushTaskWritesLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                await Task.WhenAll(_pendingTaskWrites.Values.ToArray()).ConfigureAwait(false);
+                var failed = _failedTaskWrites.Values.ToArray();
+                if (failed.Length > 0)
+                    await Task.Run(() => { foreach (var entry in failed) WriteTaskLogToFile(entry); }).ConfigureAwait(false);
+                if (!_failedTaskWrites.IsEmpty)
+                    throw new TaskLogPersistenceException($"{_failedTaskWrites.Count} 条任务日志未能保存，请检查日志目录的磁盘空间和写入权限。");
+            }
+            finally { _flushTaskWritesLock.Release(); }
         }
 
         /// <summary>
@@ -104,7 +138,8 @@ namespace FNSyncPlus.Core.Services
             int retryCount = 0,
             string? uploadResult = null,
             string? manifestResult = null,
-            string? verificationResult = null)
+            string? verificationResult = null,
+            string? syncBatchId = null)
         {
             var entry = new TaskLogEntry
             {
@@ -123,6 +158,7 @@ namespace FNSyncPlus.Core.Services
                 UploadResult = uploadResult,
                 ManifestResult = manifestResult,
                 VerificationResult = verificationResult,
+                SyncBatchId = syncBatchId,
                 Timestamp = DateTimeOffset.Now
             };
 
@@ -133,8 +169,7 @@ namespace FNSyncPlus.Core.Services
         {
             try
             {
-                string safeTaskId = SanitizeFileName(entry.TaskId);
-                string taskLogDir = Path.Combine(_baseLogsDir, "tasks", safeTaskId);
+                string taskLogDir = GetTaskLogDirectory(entry.TaskId);
                 if (!Directory.Exists(taskLogDir))
                 {
                     Directory.CreateDirectory(taskLogDir);
@@ -147,12 +182,28 @@ namespace FNSyncPlus.Core.Services
 
                 lock (_fileWriteLock)
                 {
-                    File.AppendAllText(logFile, jsonLine, Encoding.UTF8);
+                    using var stream = new FileStream(logFile, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
+                    if (stream.Length > 0)
+                    {
+                        stream.Seek(-1, SeekOrigin.End);
+                        if (stream.ReadByte() != '\n')
+                        {
+                            stream.Seek(0, SeekOrigin.End);
+                            byte[] separator = Encoding.UTF8.GetBytes(Environment.NewLine);
+                            stream.Write(separator, 0, separator.Length);
+                        }
+                    }
+                    stream.Seek(0, SeekOrigin.End);
+                    byte[] bytes = Encoding.UTF8.GetBytes(jsonLine);
+                    stream.Write(bytes, 0, bytes.Length);
                 }
+                _failedTaskWrites.TryRemove(entry.EntryId!, out _);
             }
             catch
             {
-                // 磁盘写入异常时绝不向上崩溃抛出，内存队列中依然保留
+                _failedTaskWrites[entry.EntryId!] = entry;
+                try { TaskLogWriteFailed?.Invoke(); }
+                catch { /* A notification failure must not discard the retained entry. */ }
             }
         }
 
@@ -216,16 +267,14 @@ namespace FNSyncPlus.Core.Services
         #region 读取、检索与导出
 
         /// <summary>
-        /// 获取指定任务的完整日志记录（优先从磁盘读取持久化历史，合并当前运行时新增项）
-        /// 软件重启后仍能 100% 完整加载历史日志
+        /// 读取最近的任务日志，合并当前运行时新增项；旧日志可从日志目录或诊断包查看。
         /// </summary>
         public IReadOnlyList<TaskLogEntry> GetTaskLogs(string taskId, int maxCount = 500)
         {
             var result = new List<TaskLogEntry>();
             if (string.IsNullOrWhiteSpace(taskId)) return result;
 
-            string safeTaskId = SanitizeFileName(taskId);
-            string taskLogDir = Path.Combine(_baseLogsDir, "tasks", safeTaskId);
+            string taskLogDir = GetTaskLogDirectory(taskId);
 
             // 1. 从磁盘文件读取最近的日志
             if (Directory.Exists(taskLogDir))
@@ -239,8 +288,10 @@ namespace FNSyncPlus.Core.Services
 
                     foreach (var file in files)
                     {
-                        var lines = File.ReadAllLines(file, Encoding.UTF8);
-                        foreach (var line in lines)
+                        using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                        using var reader = new StreamReader(stream, Encoding.UTF8);
+                        string? line;
+                        while ((line = reader.ReadLine()) != null)
                         {
                             if (string.IsNullOrWhiteSpace(line)) continue;
 
@@ -277,8 +328,10 @@ namespace FNSyncPlus.Core.Services
                 var memItems = memQueue.ToArray();
                 foreach (var item in memItems)
                 {
-                    // 依据时间戳与信息去重
-                    if (!result.Any(r => r.Timestamp == item.Timestamp && r.Message == item.Message))
+                    // New entries have stable identities; legacy entries fall back to timestamp, message and batch.
+                    if (!result.Any(r => item.EntryId != null
+                        ? string.Equals(r.EntryId, item.EntryId, StringComparison.Ordinal)
+                        : r.EntryId == null && r.Timestamp == item.Timestamp && r.Message == item.Message && r.SyncBatchId == item.SyncBatchId))
                     {
                         result.Add(item);
                     }
@@ -289,18 +342,63 @@ namespace FNSyncPlus.Core.Services
             return result.OrderBy(r => r.Timestamp).TakeLast(maxCount).ToList();
         }
 
+        /// <summary>Search all saved files for one task, retaining at most the latest matching entries.</summary>
+        public IReadOnlyList<TaskLogEntry> SearchTaskLogs(string taskId, string query, int maxCount = 500, CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(taskId)) throw new ArgumentException("任务 ID 不能为空", nameof(taskId));
+            if (string.IsNullOrWhiteSpace(query)) throw new ArgumentException("请输入搜索内容", nameof(query));
+            if (maxCount <= 0) throw new ArgumentOutOfRangeException(nameof(maxCount));
+
+            var matches = new Queue<TaskLogEntry>();
+            var memory = _inMemoryRecentLogs.TryGetValue(taskId, out var memQueue) ? memQueue.ToArray() : Array.Empty<TaskLogEntry>();
+            var memoryIds = memory.Where(x => x.EntryId != null).Select(x => x.EntryId!).ToHashSet(StringComparer.Ordinal);
+            void AddIfMatch(TaskLogEntry entry)
+            {
+                if (entry.FormattedDisplay.Contains(query, StringComparison.OrdinalIgnoreCase))
+                {
+                    matches.Enqueue(entry);
+                    if (matches.Count > maxCount) matches.Dequeue();
+                }
+            }
+
+            string dir = GetTaskLogDirectory(taskId);
+            if (Directory.Exists(dir))
+            {
+                foreach (string file in Directory.EnumerateFiles(dir, "*.log").OrderBy(f => f, StringComparer.Ordinal))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    using var reader = new StreamReader(stream, Encoding.UTF8);
+                    string? line;
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (string.IsNullOrWhiteSpace(line)) continue;
+                        TaskLogEntry? entry = null;
+                        if (line.TrimStart().StartsWith("{", StringComparison.Ordinal))
+                        {
+                            try { entry = JsonSerializer.Deserialize<TaskLogEntry>(line); }
+                            catch (JsonException) { /* Preserve older or malformed lines as text. */ }
+                        }
+                        entry ??= new TaskLogEntry { TaskId = taskId, Level = line.Contains("[ERROR]") ? "ERROR" : line.Contains("[WARN]") ? "WARN" : "INFO", Message = line };
+                        if (entry.EntryId == null || !memoryIds.Contains(entry.EntryId)) AddIfMatch(entry);
+                    }
+                }
+            }
+            foreach (var entry in memory)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                AddIfMatch(entry);
+            }
+            return matches.OrderBy(x => x.Timestamp).ToList();
+        }
+
         /// <summary>
         /// 将单任务的完整诊断日志与配置环境打包为 zip 文件供用户导出
         /// </summary>
         public string ExportTaskDiagnosticZip(string taskId, string targetZipPath)
         {
-            string safeTaskId = SanitizeFileName(taskId);
-            string taskLogDir = Path.Combine(_baseLogsDir, "tasks", safeTaskId);
-
-            if (File.Exists(targetZipPath))
-            {
-                File.Delete(targetZipPath);
-            }
+            string taskLogDir = GetTaskLogDirectory(taskId);
 
             string tempDir = Path.Combine(Path.GetTempPath(), "FNSync_Diag_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(tempDir);
@@ -366,7 +464,7 @@ namespace FNSyncPlus.Core.Services
         {
             var invalid = Path.GetInvalidFileNameChars();
             var clean = new string(name.Select(c => invalid.Contains(c) ? '_' : c).ToArray());
-            return string.IsNullOrWhiteSpace(clean) ? "default_task" : clean;
+            return string.IsNullOrWhiteSpace(clean) || clean is "." or ".." ? "default_task" : clean;
         }
 
         #endregion

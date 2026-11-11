@@ -133,7 +133,14 @@ namespace FNSyncPlus.Core.Utils
         {
             if (string.IsNullOrWhiteSpace(path)) return path;
 
-            path = path.TrimEnd('\\', '/');
+            // Extended Windows paths do not normalize forward slashes. Keep drive roots intact.
+            path = path.Replace('/', '\\');
+            bool driveRoot = path.Length >= 3 && char.IsLetter(path[0]) && path[1] == ':' && path[2..].All(c => c == '\\');
+            bool extendedDriveRoot = path.Length >= 7 && path.StartsWith(@"\\?\", StringComparison.Ordinal) &&
+                char.IsLetter(path[4]) && path[5] == ':' && path[6..].All(c => c == '\\');
+            if (driveRoot) path = path[..3];
+            else if (extendedDriveRoot) path = path[..7];
+            else if (path != @"\") path = path.TrimEnd('\\');
 
             // 已经有长路径前缀
             if (path.StartsWith(@"\\?\")) return path;
@@ -145,7 +152,7 @@ namespace FNSyncPlus.Core.Utils
             }
 
             // 本地绝对路径 C:\... -> \\?\C:\...
-            if (path.Length >= 2 && path[1] == ':')
+            if (path.Length >= 3 && path[1] == ':' && path[2] == '\\')
             {
                 return @"\\?\" + path;
             }

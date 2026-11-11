@@ -15,6 +15,7 @@ namespace FNSyncPlus.WinUI.Dialogs
         {
             InitializeComponent();
             ViewModel = AppServices.GetService<NasBrowserViewModel>();
+            ViewModel.ResetDialogSelection();
         }
 
         private async void CategoryList_SelectionChanged(object sender, SelectionChangedEventArgs e)

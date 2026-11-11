@@ -11,7 +11,7 @@
     DefaultButton="Close"
     mc:Ignorable="d">
 
-    <Grid MinWidth="620" MaxWidth="1050" MinHeight="440" MaxHeight="720" RowSpacing="10" Padding="0,4,0,0">
+    <Grid MaxWidth="1050" MinHeight="440" MaxHeight="720" RowSpacing="10" Padding="0,4,0,0">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
@@ -26,12 +26,13 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                        <TextBlock Text="{x:Bind ViewModel.TaskName, Mode=OneWay}" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" />
-                        <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="6,2" VerticalAlignment="Center">
-                            <TextBlock Text="{x:Bind ViewModel.StorageTypeDisplay, Mode=OneWay}" FontSize="10" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                    <Grid Grid.Column="0" ColumnSpacing="8" VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <TextBlock Text="{x:Bind ViewModel.TaskName, Mode=OneWay}" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind ViewModel.TaskName, Mode=OneWay}" />
+                        <Border Grid.Column="1" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="6,2" VerticalAlignment="Center">
+                            <TextBlock Text="{x:Bind ViewModel.StorageTypeDisplay, Mode=OneWay}" FontSize="10" MaxWidth="150" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind ViewModel.StorageTypeDisplay, Mode=OneWay}" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
                         </Border>
-                    </StackPanel>
+                    </Grid>
                     <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.TransferredSummaryText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
                 </Grid>
 
@@ -81,6 +82,11 @@
                         <TextBlock Text="{x:Bind ViewModel.FailedFilesText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource SystemFillColorCriticalBrush}" FontWeight="Bold" />
                     </Border>
                 </StackPanel>
+
+                <!-- 无法唯一确认的改名差异：上一份备份保留，等待用户检查 -->
+                <InfoBar IsOpen="True" Severity="Warning" IsClosable="False"
+                         Visibility="{x:Bind GetPendingDifferencesVisibility(ViewModel.HasPendingDifferences), Mode=OneWay}"
+                         Message="{x:Bind ViewModel.PendingDifferenceNotice, Mode=OneWay}" />
             </StackPanel>
         </Border>
 
@@ -103,62 +109,48 @@
                         <!-- Status Notice Banner -->
                         <InfoBar Grid.Row="0" IsOpen="True" Severity="Informational" Message="{x:Bind ViewModel.ManifestStatusNotice, Mode=OneWay}" IsClosable="False" />
 
-                        <!-- Table Header -->
-                        <Grid Grid.Row="1" Background="{ThemeResource SubtleFillColorSecondaryBrush}" Padding="8,5" CornerRadius="4">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="60" />
-                                <ColumnDefinition Width="2.5*" />
-                                <ColumnDefinition Width="2*" />
-                                <ColumnDefinition Width="80" />
-                                <ColumnDefinition Width="150" />
-                                <ColumnDefinition Width="50" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="类型" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Grid.Column="1" Text="原始超长相对路径" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Grid.Column="2" Text="NAS 物理存储安全别名" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Grid.Column="3" Text="UTF-8 字节" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Grid.Column="4" Text="SHA-256 哈希" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Grid.Column="5" Text="操作" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
-                        </Grid>
+                        <TextBlock Grid.Row="1" Text="超长名称、备份位置与校验值" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
 
                         <!-- Empty State Notice -->
-                        <Grid Grid.Row="2" Visibility="{x:Bind GetEmptyMappingsVisibility(ViewModel.HasLongNameMappings), Mode=OneWay}" MinHeight="160">
+                        <Grid Grid.Row="2" Visibility="{x:Bind GetEmptyMappingsVisibility(ViewModel.HasLongNameMappings, ViewModel.HasManifestResult), Mode=OneWay}" MinHeight="160">
                             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8">
                                 <FontIcon Glyph="&#xE73E;" FontSize="32" Foreground="{ThemeResource SystemFillColorSuccessBrush}" HorizontalAlignment="Center" />
                                 <TextBlock Text="当前备份任务暂无超长文件名映射" FontSize="13" FontWeight="Medium" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
-                                <TextBlock Text="所有文件与目录名称均在 NAS UTF-8 255 字节限制内，100% 保持原名存储。" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
+                                <TextBlock Text="已读取清单，没有需要显示的超长名称。" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
                             </StackPanel>
                         </Grid>
 
-                        <!-- Mapping List with Horizontal Scrolling -->
-                        <ScrollViewer Grid.Row="2" Visibility="{x:Bind GetHasMappingsVisibility(ViewModel.HasLongNameMappings), Mode=OneWay}" HorizontalScrollBarVisibility="Auto" HorizontalScrollMode="Enabled" VerticalScrollBarVisibility="Auto">
-                            <ListView ItemsSource="{x:Bind ViewModel.LongNameMappings, Mode=OneWay}" SelectionMode="None">
-                                <ListView.ItemTemplate>
-                                    <DataTemplate x:DataType="vm:LongNameMappingDisplayItem">
-                                        <Grid Padding="6,5" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="60" />
-                                                <ColumnDefinition Width="2.5*" MinWidth="180" />
-                                                <ColumnDefinition Width="2*" MinWidth="150" />
-                                                <ColumnDefinition Width="80" />
-                                                <ColumnDefinition Width="150" />
-                                                <ColumnDefinition Width="50" />
-                                            </Grid.ColumnDefinitions>
-                                            <Border Grid.Column="0" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="3" Padding="4,1" HorizontalAlignment="Left" VerticalAlignment="Center">
-                                                <TextBlock Text="{x:Bind EntryType}" FontSize="10" />
-                                            </Border>
-                                            <TextBlock Grid.Column="1" Text="{x:Bind OriginalRel}" FontSize="11" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind OriginalRel}" VerticalAlignment="Center" Margin="0,0,8,0" />
-                                            <TextBlock Grid.Column="2" Text="{x:Bind StoredRel}" FontSize="11" FontFamily="Consolas" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind StoredRel}" VerticalAlignment="Center" Margin="0,0,8,0" />
-                                            <TextBlock Grid.Column="3" Text="{x:Bind Utf8BytesFormatted}" FontSize="11" Foreground="{ThemeResource SystemFillColorCriticalBrush}" VerticalAlignment="Center" />
-                                            <TextBlock Grid.Column="4" Text="{x:Bind Sha256}" FontSize="10" FontFamily="Consolas" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind Sha256}" VerticalAlignment="Center" />
-                                            <Button Grid.Column="5" Click="BtnCopyMappingItem_Click" Tag="{x:Bind OriginalRel}" Style="{ThemeResource SubtleButtonStyle}" Padding="6,2" HorizontalAlignment="Center" VerticalAlignment="Center" ToolTipService.ToolTip="复制原始路径">
-                                                <FontIcon Glyph="&#xE8C8;" FontSize="10" />
-                                            </Button>
-                                        </Grid>
-                                    </DataTemplate>
-                                </ListView.ItemTemplate>
-                            </ListView>
-                        </ScrollViewer>
+                        <!-- Wrap long paths within the dialog instead of clipping the remaining fields. -->
+                        <ListView Grid.Row="2" Visibility="{x:Bind GetHasMappingsVisibility(ViewModel.HasLongNameMappings), Mode=OneWay}"
+                                  ItemsSource="{x:Bind ViewModel.LongNameMappings, Mode=OneWay}" SelectionMode="None"
+                                  ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                  ScrollViewer.VerticalScrollBarVisibility="Auto">
+                            <ListView.ItemContainerStyle>
+                                <Style TargetType="ListViewItem">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                </Style>
+                            </ListView.ItemContainerStyle>
+                            <ListView.ItemTemplate>
+                                <DataTemplate x:DataType="vm:LongNameMappingDisplayItem">
+                                    <Grid Padding="6,7" RowSpacing="4" ColumnSpacing="6" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="{x:Bind EntryType}" FontSize="10" VerticalAlignment="Top" />
+                                        <TextBlock Grid.Column="1" Text="{x:Bind OriginalRel}" FontSize="11" TextWrapping="Wrap" ToolTipService.ToolTip="{x:Bind OriginalRel}" />
+                                        <TextBlock Grid.Column="2" Text="{x:Bind Utf8BytesFormatted}" FontSize="11" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+                                        <Button Grid.Column="3" Click="BtnCopyMappingItem_Click" Tag="{x:Bind OriginalRel}" Style="{ThemeResource SubtleButtonStyle}" Padding="6,2" ToolTipService.ToolTip="复制原始路径">
+                                            <FontIcon Glyph="&#xE8C8;" FontSize="10" />
+                                        </Button>
+                                        <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3" Text="{x:Bind StorageText}" FontSize="11" FontFamily="Consolas" TextWrapping="Wrap" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" ToolTipService.ToolTip="{x:Bind StoredRel}" />
+                                        <TextBlock Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3" Text="{x:Bind HashText}" FontSize="10" FontFamily="Consolas" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorTertiaryBrush}" ToolTipService.ToolTip="{x:Bind Sha256}" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
                     </Grid>
                 </Border>
             </TabViewItem>
@@ -174,21 +166,22 @@
                         </Grid.RowDefinitions>
 
                         <!-- Log Toolbar -->
-                        <Grid Grid.Row="0">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBox Grid.Column="0" PlaceholderText="搜索日志关键字..." Text="{x:Bind ViewModel.LogSearchQuery, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="160" Margin="0,0,8,0" />
-                            <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.SelectedLogLevelIndex, Mode=TwoWay}" Width="110" Margin="0,0,8,0">
-                                <ComboBoxItem Content="全部日志" />
-                                <ComboBoxItem Content="仅看错误" />
-                                <ComboBoxItem Content="错误与警告" />
-                            </ComboBox>
-                            <TextBlock Grid.Column="2" Text="{x:Bind ViewModel.StatusFeedbackMessage, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                            <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6">
+                        <StackPanel Grid.Row="0" Spacing="6">
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBox Grid.Column="0" PlaceholderText="搜索关键字或批次号..." Text="{x:Bind ViewModel.LogSearchQuery, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <Button Grid.Column="1" Content="搜索全部" Click="BtnSearchAllLogs_Click" />
+                                <ComboBox Grid.Column="2" SelectedIndex="{x:Bind ViewModel.SelectedLogLevelIndex, Mode=TwoWay}" Width="110">
+                                    <ComboBoxItem Content="全部日志" />
+                                    <ComboBoxItem Content="仅看错误" />
+                                    <ComboBoxItem Content="错误与警告" />
+                                </ComboBox>
+                            </Grid>
+                            <StackPanel Orientation="Horizontal" Spacing="6">
                                 <Button Click="BtnRefreshLogs_Click" Style="{ThemeResource SubtleButtonStyle}" Padding="8,4" ToolTipService.ToolTip="刷新日志">
                                     <StackPanel Orientation="Horizontal" Spacing="4">
                                         <FontIcon Glyph="&#xE72C;" FontSize="11" />
@@ -214,21 +207,28 @@
                                     </StackPanel>
                                 </Button>
                             </StackPanel>
-                        </Grid>
+                            <TextBlock Text="{x:Bind ViewModel.StatusFeedbackMessage, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="输入后筛选最近日志；点击“搜索全部”可检索该任务已保存的历史日志，最多显示最近 500 条结果。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
 
                         <!-- Empty Logs State -->
                         <Grid Grid.Row="2" Visibility="{x:Bind GetEmptyLogsVisibility(ViewModel.HasLogs), Mode=OneWay}" MinHeight="160">
                             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="6">
                                 <FontIcon Glyph="&#xE9CE;" FontSize="32" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
-                                <TextBlock Text="暂无诊断日志记录" FontSize="13" FontWeight="Medium" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
+                                <TextBlock Text="暂无诊断日志或搜索结果" FontSize="13" FontWeight="Medium" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
                                 <TextBlock Text="任务在扫描、上传与校验过程中产生的详细日志将自动持久化至本地硬盘。" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
                             </StackPanel>
                         </Grid>
 
-                        <!-- Log Items List with horizontal scrolling, text wrapping, and selectable copyable text -->
-                        <ScrollViewer Grid.Row="2" Visibility="{x:Bind GetHasLogsVisibility(ViewModel.HasLogs), Mode=OneWay}" 
-                                      HorizontalScrollBarVisibility="Auto" HorizontalScrollMode="Enabled" VerticalScrollBarVisibility="Auto">
-                            <ListView ItemsSource="{x:Bind ViewModel.FilteredLogs, Mode=OneWay}" SelectionMode="None">
+                        <!-- Wrap log entries within the available width. -->
+                        <ListView Grid.Row="2" Visibility="{x:Bind GetHasLogsVisibility(ViewModel.HasLogs), Mode=OneWay}"
+                                  ItemsSource="{x:Bind ViewModel.FilteredLogs, Mode=OneWay}" SelectionMode="None"
+                                  ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <ListView.ItemContainerStyle>
+                                    <Style TargetType="ListViewItem">
+                                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    </Style>
+                                </ListView.ItemContainerStyle>
                                 <ListView.ItemTemplate>
                                     <DataTemplate x:DataType="vm:TaskLogDisplayItem">
                                         <Grid Padding="4,3">
@@ -243,8 +243,7 @@
                                         </Grid>
                                     </DataTemplate>
                                 </ListView.ItemTemplate>
-                            </ListView>
-                        </ScrollViewer>
+                        </ListView>
                     </Grid>
                 </Border>
             </TabViewItem>

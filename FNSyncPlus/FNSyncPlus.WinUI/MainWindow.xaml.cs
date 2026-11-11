@@ -1,4 +1,6 @@
 using System;
+using System.Threading;
+using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
 using FNSyncPlus.WinUI.Dialogs;
@@ -8,19 +10,39 @@ using FNSyncPlus.WinUI.Services;
 using FNSyncPlus.WinUI.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Windowing;
+using FNSyncPlus.Tray;
 
 namespace FNSyncPlus.WinUI
 {
     public sealed partial class MainWindow : Window
     {
         public MainViewModel ViewModel { get; }
+        private readonly AppSettings _settings;
+        private readonly AppWindow _appWindow;
+        private readonly LogService _logService;
+        private TrayIcon? _trayIcon;
+        private bool _shutdownInProgress;
+        private bool _shutdownComplete;
+        private int _logWarningQueued;
 
         public MainWindow(string initialView = "Tasks", int wizardStep = 0)
         {
             ViewModel = AppServices.GetService<MainViewModel>();
+            _settings = AppServices.GetService<AppSettings>();
+            _logService = AppServices.GetService<LogService>();
             InitializeComponent();
 
-            WindowHelper.ConfigureWindow(this, "飞牛同步增强版 v0.4.0-beta", 1200, 780);
+            string title = AppServices.IsIsolatedTestSession
+                ? (_settings.IsVersionedBetaTestProfile ? "飞牛同步增强版 v0.4.0-beta [隔离测试会话·新版配置]" : "飞牛同步增强版 v0.4.0-beta [隔离测试会话]")
+                : AppServices.IsVersionedBetaSession ? "飞牛同步增强版 v0.4.0-beta [新版备份试用]" : "飞牛同步增强版 v0.4.0-beta [旧版引擎·仅供诊断]";
+            WindowHelper.ConfigureWindow(this, title, 1200, 780);
+            AppTitleText.Text = title;
+            _logService.TaskLogWriteFailed += OnTaskLogWriteFailed;
+            _appWindow = AppWindow.GetFromWindowId(Microsoft.UI.Win32Interop.GetWindowIdFromWindow(WindowHelper.GetHandle(this)));
+            InitializeTrayIcon();
+            _appWindow.Closing += OnAppWindowClosing;
+            Closed += OnWindowClosed;
             WindowHelper.SetMicaBackdrop(this);
             SetTitleBar(AppTitleBarDragArea);
 
@@ -165,6 +187,125 @@ namespace FNSyncPlus.WinUI
             {
                 NavigateToTag(initialView);
             }
+        }
+
+        private void InitializeTrayIcon()
+        {
+            try
+            {
+                _trayIcon = new TrayIcon(
+                    () => DispatcherQueue.TryEnqueue(ShowFromTray),
+                    () => DispatcherQueue.TryEnqueue(async () => await RequestShutdownAsync()));
+            }
+            catch (Exception ex)
+            {
+                App.LogCrashException(ex, "MainWindow.InitializeTrayIcon");
+                _trayIcon?.Dispose();
+                _trayIcon = null;
+            }
+        }
+
+        private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+        {
+            if (_shutdownComplete) return;
+            args.Cancel = true;
+            if (_settings.MinimizeToTray && _trayIcon != null)
+            {
+                try { sender.Hide(); }
+                catch (Exception ex) { App.LogCrashException(ex, "MainWindow.HideToTray"); }
+                return;
+            }
+            _ = RequestShutdownAsync();
+        }
+
+        private async Task RequestShutdownAsync()
+        {
+            if (_shutdownComplete) return;
+            if (_shutdownInProgress) return;
+            _shutdownInProgress = true;
+            string priorTitle = AppTitleText.Text;
+            try
+            {
+                ShowFromTray();
+                AppTitleText.Text = "正在停止任务并处理日志，请稍候…";
+                bool stopped = await AppServices.GetService<TaskManager>().ShutdownAsync(TimeSpan.FromSeconds(15));
+                if (stopped)
+                {
+                    _shutdownComplete = true;
+                    Close();
+                    return;
+                }
+                var dialog = new ContentDialog
+                {
+                    Title = "任务或日志尚未处理完",
+                    Content = "尚未确认任务停止或待写日志处理完成。请稍后重试退出；新的同步任务不会再启动。",
+                    CloseButtonText = "知道了",
+                    XamlRoot = Content.XamlRoot
+                };
+                await dialog.ShowAsync();
+            }
+            catch (TaskLogPersistenceException ex)
+            {
+                AppTitleText.Text = "任务日志未保存，请检查磁盘空间和权限";
+                var dialog = new ContentDialog
+                {
+                    Title = "有任务日志未保存",
+                    Content = $"{ex.Message}\n\n日志暂时保留在本程序内存中。请检查磁盘空间和日志目录权限，然后再次选择退出以重试。若仍要退出，这些日志可能丢失。",
+                    PrimaryButtonText = "稍后重试",
+                    SecondaryButtonText = "仍要退出",
+                    DefaultButton = ContentDialogButton.Primary,
+                    XamlRoot = Content.XamlRoot
+                };
+                if (await dialog.ShowAsync() == ContentDialogResult.Secondary)
+                {
+                    _shutdownComplete = true;
+                    Close();
+                }
+            }
+            catch (Exception ex)
+            {
+                App.LogCrashException(ex, "MainWindow.Shutdown");
+                AppTitleText.Text = "无法确认任务是否停止，请查看日志后重试退出";
+            }
+            finally
+            {
+                if (!_shutdownComplete && AppTitleText.Text == "正在停止任务并处理日志，请稍候…") AppTitleText.Text = priorTitle;
+                _shutdownInProgress = false;
+            }
+        }
+
+        public void ShowFromTray()
+        {
+            _appWindow.Show();
+            if (_appWindow.Presenter is OverlappedPresenter presenter && presenter.State == OverlappedPresenterState.Minimized)
+                presenter.Restore();
+            Activate();
+        }
+
+        public void HideToTray()
+        {
+            if (_trayIcon != null) _appWindow.Hide();
+        }
+
+        private void OnTaskLogWriteFailed()
+        {
+            if (Interlocked.Exchange(ref _logWarningQueued, 1) != 0) return;
+            if (!DispatcherQueue.TryEnqueue(() =>
+            {
+                Interlocked.Exchange(ref _logWarningQueued, 0);
+                if (!_shutdownInProgress) AppTitleText.Text = "任务日志未保存，请检查磁盘空间和权限";
+            })) Interlocked.Exchange(ref _logWarningQueued, 0);
+        }
+
+        private void OnWindowClosed(object sender, WindowEventArgs args)
+        {
+            _logService.TaskLogWriteFailed -= OnTaskLogWriteFailed;
+            try
+            {
+                _trayIcon?.Dispose();
+                AppServices.GetService<TaskManager>().Dispose();
+            }
+            finally { ((App)Application.Current).ReleaseSingleInstance(); }
         }
 
         private void NavView_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)

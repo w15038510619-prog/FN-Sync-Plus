@@ -64,6 +64,8 @@ namespace FNSyncPlus.Core.Services
         public long TotalSizeBytes { get; set; }
         public int LongNameCount { get; set; }
         public DateTimeOffset LastUpdated { get; set; }
+        public string? VersionId { get; set; }
+        public bool HasDamagedVersionRecords { get; set; }
 
         public string FormattedSize
         {
@@ -93,16 +95,67 @@ namespace FNSyncPlus.Core.Services
             LogEmitted?.Invoke(level, $"[{DateTime.Now:HH:mm:ss}] [{level}] {message}");
         }
 
+        private static DiscoveredBackupPackage PackageFromManifest(string name, string path, Manifest manifest, string? versionId = null) => new()
+        {
+            PackageName = name,
+            NasFolderUnc = path,
+            OriginalSourceRoot = manifest.SourceRoot,
+            FileCount = manifest.Files.Count,
+            TotalSizeBytes = manifest.Files.Sum(f => f.Size),
+            LongNameCount = manifest.Files.Count(f => f.IsLongName),
+            LastUpdated = manifest.UpdatedAt,
+            VersionId = versionId
+        };
+
+        private async Task<DiscoveredBackupPackage?> DiscoverProviderPackageAsync(INasStorageProvider provider,
+            string path, string name, CancellationToken token)
+        {
+            if (!string.IsNullOrEmpty(path))
+            {
+                string metaPath = $"{path.TrimEnd('/', '\\')}/.fnsync";
+                var metaDirectory = await provider.GetItemAsync(metaPath, token).ConfigureAwait(false);
+                if (metaDirectory != null && !metaDirectory.IsDirectory) throw new InvalidDataException("备份元数据路径不是目录");
+                var versionDirectory = metaDirectory == null ? null :
+                    await provider.GetItemAsync($"{metaPath}/manifest-versions", token).ConfigureAwait(false);
+                if (versionDirectory != null)
+                {
+                    if (!versionDirectory.IsDirectory) throw new InvalidDataException("版本化清单路径不是目录");
+                    var inspection = await new VersionedManifestStore().InspectForRestoreAsync(provider, path, token).ConfigureAwait(false);
+                    var snapshot = inspection.Snapshot ?? throw new InvalidDataException("存在版本化清单目录，但没有有效提交");
+                    var package = PackageFromManifest(name, path, snapshot.Manifest, snapshot.Id);
+                    package.HasDamagedVersionRecords = inspection.HasInvalidRecords;
+                    return package;
+                }
+            }
+            var manifest = await _manifestManager.LoadManifestAsync(provider, path, token).ConfigureAwait(false);
+            return manifest.IsNew ? null : PackageFromManifest(name, path, manifest);
+        }
+
+        public async Task<Manifest> ReadPackageManifestAsync(INasStorageProvider provider,
+            DiscoveredBackupPackage package, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(provider);
+            ArgumentNullException.ThrowIfNull(package);
+            if (package.VersionId == null)
+                return await _manifestManager.LoadManifestAsync(provider, package.NasFolderUnc, cancellationToken).ConfigureAwait(false);
+            var snapshot = await new VersionedManifestStore().LoadAsync(provider, package.NasFolderUnc, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidDataException("版本化清单不存在，请重新扫描备份");
+            if (!string.Equals(snapshot.Id, package.VersionId, StringComparison.Ordinal))
+                throw new IOException("备份版本已变化，请重新扫描后再恢复");
+            return snapshot.Manifest;
+        }
+
         /// <summary>
         /// 在 NAS 备份根目录下自动发现所有包含清单元数据的备份任务包（完全不依赖原电脑本地配置）
         /// 例如在 \\server\私人备份 下自动发现【工作资料】、【项目文件】、【照片备份】
         /// </summary>
-        public async Task<List<DiscoveredBackupPackage>> DiscoverBackupPackagesAsync(string nasBackupRootUnc, CancellationToken cancellationToken = default)
+        public async Task<List<DiscoveredBackupPackage>> DiscoverBackupPackagesAsync(string nasBackupRootUnc, CancellationToken cancellationToken = default,
+            ICollection<string>? warnings = null)
         {
             var result = new List<DiscoveredBackupPackage>();
             if (string.IsNullOrWhiteSpace(nasBackupRootUnc) || !Directory.Exists(nasBackupRootUnc))
             {
-                return result;
+                throw new DirectoryNotFoundException("备份扫描目录不存在或无法访问");
             }
 
             await Task.Run(async () =>
@@ -113,12 +166,12 @@ namespace FNSyncPlus.Core.Services
                 // 1. 检查根目录本身是否就是一个备份包
                 string rootMeta = Path.Combine(longRoot, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName);
                 string legacyRootMeta = Path.Combine(longRoot, Manifest.LegacyManifestFileName);
-                if (File.Exists(rootMeta) || File.Exists(legacyRootMeta))
+                try
                 {
-                    try
+                    if (ManifestFilePresent(rootMeta) || ManifestFilePresent(legacyRootMeta))
                     {
                         var m = await _manifestManager.LoadManifestAsync(nasBackupRootUnc, cancellationToken);
-                        if (m.Files.Count > 0)
+                        if (!m.IsNew)
                         {
                             result.Add(new DiscoveredBackupPackage
                             {
@@ -132,14 +185,16 @@ namespace FNSyncPlus.Core.Services
                             });
                         }
                     }
-                    catch { }
                 }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { ReportDiscoveryIssue(warnings, "读取扫描根目录清单失败", ex); }
 
                 // 2. 扫描根目录下的所有子文件夹
                 try
                 {
                     foreach (var sub in rootDi.EnumerateDirectories())
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         if (sub.Name.Equals(Manifest.MetadataDirName, StringComparison.OrdinalIgnoreCase) ||
                             sub.Name.StartsWith("$") ||
                             sub.Name.Equals(".recycle", StringComparison.OrdinalIgnoreCase))
@@ -151,9 +206,9 @@ namespace FNSyncPlus.Core.Services
                         string subMeta = Path.Combine(sub.FullName, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName);
                         string legacySubMeta = Path.Combine(sub.FullName, Manifest.LegacyManifestFileName);
 
-                        if (File.Exists(subMeta) || File.Exists(legacySubMeta))
+                        try
                         {
-                            try
+                            if (ManifestFilePresent(subMeta) || ManifestFilePresent(legacySubMeta))
                             {
                                 var m = await _manifestManager.LoadManifestAsync(subUnc, cancellationToken);
                                 result.Add(new DiscoveredBackupPackage
@@ -167,11 +222,13 @@ namespace FNSyncPlus.Core.Services
                                     LastUpdated = m.UpdatedAt
                                 });
                             }
-                            catch { }
                         }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex) { ReportDiscoveryIssue(warnings, $"读取备份目录失败: {sub.Name}", ex); }
                     }
                 }
-                catch { }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { ReportDiscoveryIssue(warnings, "枚举备份目录失败", ex); }
             }, cancellationToken);
 
             return result;
@@ -183,64 +240,78 @@ namespace FNSyncPlus.Core.Services
         public async Task<List<DiscoveredBackupPackage>> DiscoverBackupPackagesAsync(
             INasStorageProvider storageProvider, 
             string nasBackupRootRel = "", 
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            ICollection<string>? warnings = null)
         {
             var result = new List<DiscoveredBackupPackage>();
-            if (storageProvider == null || !storageProvider.IsAuthenticated) return result;
+            if (storageProvider == null || !storageProvider.IsAuthenticated) throw new InvalidOperationException("存储未连接，无法扫描备份");
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (storageProvider is SmbStorageProvider && (nasBackupRootRel.StartsWith(@"\\") || nasBackupRootRel.Contains(@":\")))
             {
-                return await DiscoverBackupPackagesAsync(nasBackupRootRel, cancellationToken).ConfigureAwait(false);
+                return await DiscoverBackupPackagesAsync(nasBackupRootRel, cancellationToken, warnings).ConfigureAwait(false);
             }
 
             try
             {
-                // 1. 检查根目录本身是否包含清单
-                var rootManifest = await _manifestManager.LoadManifestAsync(storageProvider, nasBackupRootRel, cancellationToken).ConfigureAwait(false);
-                if (rootManifest.Files.Count > 0)
-                {
-                    result.Add(new DiscoveredBackupPackage
-                    {
-                        PackageName = "个人空间根备份",
-                        NasFolderUnc = nasBackupRootRel,
-                        OriginalSourceRoot = rootManifest.SourceRoot,
-                        FileCount = rootManifest.Files.Count,
-                        TotalSizeBytes = rootManifest.Files.Sum(f => f.Size),
-                        LongNameCount = rootManifest.Files.Count(f => f.IsLongName),
-                        LastUpdated = rootManifest.UpdatedAt
-                    });
-                }
+                string rootPath = nasBackupRootRel.TrimEnd('/', '\\');
+                string rootName = string.IsNullOrEmpty(rootPath) || rootPath == "我的文件"
+                    ? "个人空间根备份" : rootPath.Split('/', '\\').Last();
+                var rootPackage = await DiscoverProviderPackageAsync(storageProvider, nasBackupRootRel,
+                    rootName, cancellationToken).ConfigureAwait(false);
+                if (rootPackage != null) result.Add(rootPackage);
+                if (rootPackage?.HasDamagedVersionRecords == true)
+                    ReportDiscoveryIssue(warnings, "版本化清单包含损坏记录，可能已回退到较早版本", new InvalidDataException("请核对备份版本"));
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { ReportDiscoveryIssue(warnings, "读取扫描根目录清单失败", ex); }
 
-                // 2. 枚举子目录
+            try
+            {
+                // 2. 枚举子目录；根目录自身损坏时仍尝试发现其他有效备份。
                 var entries = await storageProvider.ListEntriesAsync(nasBackupRootRel, cancellationToken).ConfigureAwait(false);
                 foreach (var entry in entries)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (entry.IsDirectory && !entry.Name.StartsWith(".") && !entry.Name.StartsWith("$"))
                     {
                         try
                         {
-                            var subManifest = await _manifestManager.LoadManifestAsync(storageProvider, entry.RelativePath, cancellationToken).ConfigureAwait(false);
-                            if (subManifest.Files.Count > 0)
-                            {
-                                result.Add(new DiscoveredBackupPackage
-                                {
-                                    PackageName = entry.Name,
-                                    NasFolderUnc = entry.RelativePath,
-                                    OriginalSourceRoot = subManifest.SourceRoot,
-                                    FileCount = subManifest.Files.Count,
-                                    TotalSizeBytes = subManifest.Files.Sum(f => f.Size),
-                                    LongNameCount = subManifest.Files.Count(f => f.IsLongName),
-                                    LastUpdated = subManifest.UpdatedAt
-                                });
-                            }
+                            var package = await DiscoverProviderPackageAsync(storageProvider, entry.RelativePath,
+                                entry.Name, cancellationToken).ConfigureAwait(false);
+                            if (package != null) result.Add(package);
+                            if (package?.HasDamagedVersionRecords == true)
+                                ReportDiscoveryIssue(warnings, $"备份 {entry.Name} 的版本记录损坏，可能已回退", new InvalidDataException("请核对备份版本"));
                         }
-                        catch { }
+                        catch (OperationCanceledException) { throw; }
+                        catch (Exception ex) { ReportDiscoveryIssue(warnings, $"读取备份目录失败: {entry.Name}", ex); }
                     }
                 }
             }
-            catch { }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { ReportDiscoveryIssue(warnings, "扫描备份目录失败", ex); }
 
             return result;
+        }
+
+        private void ReportDiscoveryIssue(ICollection<string>? warnings, string context, Exception error)
+        {
+            string message = $"{context}: {error.Message}";
+            Log("WARN", message);
+            if (warnings == null) throw new IOException(message, error);
+            warnings.Add(message);
+        }
+
+        private static bool ManifestFilePresent(string path)
+        {
+            try
+            {
+                if ((File.GetAttributes(path) & FileAttributes.Directory) != 0)
+                    throw new InvalidDataException("清单路径是目录");
+                return true;
+            }
+            catch (FileNotFoundException) { return false; }
+            catch (DirectoryNotFoundException) { return false; }
         }
 
         /// <summary>
@@ -335,10 +406,11 @@ namespace FNSyncPlus.Core.Services
             Log("INFO", "正在读取 NAS 备份元数据清单 (.fnsync/manifest.json)...");
             var manifest = await _manifestManager.LoadManifestAsync(nasBackupFolder, cancellationToken).ConfigureAwait(false);
 
-            if (manifest.Files.Count == 0)
-            {
-                Log("WARN", "在 NAS 备份目录中未发现清单文件或记录为空，将尝试直接按物理文件名恢复。");
-            }
+            if (manifest.Files == null || manifest.Directories == null ||
+                manifest.Directories.Any(d => d == null || !PathHelper.IsSafeRelativePath(d.OriginalRel)))
+                throw new InvalidDataException("清单包含无效或不安全的目录记录，拒绝恢复");
+
+            if (manifest.Files.Count == 0) Log("WARN", "活动清单为空，没有文件需要恢复。");
 
             // 2. 先行恢复目录结构（包含空目录）
             int restoredDirsCount = 0;
@@ -347,26 +419,15 @@ namespace FNSyncPlus.Core.Services
                 Log("INFO", $"正在恢复 {manifest.Directories.Count} 个原始目录结构（包含空目录）...");
                 foreach (var d in manifest.Directories)
                 {
-                    if (string.IsNullOrWhiteSpace(d.OriginalRel)) continue;
-                    if (!PathHelper.IsSafeRelativePath(d.OriginalRel))
-                    {
-                        Log("WARN", $"[安全拦截] 忽略潜在目录遍历风险的清单目录: {d.OriginalRel}");
-                        continue;
-                    }
-
+                    cancellationToken.ThrowIfCancellationRequested();
                     string dirTarget = Path.Combine(longLocal, d.OriginalRel.Replace('/', '\\'));
-                    if (!Directory.Exists(dirTarget))
+                    bool existed = Directory.Exists(dirTarget);
+                    try
                     {
-                        try
-                        {
-                            Directory.CreateDirectory(dirTarget);
-                            restoredDirsCount++;
-                        }
-                        catch (Exception ex)
-                        {
-                            Log("WARN", $"创建目录失败: {d.OriginalRel} ({ex.Message})");
-                        }
+                        EnsureSafeRestoreDirectory(longLocal, dirTarget);
+                        if (!existed) restoredDirsCount++;
                     }
+                    catch (Exception ex) { throw new IOException($"恢复目录失败: {d.OriginalRel}", ex); }
                 }
                 report.RestoredDirectories = restoredDirsCount;
             }
@@ -378,30 +439,13 @@ namespace FNSyncPlus.Core.Services
                 storedToEntry[PathHelper.NormalizeRelPath(f.StoredRel)] = f;
             }
 
-            // 3. 扫描 NAS 备份目录中的物理文件，严格排除 .fnsync 专用目录及其他元数据文件
+            // 3. 只恢复活动清单中的文件，不能把遗留物理文件当作当前版本。
             var nasFiles = new List<FileInfo>();
-            var nasDi = new DirectoryInfo(longNas);
-            foreach (var fi in nasDi.EnumerateFiles("*", SearchOption.AllDirectories))
+            foreach (var file in manifest.Files)
             {
-                string relToNas = PathHelper.NormalizeRelPath(Path.GetRelativePath(longNas, fi.FullName));
-                if (relToNas.StartsWith(Manifest.MetadataDirName + "/", StringComparison.OrdinalIgnoreCase) ||
-                    relToNas.Equals(Manifest.MetadataDirName, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                string fn = fi.Name;
-                if (fn.Equals(Manifest.LegacyManifestFileName, StringComparison.OrdinalIgnoreCase) ||
-                    fn.Equals(Manifest.LegacyGoManifestFileName, StringComparison.OrdinalIgnoreCase) ||
-                    fn.EndsWith(".bak", StringComparison.OrdinalIgnoreCase) ||
-                    fn.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) ||
-                    fn.Contains(".fn_part_") ||
-                    fn.Contains(".restore_tmp_") ||
-                    fn.StartsWith(".fnsync_rst_"))
-                {
-                    continue;
-                }
-                nasFiles.Add(fi);
+                if (!PathHelper.IsSafeRelativePath(file.StoredRel))
+                    throw new InvalidDataException($"清单包含不安全的存储路径: {file.StoredRel}");
+                nasFiles.Add(new FileInfo(Path.Combine(longNas, file.StoredRel.Replace('/', '\\'))));
             }
 
             report.TotalFiles = nasFiles.Count;
@@ -415,11 +459,7 @@ namespace FNSyncPlus.Core.Services
 
             for (int i = 0; i < nasFiles.Count; i++)
             {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    Log("WARN", "恢复任务已被取消。");
-                    break;
-                }
+                cancellationToken.ThrowIfCancellationRequested();
 
                 var nasFi = nasFiles[i];
                 string storedRel = PathHelper.NormalizeRelPath(Path.GetRelativePath(longNas, nasFi.FullName));
@@ -444,14 +484,9 @@ namespace FNSyncPlus.Core.Services
                 {
                     failedCount++;
                     report.FailedFiles = failedCount;
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = storedRel, Success = false, ErrorMessage = "不安全的清单路径" });
                     Log("ERROR", $"[安全拦截] 文件相对路径不安全（含路径遍历字符）: {targetRel}");
                     continue;
-                }
-
-                if (isLong)
-                {
-                    longNameRestoredCount++;
-                    Log("INFO", $"[还原长文件名] 存储名: {storedRel} -> 还原为原始长文件名: {targetRel}");
                 }
 
                 string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
@@ -464,6 +499,7 @@ namespace FNSyncPlus.Core.Services
                     {
                         skippedCount++;
                         report.SkippedFiles = skippedCount;
+                        report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = storedRel, Skipped = true, Success = true });
                         ProgressChanged?.Invoke(report);
                         continue;
                     }
@@ -472,7 +508,7 @@ namespace FNSyncPlus.Core.Services
                         string dir = Path.GetDirectoryName(targetLocalFull)!;
                         string stem = Path.GetFileNameWithoutExtension(targetLocalFull);
                         string ext = Path.GetExtension(targetLocalFull);
-                        string timestamped = $"{stem}_恢复_{DateTime.Now:yyyyMMdd_HHmmss}{ext}";
+                        string timestamped = $"{stem}_恢复_{Guid.NewGuid():N}{ext}";
                         targetLocalFull = Path.Combine(dir, timestamped);
                     }
                 }
@@ -482,10 +518,8 @@ namespace FNSyncPlus.Core.Services
 
                 try
                 {
-                    if (!Directory.Exists(targetDir))
-                    {
-                        Directory.CreateDirectory(targetDir);
-                    }
+                    EnsureSafeRestoreDirectory(longLocal, targetDir);
+                    if (string.IsNullOrWhiteSpace(expectedSha256)) throw new IOException("清单缺少 SHA-256，无法验证恢复内容");
 
                     // 1. 先恢复到临时文件并实时计算 SHA-256
                     string computedHash = "";
@@ -511,20 +545,14 @@ namespace FNSyncPlus.Core.Services
                         if (!string.Equals(expectedSha256, computedHash, StringComparison.OrdinalIgnoreCase))
                         {
                             // 校验失败：坚决删除损坏的临时文件，绝不计入成功！
-                            if (File.Exists(tempRestorePath))
-                            {
-                                try { File.Delete(tempRestorePath); } catch { }
-                            }
+                            var mismatch = CleanupFailedRestoreTemp(tempRestorePath, new InvalidDataException("SHA-256 校验失败"));
 
                             failedCount++;
                             report.FailedFiles = failedCount;
-                            Log("ERROR", $"[SHA-256 校验失败] 恢复文件与原始数据哈希不一致！文件: {targetRel}\n  预期: {expectedSha256}\n  实际: {computedHash}。已自动删除损坏文件！");
+                            report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = storedRel, Success = false, ErrorMessage = mismatch.Message, DetailedException = mismatch.ToString() });
+                            Log("ERROR", $"[恢复失败] {targetRel}: {mismatch.Message}");
                             ProgressChanged?.Invoke(report);
                             continue;
-                        }
-                        else
-                        {
-                            integrityOkCount++;
                         }
                     }
 
@@ -539,31 +567,36 @@ namespace FNSyncPlus.Core.Services
                     }
 
                     // 4. 原子移动到最终目标位置
-                    File.Move(tempRestorePath, targetLocalFull, overwrite: true);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    File.Move(tempRestorePath, targetLocalFull, overwrite: conflictResolution == ConflictResolution.Overwrite);
 
                     restoredCount++;
+                    integrityOkCount++;
+                    if (isLong) longNameRestoredCount++;
                     report.RestoredFiles = restoredCount;
                     report.LongNameRestoredFiles = longNameRestoredCount;
                     report.IntegrityVerifiedFiles = integrityOkCount;
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = storedRel, Success = true, HashVerified = true });
+                }
+                catch (OperationCanceledException canceled)
+                {
+                    DeleteCanceledTemporaryFile(tempRestorePath, canceled);
+                    throw;
                 }
                 catch (Exception ex)
                 {
-                    // 发生异常时清理残留的临时文件
-                    if (File.Exists(tempRestorePath))
-                    {
-                        try { File.Delete(tempRestorePath); } catch { }
-                    }
-
+                    var reported = CleanupFailedRestoreTemp(tempRestorePath, ex);
                     failedCount++;
                     report.FailedFiles = failedCount;
-                    Log("ERROR", $"[恢复失败] {targetRel} : {ex.Message}");
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = storedRel, Success = false, ErrorMessage = reported.Message, DetailedException = reported.ToString() });
+                    Log("ERROR", $"[恢复失败] {targetRel} : {reported.Message}");
                 }
 
                 ProgressChanged?.Invoke(report);
             }
 
-            report.StatusMessage = $"恢复操作完成！已成功恢复: {restoredCount}, 长文件名还原: {longNameRestoredCount}, 完整性校验通过: {integrityOkCount}, 空目录恢复: {restoredDirsCount}, 跳过已存在: {skippedCount}, 失败: {failedCount}";
-            Log("INFO", report.StatusMessage);
+            report.StatusMessage = BuildRestoreStatus(report);
+            Log(failedCount > 0 ? "WARN" : "INFO", report.StatusMessage);
             return report;
         }
 
@@ -584,8 +617,84 @@ namespace FNSyncPlus.Core.Services
                 return await RunRestoreAsync(nasBackupFolderRel, localDestinationFolder, conflictResolution, cancellationToken).ConfigureAwait(false);
             }
 
-            var report = new RestoreProgressReport();
             var manifest = await _manifestManager.LoadManifestAsync(storageProvider, nasBackupFolderRel, cancellationToken).ConfigureAwait(false);
+            return await RunRestoreManifestAsync(storageProvider, nasBackupFolderRel, localDestinationFolder,
+                manifest, conflictResolution, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>Explicit experimental restore for an already versioned backup; not used by the UI.</summary>
+        public async Task<RestoreProgressReport> RunRestoreVersionedAsync(
+            INasStorageProvider storageProvider,
+            string nasBackupFolderRel,
+            string localDestinationFolder,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(storageProvider);
+            var snapshot = await new VersionedManifestStore().LoadAsync(storageProvider, nasBackupFolderRel, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidDataException("未找到有效的版本化清单");
+            return await RunRestoreManifestAsync(storageProvider, nasBackupFolderRel, localDestinationFolder,
+                snapshot.Manifest, conflictResolution, cancellationToken).ConfigureAwait(false);
+        }
+
+        public async Task<RestoreProgressReport> RunRestorePackageAsync(INasStorageProvider provider,
+            DiscoveredBackupPackage package, string destination,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
+            CancellationToken cancellationToken = default)
+        {
+            var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
+            if (manifest.IsNew) throw new InvalidDataException("备份清单已不存在，请重新扫描");
+            return await RunRestoreManifestAsync(provider, package.NasFolderUnc, destination,
+                manifest, conflictResolution, cancellationToken).ConfigureAwait(false);
+        }
+
+        public async Task<RestoreProgressReport> RetryRestorePackageAsync(INasStorageProvider provider,
+            DiscoveredBackupPackage package, string destination, IEnumerable<string> originalPaths,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
+            CancellationToken cancellationToken = default)
+        {
+            var requested = new HashSet<string>(originalPaths, StringComparer.OrdinalIgnoreCase);
+            var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
+            if (manifest.IsNew) throw new InvalidDataException("备份清单已不存在，请重新扫描");
+            var selected = manifest.Files.Where(f => requested.Contains(f.OriginalRel)).ToList();
+            if (requested.Count == 0 || selected.Count != requested.Count)
+                throw new InvalidDataException("重试文件与当前备份清单不一致，请重新扫描");
+            manifest.Files = selected;
+            return await RunRestoreFilteredAsync(provider, package.NasFolderUnc, destination,
+                manifest, conflictResolution, cancellationToken).ConfigureAwait(false);
+        }
+
+        public async Task<RestoreProgressReport> RestorePackageHistoryAsync(INasStorageProvider provider,
+            DiscoveredBackupPackage package, string destination, ManifestHistoryEntry requested,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
+            CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(requested);
+            var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
+            if (manifest.IsNew || manifest.History == null) throw new InvalidDataException("历史清单不可用，请重新扫描");
+            var matches = manifest.History.Where(h => h != null &&
+                string.Equals(h.OriginalRel, requested.OriginalRel, StringComparison.Ordinal) &&
+                string.Equals(h.StoredRel, requested.StoredRel, StringComparison.Ordinal) &&
+                string.Equals(h.Sha256, requested.Sha256, StringComparison.OrdinalIgnoreCase) &&
+                h.Size == requested.Size && h.ArchivedAt == requested.ArchivedAt).ToList();
+            if (matches.Count != 1) throw new InvalidDataException("历史记录已变化或无法唯一确认，请重新扫描");
+            return await RunRestoreHistoryFileDetailedAsync(provider, package.NasFolderUnc, destination,
+                matches[0], cancellationToken, conflictResolution).ConfigureAwait(false);
+        }
+
+        private async Task<RestoreProgressReport> RunRestoreManifestAsync(
+            INasStorageProvider storageProvider,
+            string nasBackupFolderRel,
+            string localDestinationFolder,
+            Manifest manifest,
+            ConflictResolution conflictResolution,
+            CancellationToken cancellationToken)
+        {
+            var report = new RestoreProgressReport();
+
+            if (manifest.Files == null || manifest.Directories == null ||
+                manifest.Directories.Any(dir => dir == null || !PathHelper.IsSafeRelativePath(dir.OriginalRel)))
+                throw new InvalidDataException("清单包含无效或不安全的目录记录，拒绝恢复");
 
             report.TotalFiles = manifest.Files.Count;
             Log("INFO", $"开始从 NAS 恢复任务: 备份源【{nasBackupFolderRel}】 -> 本地【{localDestinationFolder}】，共 {report.TotalFiles} 个文件");
@@ -600,12 +709,12 @@ namespace FNSyncPlus.Core.Services
             foreach (var dir in manifest.Directories)
             {
                 string dirRel = PathHelper.NormalizeRelPath(dir.OriginalRel);
-                if (PathHelper.IsSafeRelativePath(dirRel))
+                if (PathHelper.IsSafeRelativePath(dir.OriginalRel))
                 {
                     string targetDir = Path.Combine(longLocal, dirRel.Replace('/', '\\'));
                     if (!Directory.Exists(targetDir))
                     {
-                        Directory.CreateDirectory(targetDir);
+                        EnsureSafeRestoreDirectory(longLocal, targetDir);
                         report.RestoredDirectories++;
                     }
                 }
@@ -619,7 +728,7 @@ namespace FNSyncPlus.Core.Services
                 report.CurrentFile = fileEntry.OriginalRel;
 
                 string targetRel = PathHelper.NormalizeRelPath(fileEntry.OriginalRel);
-                if (!PathHelper.IsSafeRelativePath(targetRel))
+                if (!PathHelper.IsSafeRelativePath(fileEntry.OriginalRel) || !PathHelper.IsSafeRelativePath(fileEntry.StoredRel))
                 {
                     report.FailedFiles++;
                     report.FileResults.Add(new RestoreFileResult
@@ -655,18 +764,15 @@ namespace FNSyncPlus.Core.Services
                     {
                         string stem = Path.GetFileNameWithoutExtension(targetLocalFull);
                         string ext = Path.GetExtension(targetLocalFull);
-                        targetLocalFull = Path.Combine(targetDir, $"{stem}_恢复_{DateTime.Now:yyyyMMdd_HHmmss}{ext}");
+                        targetLocalFull = Path.Combine(targetDir, $"{stem}_恢复_{Guid.NewGuid():N}{ext}");
                     }
-                }
-
-                if (!Directory.Exists(targetDir))
-                {
-                    Directory.CreateDirectory(targetDir);
                 }
 
                 string tempRestorePath = Path.Combine(targetDir, $".fnsync_rst_{Guid.NewGuid():N}.tmp");
                 try
                 {
+                    EnsureSafeRestoreDirectory(longLocal, targetDir);
+                    if (string.IsNullOrWhiteSpace(fileEntry.Sha256)) throw new IOException("清单缺少 SHA-256，无法验证恢复内容");
                     string remoteRel = string.IsNullOrEmpty(nasBackupFolderRel)
                         ? fileEntry.StoredRel
                         : $"{nasBackupFolderRel.TrimEnd('/', '\\')}/{fileEntry.StoredRel}";
@@ -691,17 +797,15 @@ namespace FNSyncPlus.Core.Services
                     // 强比对 SHA-256
                     if (!string.IsNullOrEmpty(fileEntry.Sha256) && !string.Equals(fileEntry.Sha256, computedHash, StringComparison.OrdinalIgnoreCase))
                     {
-                        if (File.Exists(tempRestorePath))
-                        {
-                            try { File.Delete(tempRestorePath); } catch { }
-                        }
+                        var mismatch = CleanupFailedRestoreTemp(tempRestorePath, new InvalidDataException("SHA-256 校验失败"));
                         report.FailedFiles++;
                         report.FileResults.Add(new RestoreFileResult
                         {
                             OriginalRel = targetRel,
                             StoredRel = fileEntry.StoredRel,
                             Success = false,
-                            ErrorMessage = $"[SHA-256 校验失败] 预期 {fileEntry.Sha256}, 实收 {computedHash}"
+                            ErrorMessage = mismatch.Message,
+                            DetailedException = mismatch.ToString()
                         });
                         Log("ERROR", $"[SHA-256 校验失败] 恢复文件与原始数据哈希不一致！文件: {targetRel}");
                         ProgressChanged?.Invoke(report);
@@ -717,7 +821,8 @@ namespace FNSyncPlus.Core.Services
                         File.SetLastWriteTimeUtc(tempRestorePath, new DateTime(fileEntry.ModTimeUtcTicks, DateTimeKind.Utc));
                     }
 
-                    File.Move(tempRestorePath, targetLocalFull, overwrite: true);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    File.Move(tempRestorePath, targetLocalFull, overwrite: conflictResolution == ConflictResolution.Overwrite);
                     report.RestoredFiles++;
                     if (fileEntry.IsLongName) report.LongNameRestoredFiles++;
 
@@ -729,37 +834,31 @@ namespace FNSyncPlus.Core.Services
                         HashVerified = true
                     });
                 }
+                catch (OperationCanceledException canceled)
+                {
+                    DeleteCanceledTemporaryFile(tempRestorePath, canceled);
+                    throw;
+                }
                 catch (Exception ex)
                 {
-                    if (File.Exists(tempRestorePath))
-                    {
-                        try { File.Delete(tempRestorePath); } catch { }
-                    }
+                    var reported = CleanupFailedRestoreTemp(tempRestorePath, ex);
                     report.FailedFiles++;
                     report.FileResults.Add(new RestoreFileResult
                     {
                         OriginalRel = targetRel,
                         StoredRel = fileEntry.StoredRel,
                         Success = false,
-                        ErrorMessage = ex.Message,
-                        DetailedException = ex.ToString()
+                        ErrorMessage = reported.Message,
+                        DetailedException = reported.ToString()
                     });
-                    Log("ERROR", $"[恢复失败] {targetRel} : {ex.Message}");
+                    Log("ERROR", $"[恢复失败] {targetRel} : {reported.Message}");
                 }
 
                 ProgressChanged?.Invoke(report);
             }
 
-            if (report.FailedFiles > 0)
-            {
-                report.StatusMessage = $"恢复操作完成（存在失败项）: 成功 {report.RestoredFiles}, 失败 {report.FailedFiles}, 校验通过 {report.IntegrityVerifiedFiles}";
-                Log("WARN", report.StatusMessage);
-            }
-            else
-            {
-                report.StatusMessage = $"恢复操作圆满完成！已成功恢复: {report.RestoredFiles}, 校验通过: {report.IntegrityVerifiedFiles}, 失败: 0";
-                Log("INFO", report.StatusMessage);
-            }
+            report.StatusMessage = BuildRestoreStatus(report);
+            Log(report.FailedFiles > 0 ? "WARN" : "INFO", report.StatusMessage);
             return report;
         }
 
@@ -771,7 +870,7 @@ namespace FNSyncPlus.Core.Services
             string nasBackupFolderRel,
             string localDestinationFolder,
             IEnumerable<string> originalRelsToRestore,
-            ConflictResolution conflictResolution = ConflictResolution.Overwrite,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
             CancellationToken cancellationToken = default)
         {
             var targetSet = new HashSet<string>(originalRelsToRestore, StringComparer.OrdinalIgnoreCase);
@@ -789,52 +888,31 @@ namespace FNSyncPlus.Core.Services
             string nasBackupFolderRel,
             string localDestinationFolder,
             ManifestHistoryEntry historyEntry,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting)
         {
             if (historyEntry == null) return false;
-            string longLocal = PathHelper.EnsureLongPathPrefix(localDestinationFolder);
-            string targetRel = PathHelper.NormalizeRelPath(historyEntry.OriginalRel);
-            string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
-            string targetDir = Path.GetDirectoryName(targetLocalFull)!;
-            if (!Directory.Exists(targetDir)) Directory.CreateDirectory(targetDir);
+            var result = await RunRestoreHistoryFileDetailedAsync(storageProvider, nasBackupFolderRel, localDestinationFolder,
+                historyEntry, cancellationToken, conflictResolution).ConfigureAwait(false);
+            return result.RestoredFiles == 1;
+        }
 
-            string tempRestorePath = Path.Combine(targetDir, $".fnsync_rst_hist_{Guid.NewGuid():N}.tmp");
-            try
-            {
-                string remoteRel = string.IsNullOrEmpty(nasBackupFolderRel)
-                    ? historyEntry.StoredRel
-                    : $"{nasBackupFolderRel.TrimEnd('/', '\\')}/{historyEntry.StoredRel}";
-
-                string computedHash = "";
-                using (var src = await storageProvider.OpenReadAsync(remoteRel, cancellationToken).ConfigureAwait(false))
-                using (var dest = new FileStream(tempRestorePath, FileMode.Create, FileAccess.Write, FileShare.None, 128 * 1024, FileOptions.WriteThrough | FileOptions.Asynchronous))
-                using (var sha = SHA256.Create())
-                {
-                    byte[] buf = new byte[128 * 1024];
-                    int r;
-                    while ((r = await src.ReadAsync(buf, 0, buf.Length, cancellationToken).ConfigureAwait(false)) > 0)
-                    {
-                        await dest.WriteAsync(buf.AsMemory(0, r), cancellationToken).ConfigureAwait(false);
-                        sha.TransformBlock(buf, 0, r, null, 0);
-                    }
-                    sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-                    computedHash = Convert.ToHexString(sha.Hash!).ToLowerInvariant();
-                }
-
-                if (!string.IsNullOrEmpty(historyEntry.Sha256) && !string.Equals(historyEntry.Sha256, computedHash, StringComparison.OrdinalIgnoreCase))
-                {
-                    if (File.Exists(tempRestorePath)) File.Delete(tempRestorePath);
-                    return false;
-                }
-
-                File.Move(tempRestorePath, targetLocalFull, overwrite: true);
-                return true;
-            }
-            catch
-            {
-                if (File.Exists(tempRestorePath)) try { File.Delete(tempRestorePath); } catch { }
-                return false;
-            }
+        /// <summary>Returns the complete result so a skipped history file is distinct from a failure.</summary>
+        public async Task<RestoreProgressReport> RunRestoreHistoryFileDetailedAsync(
+            INasStorageProvider storageProvider,
+            string nasBackupFolderRel,
+            string localDestinationFolder,
+            ManifestHistoryEntry historyEntry,
+            CancellationToken cancellationToken = default,
+            ConflictResolution conflictResolution = ConflictResolution.SkipExisting)
+        {
+            ArgumentNullException.ThrowIfNull(historyEntry);
+            var manifest = new Manifest { Files = new() { new ManifestFileEntry {
+                OriginalRel = historyEntry.OriginalRel, StoredRel = historyEntry.StoredRel,
+                Sha256 = historyEntry.Sha256, Size = historyEntry.Size
+            } } };
+            return await RunRestoreFilteredAsync(storageProvider, nasBackupFolderRel, localDestinationFolder,
+                manifest, conflictResolution, cancellationToken).ConfigureAwait(false);
         }
 
         private async Task<RestoreProgressReport> RunRestoreFilteredAsync(
@@ -852,14 +930,31 @@ namespace FNSyncPlus.Core.Services
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 report.CurrentFile = fileEntry.OriginalRel;
+                if (!PathHelper.IsSafeRelativePath(fileEntry.OriginalRel) || !PathHelper.IsSafeRelativePath(fileEntry.StoredRel))
+                {
+                    report.FailedFiles++;
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = fileEntry.OriginalRel, StoredRel = fileEntry.StoredRel, Success = false, ErrorMessage = "不安全的清单路径" });
+                    continue;
+                }
                 string targetRel = PathHelper.NormalizeRelPath(fileEntry.OriginalRel);
                 string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
                 string targetDir = Path.GetDirectoryName(targetLocalFull)!;
-                if (!Directory.Exists(targetDir)) Directory.CreateDirectory(targetDir);
-
                 string tempRestorePath = Path.Combine(targetDir, $".fnsync_rst_retry_{Guid.NewGuid():N}.tmp");
                 try
                 {
+                    EnsureSafeRestoreDirectory(longLocal, targetDir);
+                    if (File.Exists(targetLocalFull))
+                    {
+                        if (conflictResolution == ConflictResolution.SkipExisting)
+                        {
+                            report.SkippedFiles++;
+                            report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = fileEntry.StoredRel, Skipped = true, Success = true });
+                            continue;
+                        }
+                        if (conflictResolution == ConflictResolution.RenameWithTimestamp)
+                            targetLocalFull = Path.Combine(targetDir, $"{Path.GetFileNameWithoutExtension(targetLocalFull)}_恢复_{Guid.NewGuid():N}{Path.GetExtension(targetLocalFull)}");
+                    }
+                    if (string.IsNullOrWhiteSpace(fileEntry.Sha256)) throw new IOException("清单缺少 SHA-256，无法验证恢复内容");
                     string remoteRel = string.IsNullOrEmpty(nasBackupFolderRel)
                         ? fileEntry.StoredRel
                         : $"{nasBackupFolderRel.TrimEnd('/', '\\')}/{fileEntry.StoredRel}";
@@ -882,27 +977,86 @@ namespace FNSyncPlus.Core.Services
 
                     if (!string.IsNullOrEmpty(fileEntry.Sha256) && !string.Equals(fileEntry.Sha256, computedHash, StringComparison.OrdinalIgnoreCase))
                     {
-                        if (File.Exists(tempRestorePath)) File.Delete(tempRestorePath);
+                        var mismatch = CleanupFailedRestoreTemp(tempRestorePath, new InvalidDataException("SHA-256 校验失败"));
                         report.FailedFiles++;
+                        report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = fileEntry.StoredRel, Success = false, ErrorMessage = mismatch.Message, DetailedException = mismatch.ToString() });
                         continue;
                     }
 
-                    File.Move(tempRestorePath, targetLocalFull, overwrite: true);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    File.Move(tempRestorePath, targetLocalFull, overwrite: conflictResolution == ConflictResolution.Overwrite);
                     report.RestoredFiles++;
                     report.IntegrityVerifiedFiles++;
-                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, Success = true, HashVerified = true });
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = fileEntry.StoredRel, Success = true, HashVerified = true });
+                }
+                catch (OperationCanceledException canceled)
+                {
+                    DeleteCanceledTemporaryFile(tempRestorePath, canceled);
+                    throw;
                 }
                 catch (Exception ex)
                 {
-                    if (File.Exists(tempRestorePath)) try { File.Delete(tempRestorePath); } catch { }
+                    var reported = CleanupFailedRestoreTemp(tempRestorePath, ex);
                     report.FailedFiles++;
-                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, Success = false, ErrorMessage = ex.Message, DetailedException = ex.ToString() });
+                    report.FileResults.Add(new RestoreFileResult { OriginalRel = targetRel, StoredRel = fileEntry.StoredRel, Success = false, ErrorMessage = reported.Message, DetailedException = reported.ToString() });
                 }
 
                 ProgressChanged?.Invoke(report);
             }
 
+            report.StatusMessage = BuildRestoreStatus(report);
             return report;
+        }
+
+        private static string BuildRestoreStatus(RestoreProgressReport report)
+        {
+            if (report.FailedFiles > 0)
+                return $"{(report.RestoredFiles > 0 ? "恢复部分失败" : "恢复失败")}: 成功 {report.RestoredFiles}，跳过 {report.SkippedFiles}，失败 {report.FailedFiles}";
+            if (report.SkippedFiles > 0)
+                return $"{(report.RestoredFiles > 0 ? "恢复完成" : "已跳过现有文件")}: 成功 {report.RestoredFiles}，跳过 {report.SkippedFiles}";
+            if (report.TotalFiles == 0 && report.RestoredDirectories == 0) return "没有需要恢复的文件或目录";
+            return $"恢复完成: 文件 {report.RestoredFiles}，目录 {report.RestoredDirectories}，校验通过 {report.IntegrityVerifiedFiles}";
+        }
+
+        private static Exception CleanupFailedRestoreTemp(string path, Exception failure)
+        {
+            try { File.Delete(path); return failure; }
+            catch (DirectoryNotFoundException) { return failure; }
+            catch (Exception cleanupError)
+            {
+                return new AggregateException("恢复失败且无法清理临时文件", failure, cleanupError);
+            }
+        }
+
+        private static void DeleteCanceledTemporaryFile(string path, OperationCanceledException canceled)
+        {
+            try { File.Delete(path); }
+            catch (DirectoryNotFoundException) { return; }
+            catch (Exception cleanupError)
+            {
+                throw new IOException("恢复已取消，但无法清理临时文件", new AggregateException(canceled, cleanupError));
+            }
+        }
+
+        private static void EnsureSafeRestoreDirectory(string root, string directory)
+        {
+            string fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string fullDirectory = Path.GetFullPath(directory);
+            if (!fullDirectory.Equals(fullRoot, StringComparison.OrdinalIgnoreCase) &&
+                !fullDirectory.StartsWith(fullRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("恢复路径越过目标目录");
+            Directory.CreateDirectory(fullRoot);
+            var current = new DirectoryInfo(fullRoot);
+            if ((current.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("恢复目录不能是链接或联接点");
+            string relative = Path.GetRelativePath(fullRoot, fullDirectory);
+            foreach (string part in relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+            {
+                if (part == ".") continue;
+                current = new DirectoryInfo(Path.Combine(current.FullName, part));
+                if (!current.Exists) current.Create();
+                current.Refresh();
+                if ((current.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("恢复路径包含链接或联接点");
+            }
         }
     }
 }

@@ -30,10 +30,12 @@
                     </Border>
                 </StackPanel>
                 <TextBlock Text="每个文件夹拥有独立监控、独立清单沙箱与长文件名兼容引擎，互不干扰" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <TextBlock x:Name="BetaSafetyNotice" Visibility="Collapsed" Text="新版备份仍在试用；请勿让其他设备或程序同时写入同一备份目录。" FontSize="12" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </StackPanel>
 
             <!-- Command Buttons -->
             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Button x:Name="BtnViewLegacyTasks" Click="BtnViewLegacyTasks_Click" Content="查看旧任务" Visibility="Collapsed" />
                 <Button Click="BtnAddFolder_Click" Style="{ThemeResource AccentButtonStyle}">
                     <StackPanel Orientation="Horizontal" Spacing="6">
                         <FontIcon Glyph="&#xE710;" FontSize="12" />
@@ -186,6 +188,8 @@
                                                             <FontIcon Glyph="&#xE713;" />
                                                         </MenuFlyoutItem.Icon>
                                                     </MenuFlyoutItem>
+                                                    <MenuFlyoutItem Text="检查中断的备份" Command="{x:Bind InspectInterruptionCommand}"
+                                                        Visibility="{x:Bind CanInspectInterruption, Converter={StaticResource BoolToVisibilityConverter}}" />
                                                     <MenuFlyoutSeparator />
                                                     <MenuFlyoutItem Text="仅移除任务配置" Command="{x:Bind DeleteTaskCommand}">
                                                         <MenuFlyoutItem.Icon>
@@ -229,10 +233,14 @@
                                     </Grid.RowDefinitions>
 
                                     <Grid Grid.Row="0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
                                         <TextBlock Text="{x:Bind CurrentFileText, Mode=OneWay}" FontSize="11" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                        <TextBlock Text="{x:Bind CurrentProgressText, Mode=OneWay}" FontSize="11" FontWeight="Bold" Foreground="{ThemeResource AccentFillColorDefaultBrush}" HorizontalAlignment="Right" />
+                                        <TextBlock Grid.Column="1" Text="{x:Bind CurrentProgressText, Mode=OneWay}" FontSize="11" FontWeight="Bold" Foreground="{ThemeResource AccentFillColorDefaultBrush}" Margin="8,0,0,0" />
                                     </Grid>
-                                    <ProgressBar Grid.Row="1" Value="{x:Bind CurrentProgress, Mode=OneWay}" Maximum="100" Height="4" />
+                                    <ProgressBar Grid.Row="1" Value="{x:Bind CurrentProgress, Mode=OneWay}" IsIndeterminate="{x:Bind IsProgressIndeterminate, Mode=OneWay}" Maximum="100" Height="4" />
                                 </Grid>
                             </Grid>
                         </Border>

@@ -38,7 +38,7 @@
 
                     <StackPanel Grid.Row="0" Spacing="4">
                         <TextBlock Text="局域网设备探测" FontSize="14" FontWeight="SemiBold" />
-                        <TextBlock Text="自动通过 mDNS 与端口探测发现同一局域网下的飞牛 NAS" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                        <TextBlock Text="通过 mDNS 与端口探测寻找候选设备；登录前请核对自己的飞牛地址和证书。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                     </StackPanel>
 
                     <!-- Device List -->
@@ -113,7 +113,7 @@
                         <!-- NAS Address -->
                         <StackPanel Spacing="6" Width="380" HorizontalAlignment="Left">
                             <TextBlock Text="NAS 主机名 / IP 地址" FontSize="12" FontWeight="Medium" />
-                            <TextBox Text="{x:Bind ViewModel.NasAddress, Mode=TwoWay}" Width="380" PlaceholderText="例如: 192.168.8.120" FontFamily="Consolas, Segoe UI" FontSize="13" />
+                            <TextBox Text="{x:Bind ViewModel.NasAddress, Mode=TwoWay}" Width="380" PlaceholderText="例如: 192.168.1.100" FontFamily="Consolas, Segoe UI" FontSize="13" />
                         </StackPanel>
 
                         <!-- Username -->
@@ -177,7 +177,7 @@
                         </Border>
 
                         <!-- Remember Password -->
-                        <CheckBox Content="记住凭据 (使用 Windows DPAPI 本地强加密安全存储)" IsChecked="{x:Bind ViewModel.RememberPassword, Mode=TwoWay}" FontSize="12" Width="380" />
+                        <CheckBox Content="记住凭据 (使用 Windows DPAPI 本地强加密安全存储)" IsChecked="{x:Bind ViewModel.RememberPassword, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanChangeRememberPassword, Mode=OneWay}" FontSize="12" Width="380" />
 
                         <!-- Action Buttons -->
                         <StackPanel Orientation="Horizontal" Spacing="12" Width="380">

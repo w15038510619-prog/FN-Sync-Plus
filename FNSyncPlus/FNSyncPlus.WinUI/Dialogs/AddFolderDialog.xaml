@@ -115,7 +115,7 @@
                                 <RowDefinition Height="*" />
                             </Grid.RowDefinitions>
                             <TextBlock Grid.Row="0" Text="存储位置分类" FontSize="12" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="4,2" />
-                            <ListView Grid.Row="1" ItemsSource="{x:Bind ViewModel.NasBrowser.Categories, Mode=OneWay}" SelectionMode="Single" SelectionChanged="CategoryList_SelectionChanged">
+                            <ListView Grid.Row="1" ItemsSource="{x:Bind ViewModel.NasBrowser.Categories, Mode=OneWay}" HorizontalContentAlignment="Stretch" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled" SelectionMode="Single" SelectionChanged="CategoryList_SelectionChanged">
                                 <ListView.ItemTemplate>
                                     <DataTemplate>
                                         <Grid Padding="6,6" ColumnSpacing="8">
@@ -124,7 +124,7 @@
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
                                             <FontIcon Grid.Column="0" Glyph="{Binding IconGlyph}" FontSize="13" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
-                                            <TextBlock Grid.Column="1" Text="{Binding Title}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Grid.Column="1" Text="{Binding Title}" ToolTipService.ToolTip="{Binding Title}" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap" />
                                         </Grid>
                                     </DataTemplate>
                                 </ListView.ItemTemplate>
@@ -182,6 +182,9 @@
                                 Grid.Row="1"
                                 ItemsSource="{x:Bind ViewModel.NasBrowser.FolderItems, Mode=OneWay}"
                                 SelectedItem="{x:Bind ViewModel.NasBrowser.SelectedFolder, Mode=TwoWay}"
+                                HorizontalContentAlignment="Stretch"
+                                ScrollViewer.HorizontalScrollMode="Disabled"
+                                ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                                 SelectionMode="Single"
                                 DoubleTapped="FolderList_DoubleTapped">
                                 <ListView.ItemTemplate>
@@ -190,11 +193,9 @@
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="Auto" />
                                                 <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
                                             <FontIcon Grid.Column="0" Glyph="&#xE8B7;" FontSize="14" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
-                                            <TextBlock Grid.Column="1" Text="{Binding Name}" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-                                            <TextBlock Grid.Column="2" Text="{Binding RelativeSubPath}" FontSize="10" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" FontFamily="Consolas" />
+                                            <TextBlock Grid.Column="1" Text="{Binding Name}" ToolTipService.ToolTip="{Binding FullUncPath}" FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap" />
                                         </Grid>
                                     </DataTemplate>
                                 </ListView.ItemTemplate>
@@ -211,7 +212,7 @@
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Spacing="2">
-                            <TextBlock Text="{x:Bind ViewModel.NasBrowser.CurrentUncPath, Mode=OneWay}" FontSize="11" FontFamily="Consolas" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{x:Bind ViewModel.NasBrowser.CurrentUncPath, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.NasBrowser.CurrentUncPath, Mode=OneWay}" FontSize="11" FontFamily="Consolas" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextTrimming="CharacterEllipsis" />
                             <TextBlock Text="{x:Bind ViewModel.NasBrowser.SecurityDescription, Mode=OneWay}" FontSize="10" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
                         </StackPanel>
                         <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">

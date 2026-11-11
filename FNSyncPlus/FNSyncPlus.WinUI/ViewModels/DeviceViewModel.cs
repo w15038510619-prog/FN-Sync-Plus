@@ -44,7 +44,10 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _statusMessage = string.Empty;
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(CanChangeRememberPassword))]
         private bool _isBusy = false;
+
+        public bool CanChangeRememberPassword => !IsBusy;
 
         [ObservableProperty]
         private bool _isSuccess = false;
@@ -99,11 +102,16 @@ namespace FNSyncPlus.WinUI.ViewModels
             Username = settings.Username;
             RememberPassword = settings.RememberCredentials;
 
-            if (settings.RememberCredentials && !string.IsNullOrEmpty(settings.NasServer))
+            if (settings.RememberCredentials && (!string.IsNullOrEmpty(settings.NasServer) || !string.IsNullOrEmpty(settings.IsolatedCredentialPath)))
             {
-                var creds = SmbAuthService.LoadCredentials();
+                var creds = SmbAuthService.LoadCredentials(settings.IsolatedCredentialPath);
                 if (creds.HasValue && !string.IsNullOrEmpty(creds.Value.Password))
                 {
+                    if (!string.IsNullOrEmpty(settings.IsolatedCredentialPath))
+                    {
+                        NasAddress = creds.Value.Server;
+                        Username = creds.Value.Username;
+                    }
                     Password = creds.Value.Password;
                 }
             }
@@ -115,7 +123,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         public async Task SearchLanDevicesAsync()
         {
             IsBusy = true;
-            StatusMessage = "正在探测局域网中的飞牛 NAS 设备...";
+            StatusMessage = "正在搜索局域网候选设备，请核对自己的飞牛地址...";
             try
             {
                 var devices = await _discoveryService.DiscoverNasDevicesAsync(NasAddress.Trim());
@@ -125,7 +133,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                     DiscoveredDevices.Add(d);
                 }
 
-                StatusMessage = $"搜索完成，找到 {DiscoveredDevices.Count} 台局域网设备。";
+                StatusMessage = $"搜索完成，找到 {DiscoveredDevices.Count} 台候选设备；登录前请核对地址。";
             }
             catch (Exception ex)
             {
@@ -223,7 +231,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             IsBusy = true;
             try
             {
-                var (success, msg) = await _connectionService.SubmitTwoFactorCodeAsync(TwoFactorCode);
+                var (success, msg) = await _connectionService.SubmitTwoFactorCodeAsync(TwoFactorCode, RememberPassword);
                 IsSuccess = success;
                 StatusMessage = msg;
                 if (success)

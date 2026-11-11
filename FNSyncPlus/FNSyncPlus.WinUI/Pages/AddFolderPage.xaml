@@ -175,6 +175,17 @@
                         <StackPanel Grid.Row="0" Spacing="4">
                             <TextBlock Text="自动规划备份方案预览（同名文件夹自动创建与防覆盖保护）" FontSize="15" FontWeight="SemiBold" />
                             <TextBlock Text="系统已为选中的本地源文件夹自动规划好 NAS 端的同名备份目录。无需手动新建文件夹，点击下方【确认创建并开始备份】即可直接开始。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <StackPanel Visibility="{x:Bind ViewModel.ShowExperimentalReuse, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" Spacing="6" Margin="0,8,0,0">
+                                <TextBlock Text="{x:Bind ViewModel.ReuseHeading, Mode=OneWay}" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                <TextBlock Text="内容一致的文件将在 NAS 内复制到新备份；缺失或不同的文件从电脑上传。原目录保留，副本占用额外空间，校验可能产生网络读取。新备份目录必须与已有目录分开；如默认同名，请更改下方的备份父目录。" TextWrapping="Wrap" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="每次备份内容发生变化，程序会保留完整的旧目录作为历史，并生成新的当前目录；空间占用会随历史版本增长，当前不会自动清理，请先确认 NAS 空间充足。" TextWrapping="Wrap" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                    <TextBox Grid.Column="0" Text="{x:Bind ViewModel.ExperimentalExistingRoot, Mode=OneWay}" IsReadOnly="True" PlaceholderText="未选择已有目录（将正常上传）" />
+                                    <Button Grid.Column="1" Click="BtnSelectExistingFolder_Click" Content="选择已有目录" />
+                                    <Button Grid.Column="2" Click="BtnClearExistingFolder_Click" Content="清除" />
+                                </Grid>
+                            </StackPanel>
                         </StackPanel>
 
                         <!-- Current Backup Target Parent Folder & Optional Change Button -->

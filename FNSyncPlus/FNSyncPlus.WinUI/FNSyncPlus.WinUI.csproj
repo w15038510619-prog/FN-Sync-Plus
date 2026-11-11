@@ -49,6 +49,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FNSyncPlus.Core\FNSyncPlus.Core.csproj" />
+    <ProjectReference Include="..\FNSyncPlus.Tray\FNSyncPlus.Tray.csproj" />
   </ItemGroup>
 
   <!-- Publish Properties -->

@@ -90,6 +90,13 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private string _nasDestinationRoot = string.Empty;
 
+        public bool ShowExperimentalReuse => _taskManager.UseExperimentalVersionedBackup;
+        public string ReuseHeading => _settings.IsVersionedBetaProfile && !_settings.IsVersionedBetaTestProfile
+            ? "复用飞牛已有文件（一次选择一个本地文件夹）" : "隔离试验：复用飞牛已有文件（仅支持一个本地文件夹）";
+
+        [ObservableProperty]
+        private string _experimentalExistingRoot = string.Empty;
+
         [ObservableProperty]
         private string _securityTitle = "正在评估安全状态...";
 
@@ -189,6 +196,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 DuplicateWarningMessage = null;
                 ExistingConflictTask = null;
                 HasDuplicateConflict = false;
+                ExperimentalExistingRoot = string.Empty;
                 StatusMessage = "请添加需要自动备份至飞牛 NAS 的本地文件夹。";
 
                 bool isConn = _connectionService.IsConnected &&
@@ -215,9 +223,10 @@ namespace FNSyncPlus.WinUI.ViewModels
                 string currentServer = _connectionService.ServerAddress;
 
                 if (!string.IsNullOrEmpty(_lastConnectedUsername) &&
-                    (!string.Equals(_lastConnectedUsername, currentUser, StringComparison.OrdinalIgnoreCase) ||
+                    (!string.Equals(_lastConnectedUsername, currentUser, StringComparison.Ordinal) ||
                      !string.Equals(_lastConnectedServer, currentServer, StringComparison.OrdinalIgnoreCase)))
                 {
+                    ExperimentalExistingRoot = string.Empty;
                     InitializeDefaultNasRoot();
                 }
                 else
@@ -652,6 +661,12 @@ namespace FNSyncPlus.WinUI.ViewModels
         {
             await Task.Yield();
             if (!CanCreate || PlannedTasks.Count == 0) return 0;
+            if (!string.IsNullOrWhiteSpace(ExperimentalExistingRoot) && (!ShowExperimentalReuse || PlannedTasks.Count != 1))
+            {
+                SecurityTitle = "复用已有目录一次只能选择一个本地文件夹";
+                SecurityDescription = "请仅选择一个本地文件夹，或清除已有目录后重试。";
+                return 0;
+            }
 
             // 运行时连接底线守卫校验：必须处于 Connected 且存储提供程序为已鉴权的 FnOsPersonalStorageProvider
             if (_connectionService.State != NasConnectionState.Connected)
@@ -682,7 +697,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 // 检查授权用户名与配置是否匹配
                 if (!string.IsNullOrEmpty(fnProvider.CurrentUsername) &&
                     !string.IsNullOrEmpty(_settings.Username) &&
-                    !string.Equals(fnProvider.CurrentUsername, _settings.Username, StringComparison.OrdinalIgnoreCase))
+                    !string.Equals(fnProvider.CurrentUsername, _settings.Username, StringComparison.Ordinal))
                 {
                     StatusMessage = $"当前登录账号 ({fnProvider.CurrentUsername}) 与配置账号 ({_settings.Username}) 不一致，请重新连接。";
                     return 0;
@@ -699,17 +714,46 @@ namespace FNSyncPlus.WinUI.ViewModels
                         destSub = item.TargetSubFolder;
                     }
 
-                    var mkRes = await fnProvider.CreateDirectoryAsync(destSub);
-                    if (!mkRes.Success && mkRes.ErrorCode != 17)
+                    if (ShowExperimentalReuse && !string.IsNullOrWhiteSpace(ExperimentalExistingRoot))
+                    {
+                        try { ExperimentalVersionedBackup.ValidateReuseLocations(fnProvider, destSub, ExperimentalExistingRoot); }
+                        catch (ArgumentException)
+                        {
+                            item.IsFailed = true;
+                            item.StatusText = "❌ 新旧目录冲突";
+                            item.ErrorMessage = "新备份目录必须与已有目录分开，不能相同或互相包含。请更改备份父目录。";
+                            SecurityTitle = "请选择独立的备份位置";
+                            SecurityDescription = item.ErrorMessage + " 原有飞牛目录不会被修改。";
+                            IsTeamShareWarning = true;
+                            continue;
+                        }
+                    }
+
+                    try
+                    {
+                        var created = _taskManager.UseExperimentalVersionedBackup
+                            ? (await fnProvider.GetItemAsync(destSub) == null ? ExclusiveDirectoryResult.Created : ExclusiveDirectoryResult.AlreadyExists)
+                            : await fnProvider.TryCreateDirectoryExclusiveAsync(destSub);
+                        if (created != ExclusiveDirectoryResult.Created)
+                        {
+                            item.IsFailed = true;
+                            item.StatusText = "❌ 目标目录已存在";
+                            item.ErrorMessage = "飞牛上已有同名目录，未建立任务。请选择其他备份位置，避免覆盖已有文件。";
+                            continue;
+                        }
+                    }
+                    catch (Exception ex)
                     {
                         item.IsFailed = true;
                         item.StatusText = "❌ 创建个人空间目录失败";
-                        item.ErrorMessage = mkRes.ErrorMessage;
+                        item.ErrorMessage = ex.Message;
                         continue;
                     }
 
                     item.FinalTargetUnc = item.FullTargetUnc;
-                    item.StatusText = "✔ 目标就绪，任务已建立";
+                    item.StatusText = _taskManager.UseExperimentalVersionedBackup
+                        ? (_settings.IsVersionedBetaProfile && !_settings.IsVersionedBetaTestProfile ? "✔ 新版备份任务已建立，目标将在同步时创建" : "✔ 隔离试验任务已建立，目标将在同步时创建")
+                        : "✔ 目标就绪，任务已建立";
                     item.IsFailed = false;
 
                     var task = new SyncTask
@@ -719,9 +763,12 @@ namespace FNSyncPlus.WinUI.ViewModels
                         SourceFolder = item.SourcePath,
                         DestinationRoot = NasDestinationRoot,
                         DestinationFolder = item.FullTargetUnc,
+                        ExperimentalExistingRoot = ShowExperimentalReuse && !string.IsNullOrWhiteSpace(ExperimentalExistingRoot)
+                            ? ExperimentalExistingRoot : null,
                         ProviderType = StorageProviderType.FnOsPersonal,
-                        NasUsername = _settings.Username,
-                        NasDeviceId = _settings.NasServer,
+                        NasUsername = _connectionService.Username,
+                        NasAccountUid = _connectionService.CurrentUid,
+                        NasDeviceId = _connectionService.ServerAddress,
                         Mode = SyncMode.OneWayBackup,
                         Enabled = true,
                         AutoSyncEnabled = true,
@@ -729,7 +776,17 @@ namespace FNSyncPlus.WinUI.ViewModels
                         IntervalMinutes = 5
                     };
 
-                    _taskManager.AddTask(task);
+                    try { _taskManager.AddTask(task); }
+                    catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
+                    {
+                        item.IsFailed = true;
+                        item.StatusText = "❌ 无法建立任务";
+                        item.ErrorMessage = ex.Message;
+                        SecurityTitle = "任务未建立";
+                        SecurityDescription = ex.Message;
+                        IsTeamShareWarning = true;
+                        continue;
+                    }
                     _taskManager.TriggerSync(task.TaskId);
                     createdCount++;
                 }
@@ -740,7 +797,10 @@ namespace FNSyncPlus.WinUI.ViewModels
                     _settings.Save();
                 }
 
-                StatusMessage = $"全部 {createdCount} 个个人空间同步任务已成功建立并启动！";
+                int fnFailedCount = PlannedTasks.Count - createdCount;
+                StatusMessage = fnFailedCount == 0
+                    ? $"{createdCount} 个个人空间同步任务已建立并启动。"
+                    : $"已建立 {createdCount} 个任务，{fnFailedCount} 个未建立；请查看各项原因。";
                 
                 // 全部创建成功后，重置会话，杜绝残留旧文件夹记录
                 if (createdCount == PlannedTasks.Count)
@@ -795,8 +855,8 @@ namespace FNSyncPlus.WinUI.ViewModels
                     DestinationRoot = NasDestinationRoot,
                     DestinationFolder = ensuredPath,
                     ProviderType = StorageProviderType.SmbShare,
-                    NasUsername = _settings.Username,
-                    NasDeviceId = _settings.NasServer,
+                    NasUsername = _connectionService.Username,
+                    NasDeviceId = _connectionService.ServerAddress,
                     Mode = SyncMode.OneWayBackup,
                     Enabled = true,
                     AutoSyncEnabled = true,

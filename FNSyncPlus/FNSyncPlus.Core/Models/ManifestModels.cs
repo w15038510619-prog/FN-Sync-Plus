@@ -56,6 +56,9 @@ namespace FNSyncPlus.Core.Models
         public bool IsFromCache { get; set; }
 
         [JsonIgnore]
+        public bool IsNew { get; internal set; }
+
+        [JsonIgnore]
         public DateTimeOffset? CachedAt { get; set; }
     }
 

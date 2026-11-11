@@ -13,6 +13,8 @@ namespace FNSyncPlus.WinUI.ViewModels
         public SyncTask Model { get; }
 
         public string TaskId => Model.TaskId;
+        public bool CanInspectInterruption => Model.IsExperimentalBackup;
+        public bool IsProgressIndeterminate => Model.IsExperimentalBackup && IsSyncing;
 
         [ObservableProperty]
         private string _taskName;
@@ -70,7 +72,9 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         public event Action<SyncTaskItemViewModel>? RequestViewDetails;
         public event Action<SyncTaskItemViewModel>? RequestEditSettings;
+        public event Action<string>? RequestOperationError;
         public event Action<SyncTaskItemViewModel>? RequestDelete;
+        public event Action<SyncTaskItemViewModel>? RequestInspectInterruption;
 
         public SyncTaskItemViewModel(SyncTask task, TaskManager taskManager)
         {
@@ -92,9 +96,10 @@ namespace FNSyncPlus.WinUI.ViewModels
             State = Model.State;
             CurrentProgress = Model.CurrentProgress;
             CurrentFile = Model.CurrentFile;
-            CurrentFileText = string.IsNullOrEmpty(Model.CurrentFile) ? string.Empty : $"传输: {Model.CurrentFile}";
-            CurrentProgressText = $"{Model.CurrentProgress:F0}%";
             IsSyncing = Model.State == TaskSyncState.Syncing || Model.State == TaskSyncState.Scanning;
+            OnPropertyChanged(nameof(IsProgressIndeterminate));
+            CurrentFileText = string.IsNullOrEmpty(Model.CurrentFile) ? string.Empty : Model.IsExperimentalBackup ? Model.CurrentFile : $"传输: {Model.CurrentFile}";
+            CurrentProgressText = IsProgressIndeterminate ? "正在处理" : $"{Model.CurrentProgress:F0}%";
             IsPaused = Model.State == TaskSyncState.Paused;
             IsConfigurationError = Model.State == TaskSyncState.ConfigurationError;
             CanRunSync = !IsConfigurationError && Model.State != TaskSyncState.Removing && Model.State != TaskSyncState.Paused && !IsSyncing;
@@ -121,6 +126,8 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 FormattedLastSync = "尚未进行初次同步";
             }
+            if (Model.LastFailureTime.HasValue)
+                FormattedLastSync += $" · 上次失败 {Model.LastFailureTime.Value:yyyy-MM-dd HH:mm}";
 
             ScheduleSummaryText = Model.ScheduleSummary;
         }
@@ -148,13 +155,18 @@ namespace FNSyncPlus.WinUI.ViewModels
         [RelayCommand]
         private void TogglePause()
         {
-            if (IsPaused)
+            bool resuming = IsPaused;
+            try
             {
-                _taskManager.ResumeTask(TaskId);
+                if (resuming) _taskManager.ResumeTask(TaskId);
+                else _taskManager.PauseTask(TaskId);
             }
-            else
+            catch (Exception ex)
             {
-                _taskManager.PauseTask(TaskId);
+                string message = Model.State != TaskSyncState.Paused ? "无法完成操作，请检查任务状态。" : resuming
+                    ? "恢复状态未能保存，任务仍保持暂停。"
+                    : "当前会话已暂停，但暂停状态未能保存；重启后可能重新开始，请检查配置文件权限。";
+                RequestOperationError?.Invoke($"{message}\n{ex.Message}");
             }
             UpdateVisualState();
         }
@@ -175,6 +187,12 @@ namespace FNSyncPlus.WinUI.ViewModels
         private void DeleteTask()
         {
             RequestDelete?.Invoke(this);
+        }
+
+        [RelayCommand]
+        private void InspectInterruption()
+        {
+            if (CanInspectInterruption) RequestInspectInterruption?.Invoke(this);
         }
     }
 }

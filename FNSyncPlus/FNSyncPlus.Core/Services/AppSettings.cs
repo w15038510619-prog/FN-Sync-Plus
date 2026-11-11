@@ -5,6 +5,8 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using FNSyncPlus.Core.Models;
+using FNSyncPlus.Core.Storage;
+using FNSyncPlus.Core.Utils;
 using Microsoft.Win32;
 
 namespace FNSyncPlus.Core.Services
@@ -43,8 +45,209 @@ namespace FNSyncPlus.Core.Services
         [JsonIgnore]
         public string? CustomConfigPath { get; set; } = null;
 
+        [JsonIgnore]
+        public string? IsolatedCredentialPath { get; set; }
+
+        // Optional, explicitly selected test session. It never points at production settings.
+        [JsonIgnore]
+        public string? IsolatedSessionPath { get; private set; }
+
+        // The beta profile has its own file and credentials; old app versions use a different path.
+        [JsonIgnore]
+        public string? VersionedBetaProfilePath { get; private set; }
+
+        [JsonIgnore]
+        public string? VersionedLegacySettingsPath { get; private set; }
+
+        [JsonIgnore]
+        public bool IsVersionedBetaProfile => VersionedBetaProfilePath != null;
+
+        [JsonIgnore]
+        public bool IsVersionedBetaTestProfile { get; private set; }
+
+        [JsonIgnore]
+        public bool HasIsolatedTestBoundary => IsolatedTestRemoteRoot != null;
+
+        [JsonIgnore]
+        private string? IsolatedTestRemoteRoot { get; set; }
+
+        [JsonIgnore]
+        private bool RequiresIsolatedTestBoundary { get; set; }
+
+        [JsonIgnore]
+        private string? EphemeralIsolatedLogDirectory { get; set; }
+
         public static AppSettings CreateInMemory() => new AppSettings { IsInMemoryOnly = true };
+        public static AppSettings CreateUnboundedIsolatedSession() => new AppSettings { IsInMemoryOnly = true, RequiresIsolatedTestBoundary = true };
         public static AppSettings CreateForTest(string testFilePath) => new AppSettings { CustomConfigPath = testFilePath };
+
+        public string GetIsolatedLogDirectory()
+        {
+            string? profile = IsolatedSessionPath ?? (IsVersionedBetaTestProfile ? VersionedBetaProfilePath : null);
+            if (profile != null) return Path.Combine(Path.GetDirectoryName(profile)!, "logs");
+            if (!RequiresIsolatedTestBoundary) throw new InvalidOperationException("当前配置不是隔离测试会话");
+            return EphemeralIsolatedLogDirectory ??= Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"WinUiLogs_{Guid.NewGuid():N}");
+        }
+
+        public static AppSettings LoadVersionedBetaProfile() => LoadVersionedProfileAt(
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "versioned-beta"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FNSyncPlus", "settings.json"));
+
+        // This isolated test path is never selected by ordinary application startup.
+        public static AppSettings LoadVersionedBetaTestProfile(Guid id)
+        {
+            if (id == Guid.Empty) throw new ArgumentException("测试配置标识无效", nameof(id));
+            string folder = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"VersionedProfile_{id:N}");
+            string legacyFolder = Path.Combine(folder, "legacy-fixture");
+            Directory.CreateDirectory(legacyFolder);
+            var settings = LoadVersionedProfileAt(folder, Path.Combine(legacyFolder, "settings.json"));
+            settings.IsVersionedBetaTestProfile = true;
+            return settings;
+        }
+
+        private static AppSettings LoadVersionedProfileAt(string folder, string legacySettingsPath)
+        {
+            Directory.CreateDirectory(folder);
+            string path = Path.Combine(folder, "settings.json");
+            var settings = File.Exists(path) ? FromJson(File.ReadAllText(path)) : new AppSettings();
+            if (!string.IsNullOrEmpty(settings.LegacySourceFolder) || !string.IsNullOrEmpty(settings.LegacyTargetShare))
+                throw new InvalidDataException("新版配置包含旧式单任务字段，必须先明确迁移。");
+            settings.VersionedBetaProfilePath = path;
+            settings.VersionedLegacySettingsPath = legacySettingsPath;
+            settings.IsolatedCredentialPath = Path.Combine(folder, "credentials.dat");
+            return settings;
+        }
+
+        /// <summary>Reads the previous app configuration without migrating or saving it.</summary>
+        public AppSettings? ReadVersionedLegacySettings()
+        {
+            if (!IsVersionedBetaProfile || VersionedLegacySettingsPath == null)
+                throw new InvalidOperationException("只有独立新版配置可以查看旧程序配置。");
+            try
+            {
+                using var stream = new FileStream(VersionedLegacySettingsPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+                using var reader = new StreamReader(stream);
+                return FromJson(reader.ReadToEnd());
+            }
+            catch (FileNotFoundException) { return null; }
+            catch (DirectoryNotFoundException) { return null; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException or ArgumentException or JsonException)
+            { throw new InvalidOperationException("无法安全读取旧程序配置，原文件未修改。", ex); }
+        }
+
+        /// <summary>Copies an already-remembered DPAPI credential only into a fresh, separate profile.</summary>
+        public bool ImportRememberedLegacyConnection()
+        {
+            if (!IsVersionedBetaProfile || VersionedBetaProfilePath == null || VersionedLegacySettingsPath == null || IsolatedCredentialPath == null)
+                throw new InvalidOperationException("只有独立新版配置可以导入已保存的连接。");
+            if (File.Exists(VersionedBetaProfilePath)) return false;
+            var legacy = ReadVersionedLegacySettings();
+            if (legacy == null) return false;
+            RememberCredentials = legacy.RememberCredentials;
+            foreach (var entry in ReadTrustedCertificates(VersionedLegacySettingsPath))
+                TrustedCertThumbprints.TryAdd(entry.Key, entry.Value);
+            if (!RememberCredentials || File.Exists(IsolatedCredentialPath)) return false;
+            string legacyCredentialPath = Path.Combine(Path.GetDirectoryName(VersionedLegacySettingsPath)!, "credentials.dat");
+            var credentials = SmbAuthService.LoadCredentials(legacyCredentialPath);
+            if (credentials == null) return false;
+            if (!SmbAuthService.SaveCredentials(credentials.Value.Server, credentials.Value.Username, credentials.Value.Password, IsolatedCredentialPath)) return false;
+            NasServer = credentials.Value.Server;
+            Username = credentials.Value.Username;
+            return true;
+        }
+
+        public static AppSettings LoadIsolatedTestSession(Guid id)
+        {
+            if (id == Guid.Empty) throw new ArgumentException("隔离会话标识无效", nameof(id));
+            string folder = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"WinUiSession_{id:N}");
+            Directory.CreateDirectory(folder);
+            string path = Path.Combine(folder, "settings.json");
+            var settings = File.Exists(path) ? FromJson(File.ReadAllText(path)) : new AppSettings();
+            settings.IsInMemoryOnly = true;
+            settings.IsolatedSessionPath = path;
+            return settings;
+        }
+
+        public void SetIsolatedTestBoundary(string remoteRoot)
+        {
+            if ((IsolatedSessionPath == null && !IsVersionedBetaTestProfile) || !PathHelper.IsSafeRelativePath(remoteRoot) || remoteRoot.Contains('/') || remoteRoot.Contains('\\') ||
+                !remoteRoot.StartsWith("Codex_FN_Test_", StringComparison.Ordinal))
+                throw new InvalidOperationException("隔离测试远端父目录无效");
+            IsolatedTestRemoteRoot = remoteRoot;
+            foreach (var task in Tasks) EnsureIsolatedTestTask(task);
+        }
+
+        public void EnsureIsolatedTestParent(string remoteParent)
+        {
+            if (IsolatedTestRemoteRoot == null || !PathHelper.IsSafeRelativePath(remoteParent))
+                throw new InvalidOperationException("隔离测试需要指定授权的飞牛测试父目录");
+            string normalized = PathHelper.NormalizeRelPath(remoteParent);
+            if (normalized.StartsWith("我的文件/", StringComparison.Ordinal)) normalized = normalized["我的文件/".Length..];
+            if (!normalized.Equals(IsolatedTestRemoteRoot, StringComparison.OrdinalIgnoreCase) &&
+                !normalized.StartsWith(IsolatedTestRemoteRoot + "/", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("测试父目录超出授权沙盒，已阻止执行");
+        }
+
+        public void EnsureIsolatedTestTask(SyncTask task)
+        {
+            if (RequiresIsolatedTestBoundary && IsolatedTestRemoteRoot == null)
+                throw new InvalidOperationException("隔离测试尚未指定远端父目录，请重新启动并指定授权的测试目录后创建任务");
+            if (IsolatedSessionPath == null && IsolatedTestRemoteRoot == null) return;
+            if (IsolatedTestRemoteRoot == null) throw new InvalidOperationException("隔离测试尚未指定远端父目录");
+            string localRoot = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests");
+            string fullSource = Path.GetFullPath(task.SourceFolder);
+            string relative = Path.GetRelativePath(localRoot, fullSource);
+            bool WithinRemote(string path)
+            {
+                string normalized = PathHelper.NormalizeRelPath(path);
+                if (normalized.StartsWith("我的文件/", StringComparison.Ordinal)) normalized = normalized["我的文件/".Length..];
+                return PathHelper.IsSafeRelativePath(normalized) && normalized.StartsWith(IsolatedTestRemoteRoot + "/", StringComparison.OrdinalIgnoreCase);
+            }
+            if (task.ProviderType != StorageProviderType.FnOsPersonal || !PathHelper.IsSafeRelativePath(relative) ||
+                !WithinRemote(task.DestinationFolder) || (!string.IsNullOrEmpty(task.ExperimentalExistingRoot) && !WithinRemote(task.ExperimentalExistingRoot)))
+                throw new InvalidOperationException("隔离会话中的任务超出指定测试目录，已阻止执行");
+            // A lexical path within the test folder can still traverse a junction to private data.
+            try
+            {
+                for (var directory = new DirectoryInfo(fullSource); directory != null; directory = directory.Parent)
+                    if (directory.Exists && (directory.Attributes & FileAttributes.ReparsePoint) != 0)
+                        throw new InvalidOperationException("隔离测试源路径包含链接或联接点，已阻止执行");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            { throw new InvalidOperationException("无法确认隔离测试源路径，已阻止执行", ex); }
+        }
+
+        /// <summary>Reads only already-trusted SHA-256 certificate fingerprints; never migrates or writes the source settings.</summary>
+        public static Dictionary<string, string> ReadTrustedCertificates(string path)
+        {
+            var trusted = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (!File.Exists(path)) return trusted;
+                using var document = JsonDocument.Parse(File.ReadAllBytes(path));
+                if (document.RootElement.ValueKind != JsonValueKind.Object) return trusted;
+                bool found = false;
+                foreach (var property in document.RootElement.EnumerateObject())
+                {
+                    if (!property.Name.Equals(nameof(TrustedCertThumbprints), StringComparison.OrdinalIgnoreCase)) continue;
+                    if (found || property.Value.ValueKind != JsonValueKind.Object)
+                        return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    found = true;
+                    foreach (var entry in property.Value.EnumerateObject())
+                    {
+                        string? hash = entry.Value.ValueKind == JsonValueKind.String ? entry.Value.GetString() : null;
+                        if (!string.IsNullOrWhiteSpace(entry.Name) && hash?.Length == 64 && hash.All(Uri.IsHexDigit))
+                        {
+                            if (!trusted.TryAdd(entry.Name, hash)) return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        }
+                    }
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            catch (JsonException) { }
+            return trusted;
+        }
 
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
@@ -66,55 +269,38 @@ namespace FNSyncPlus.Core.Services
 
         public static AppSettings Load()
         {
-            try
-            {
-                string path = GetConfigFilePath();
-                if (File.Exists(path))
-                {
-                    string json = File.ReadAllText(path);
-                    var settings = FromJson(json);
-                    
-                    // 清理历史遗留的测试/伪造任务 (如 task_fail_, task_partial_, task_dup_, Fake 等)
-                    bool cleaned = PurgeTestArtifacts(settings);
-                    if (MigrateLegacySettings(settings) || cleaned)
-                    {
-                        settings.Save();
-                    }
-                    return settings;
-                }
-            }
-            catch
-            {
-                // 加载失败时使用默认配置
-            }
-            return new AppSettings();
+            var settings = LoadFromPath(GetConfigFilePath());
+            settings.CustomConfigPath = null;
+            return settings;
         }
 
-        /// <summary>
-        /// 严格清理真实配置中意外混入的自动化测试伪造任务
-        /// </summary>
-        public static bool PurgeTestArtifacts(AppSettings settings)
+        public static AppSettings LoadFromPath(string path)
         {
-            if (settings == null || settings.Tasks == null) return false;
-            int initialCount = settings.Tasks.Count;
-            settings.Tasks.RemoveAll(t => 
-                (t.TaskId != null && (t.TaskId.StartsWith("task_fail_") || 
-                                     t.TaskId.StartsWith("task_partial_") || 
-                                     t.TaskId.StartsWith("task_success") || 
-                                     t.TaskId.StartsWith("task_dup_") || 
-                                     t.TaskId.StartsWith("task_dummy_") ||
-                                     t.TaskId.StartsWith("task_test_"))) ||
-                (t.SourceFolder != null && (t.SourceFolder.Contains("Fake", StringComparison.OrdinalIgnoreCase) ||
-                                           t.SourceFolder.Contains(@"C:\App1", StringComparison.OrdinalIgnoreCase) ||
-                                           t.SourceFolder.Contains(@"D:\WorkSpace\Projects\App1", StringComparison.OrdinalIgnoreCase))) ||
-                (t.TaskName != null && (t.TaskName.Contains("失败测试") || t.TaskName.Contains("成功测试"))));
-
-            return settings.Tasks.Count != initialCount;
+            if (!File.Exists(path))
+            {
+                return new AppSettings { CustomConfigPath = path };
+            }
+            try
+            {
+                var settings = FromJson(File.ReadAllText(path));
+                settings.CustomConfigPath = path;
+                if (MigrateLegacySettings(settings))
+                {
+                    File.Copy(path, path + ".pre-migration-" + Guid.NewGuid().ToString("N") + ".bak");
+                    settings.Save();
+                }
+                return settings;
+            }
+            catch (Exception ex)
+            {
+                throw new IOException($"无法读取或迁移配置文件，原文件未自动重置：{path}", ex);
+            }
         }
 
         public static AppSettings FromJson(string json)
         {
-            var settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? new AppSettings();
+            var settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? throw new JsonException("配置为空");
+            if (settings.Tasks == null) throw new JsonException("任务列表无效");
             return settings;
         }
 
@@ -154,22 +340,24 @@ namespace FNSyncPlus.Core.Services
 
         public void Save()
         {
-            if (IsInMemoryOnly) return; // 单元测试或沙盒模式绝不写入磁盘配置文件
+            if (IsInMemoryOnly && IsolatedSessionPath == null) return;
 
-            try
+            lock (Tasks)
             {
-                string path = !string.IsNullOrEmpty(CustomConfigPath) ? CustomConfigPath : GetConfigFilePath();
-                string json = JsonSerializer.Serialize(this, JsonOptions);
-                File.WriteAllText(path, json);
-                
-                if (string.IsNullOrEmpty(CustomConfigPath))
+                string path = VersionedBetaProfilePath ?? IsolatedSessionPath ?? (!string.IsNullOrEmpty(CustomConfigPath) ? CustomConfigPath : GetConfigFilePath());
+                string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                try
                 {
-                    ApplyStartupRegistry(StartWithWindows);
+                    File.WriteAllText(temp, JsonSerializer.Serialize(this, JsonOptions));
+                    if (File.Exists(path)) File.Replace(temp, path, path + ".bak");
+                    else File.Move(temp, path);
                 }
-            }
-            catch
-            {
-                // 保存失败不崩溃
+                finally
+                {
+                    if (File.Exists(temp)) File.Delete(temp);
+                }
+                if (VersionedBetaProfilePath == null && IsolatedSessionPath == null && string.IsNullOrEmpty(CustomConfigPath))
+                    ApplyStartupRegistry(StartWithWindows);
             }
         }
 
