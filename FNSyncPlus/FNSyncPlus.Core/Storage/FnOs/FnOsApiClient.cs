@@ -82,6 +82,15 @@ namespace FNSyncPlus.Core.Storage.FnOs
             CurrentVolumeId = volId;
         }
 
+        /// <summary>模拟 user.info 未能返回权威 UID 的已认证会话，用于验证 fail-closed 行为。</summary>
+        public void SetAuthenticatedWithoutUidForTesting(string user)
+        {
+            IsAuthenticated = true;
+            AuthenticatedUser = user;
+            CurrentUid = null;
+            CurrentVolumeId = null;
+        }
+
         public static Func<string, string, bool>? TrustedThumbprintValidator { get; set; }
         public string? LastSeenCertSha256 { get; private set; }
 
@@ -740,13 +749,16 @@ namespace FNSyncPlus.Core.Storage.FnOs
             }
             var result = JsonSerializer.Deserialize<FnOsFileListResponse>(responseJson);
 
-            // 若在根目录下，自动捕获当前系统 VolumeId 与 UID
-            if (string.IsNullOrWhiteSpace(subPath) && result?.Files != null)
+            // 根目录条目里可能混有他人所有的共享内容，条目 uid 不能代表当前登录账号；
+            // 当前 UID 只以 user.info 的结果为准，这里绝不回写。
+            // 卷号只从归属当前账号的条目中学习，且不覆盖已确认的值。
+            if (string.IsNullOrWhiteSpace(subPath) && result?.Files != null && CurrentUid.HasValue)
             {
                 foreach (var f in result.Files)
                 {
-                    if (f.VolumeId.HasValue) CurrentVolumeId = f.VolumeId.Value;
-                    if (f.Uid.HasValue) CurrentUid = f.Uid.Value;
+                    if (CurrentVolumeId.HasValue) break;
+                    if (f.VolumeId.HasValue && (!f.Uid.HasValue || f.Uid.Value == CurrentUid.Value))
+                        CurrentVolumeId = f.VolumeId.Value;
                 }
             }
 

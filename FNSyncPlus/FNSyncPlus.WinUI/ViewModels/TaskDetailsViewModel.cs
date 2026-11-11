@@ -248,6 +248,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                         if (task.IsExperimentalBackup)
                         {
                             if ((!string.IsNullOrWhiteSpace(task.NasUsername) && !string.Equals(task.NasUsername, fnProvider.CurrentUsername, StringComparison.Ordinal)) ||
+                                (task.NasAccountUid.HasValue && (!fnProvider.CurrentUid.HasValue || fnProvider.CurrentUid.Value != task.NasAccountUid.Value)) ||
                                 (!string.IsNullOrWhiteSpace(task.NasDeviceId) && !fnProvider.MatchesServerAddress(task.NasDeviceId)) ||
                                 (!AppServices.IsIsolatedTestSession && (string.IsNullOrWhiteSpace(task.NasUsername) || string.IsNullOrWhiteSpace(task.NasDeviceId))))
                                 throw new InvalidOperationException("飞牛账号或设备与任务不匹配，无法确认备份位置。");

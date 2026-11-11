@@ -115,6 +115,7 @@ namespace FNSyncPlus.Tests
                 TestNasStorageProviderAbstractionAndFactory(); // 新增：NAS 统一存储抽象层与工厂单元测试
                 TestFnOsCertificatePinningAndSslValidation(); // 新增：TLS 证书强校验与指纹 Pinning 测试
                 TestFnOsPersonalStorageProviderPathTraversalSecurity(); // 新增：个人空间路径穿越与边界隔离安全测试
+                TestFnOsPersonalSpaceUnknownUidFailsClosed(); // 新增：UID 未知时拒绝推导个人空间根路径
                 TestFnOsDeleteSafetyGuard(); // 新增：正式个人空间删除拦截安全测试
                 TestTwoFactorTotpAuthenticationFlow(); // 新增：TOTP 双重验证状态流转测试
                 TestStreamingProgressReportingStream(); // 新增：分块流式传输与进度监听测试
@@ -1929,6 +1930,8 @@ namespace FNSyncPlus.Tests
                 await TestIsolatedRecoverySessionAsync(root);
                 await TestVersionedSettlingAsync(root);
                 await TestVersionedAliasNoOpAsync(root);
+                TestFnOsPersonalStorageProviderPathTraversalSecurity();
+                TestFnOsPersonalSpaceUnknownUidFailsClosed();
             }
             finally
             {
@@ -3036,6 +3039,24 @@ namespace FNSyncPlus.Tests
                 try { await recovery!.InspectAsync(); }
                 catch (InvalidOperationException) { refused = true; }
                 Assert(refused, "账号仅大小写不同时也拒绝中断恢复检查");
+            }
+            await Task.Delay(300);
+            missingAccount.NasUsername = "fixture-user";
+            missingAccount.NasAccountUid = 9999;
+            missingAccount.IsUserPaused = false;
+            missingAccount.State = TaskSyncState.Idle;
+            missingDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            ordinaryManager.TriggerSync(missingAccount.TaskId);
+            if (await Task.WhenAny(missingDone.Task, Task.Delay(10000)) != missingDone.Task) throw new TimeoutException("账号 UID 绑定检查超时");
+            Assert(missingAccount.LastSyncStatus == "NAS 账号不匹配" && !Directory.Exists(Path.Combine(root, missingAccount.DestinationFolder)),
+                "同名账号 UID 不一致时停止备份，不创建目标");
+            await Task.Delay(300);
+            await using (var recovery = await ordinaryManager.BeginIsolatedRecoveryAsync(missingAccount.TaskId, TimeSpan.FromSeconds(5)))
+            {
+                bool refused = false;
+                try { await recovery!.InspectAsync(); }
+                catch (InvalidOperationException) { refused = true; }
+                Assert(refused, "绑定 UID 不一致时也拒绝中断恢复检查");
             }
             if (!await ordinaryManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("缺少账号测试未停止");
         }
@@ -6349,6 +6370,36 @@ namespace FNSyncPlus.Tests
                 caught3 = ex is ArgumentException || ex.Message.Contains("安全拦截");
             }
             Assert(caught3, "成功拦截绝对路径冒号 : 跨盘符访问");
+        }
+
+        static void TestFnOsPersonalSpaceUnknownUidFailsClosed()
+        {
+            Console.WriteLine("\n--- 40b. 个人空间 UID 未知时 fail-closed 测试 ---");
+            var mockApi = new FnOsApiClient();
+            mockApi.SetAuthenticatedWithoutUidForTesting("testuser");
+            var provider = new FnOsPersonalStorageProvider(mockApi);
+
+            bool caughtList = false;
+            try
+            {
+                _ = provider.ListEntriesAsync("folder").GetAwaiter().GetResult();
+            }
+            catch (InvalidOperationException ex)
+            {
+                caughtList = ex.Message.Contains("UID 未知");
+            }
+            Assert(caughtList, "UID 未知时读取目录被拒绝，不猜测默认账号目录");
+
+            bool caughtCreate = false;
+            try
+            {
+                _ = provider.CreateDirectoryAsync("folder").GetAwaiter().GetResult();
+            }
+            catch (InvalidOperationException ex)
+            {
+                caughtCreate = ex.Message.Contains("UID 未知");
+            }
+            Assert(caughtCreate, "UID 未知时创建目录被拒绝，不猜测默认账号目录");
         }
 
         static void TestFnOsDeleteSafetyGuard()

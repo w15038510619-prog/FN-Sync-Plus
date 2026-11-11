@@ -57,7 +57,7 @@ namespace FNSyncPlus.Core.Storage
             _apiClient = apiClient ?? throw new ArgumentNullException(nameof(apiClient));
             if (_apiClient.IsAuthenticated && _apiClient.CurrentUid.HasValue)
             {
-                _personalRootPath = $"vol{_apiClient.CurrentVolumeId ?? 1}/{_apiClient.CurrentUid.Value}";
+                _personalRootPath = ResolveRootFromAuthenticatedUid();
             }
         }
 
@@ -803,6 +803,16 @@ namespace FNSyncPlus.Core.Storage
             return Task.FromResult(StorageOperationResult.Fail("安全保护拦截：飞牛个人空间删除功能尚未启用。"));
         }
 
+        /// <summary>
+        /// 根路径只从登录会话的权威 UID 推导。UID 未知时拒绝操作，绝不猜测默认账号目录。
+        /// </summary>
+        private string ResolveRootFromAuthenticatedUid()
+        {
+            if (!_apiClient.CurrentUid.HasValue)
+                throw new InvalidOperationException("无法确认当前登录账号的个人空间归属 (UID 未知)，已阻止访问以避免误写入其他账号目录。");
+            return $"vol{_apiClient.CurrentVolumeId ?? 1}/{_apiClient.CurrentUid.Value}";
+        }
+
         internal string NormalizeRelativePath(string? relativePath)
         {
             if (string.IsNullOrWhiteSpace(relativePath))
@@ -811,7 +821,7 @@ namespace FNSyncPlus.Core.Storage
             }
 
             string clean = relativePath.Trim().Replace('\\', '/').Trim('/');
-            string root = _personalRootPath ?? $"vol1/{_apiClient.CurrentUid ?? 1000}";
+            string root = _personalRootPath ?? ResolveRootFromAuthenticatedUid();
 
             // 支持兼容「我的文件」或「我的文件/...」的前缀
             if (clean.Equals("我的文件", StringComparison.OrdinalIgnoreCase))
@@ -838,7 +848,7 @@ namespace FNSyncPlus.Core.Storage
 
         private string CombineWithPersonalRoot(string? relativePath)
         {
-            string root = _personalRootPath ?? $"vol1/{_apiClient.CurrentUid ?? 1000}";
+            string root = _personalRootPath ?? ResolveRootFromAuthenticatedUid();
             string clean = NormalizeRelativePath(relativePath);
             if (string.IsNullOrEmpty(clean))
             {

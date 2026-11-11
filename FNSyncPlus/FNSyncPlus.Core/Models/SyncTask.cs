@@ -74,6 +74,14 @@ namespace FNSyncPlus.Core.Models
         [JsonPropertyName("nas_username")]
         public string NasUsername { get; set; } = string.Empty;
 
+        /// <summary>
+        /// 创建任务时登录账号的权威 UID (来自 user.info)。重连后若 UID 不一致则停止任务，
+        /// 防止同名重建或账号切换把任务写入他人个人空间。
+        /// </summary>
+        [JsonPropertyName("nas_account_uid")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public int? NasAccountUid { get; set; }
+
         [JsonPropertyName("sync_mode")]
         public SyncMode Mode { get; set; } = SyncMode.OneWayBackup;
 

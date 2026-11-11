@@ -767,6 +767,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                             ? ExperimentalExistingRoot : null,
                         ProviderType = StorageProviderType.FnOsPersonal,
                         NasUsername = _connectionService.Username,
+                        NasAccountUid = _connectionService.CurrentUid,
                         NasDeviceId = _connectionService.ServerAddress,
                         Mode = SyncMode.OneWayBackup,
                         Enabled = true,
