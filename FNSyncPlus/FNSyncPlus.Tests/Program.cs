@@ -72,6 +72,24 @@ namespace FNSyncPlus.Tests
                 return _failed == 0 ? 0 : 1;
             }
 
+            if (args.Contains("--update-tests"))
+            {
+                // Standalone run of the update-engine suite only, for fast iteration.
+                string updateRoot = Path.Combine(Path.GetTempPath(), "FNSync_update_suite_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var report = await new UpdateTestSuite().RunAsync(updateRoot);
+                    foreach (var item in report.Cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    Console.WriteLine(report.ToSummary());
+                    return report.AllPassed ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(updateRoot)) Directory.Delete(updateRoot, true); } catch (IOException) { }
+                }
+            }
+
             if (args.Any(a => a.Equals("--poc", StringComparison.OrdinalIgnoreCase) || 
                               a.Equals("poc", StringComparison.OrdinalIgnoreCase) ||
                               a.Equals("--unicode-suite", StringComparison.OrdinalIgnoreCase)))
@@ -2028,6 +2046,11 @@ namespace FNSyncPlus.Tests
                 TestFnOsPersonalStorageProviderPathTraversalSecurity();
                 TestFnOsPersonalSpaceUnknownUidFailsClosed();
                 await TestRestoreJunctionTargetSafetyAsync();
+
+                // ==================== 更新引擎（阶段 2） ====================
+                var updateReport = await new UpdateTestSuite().RunAsync(Path.Combine(root, "update-tests"));
+                foreach (var updateCase in updateReport.Cases)
+                    Assert(updateCase.Passed, updateCase.Name, updateCase.Detail);
             }
             finally
             {

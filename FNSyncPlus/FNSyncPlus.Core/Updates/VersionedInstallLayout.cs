@@ -33,6 +33,21 @@ public sealed class VersionedInstallLayout
         Root = Path.GetFullPath(root);
     }
 
+    /// <summary>
+    /// A running app lives in <c>{root}/app-{version}</c>. Returns the install root when the layout
+    /// around <paramref name="appDirectory"/> looks like a managed installation, otherwise null so
+    /// an unpacked ZIP run never tries to take part in the update protocol.
+    /// </summary>
+    public static string? TryFindRootFromAppDirectory(string appDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(appDirectory)) return null;
+        string full = Path.GetFullPath(appDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string? parent = Path.GetDirectoryName(full);
+        if (string.IsNullOrEmpty(parent)) return null;
+        if (!Path.GetFileName(full).StartsWith("app-", StringComparison.OrdinalIgnoreCase)) return null;
+        return File.Exists(Path.Combine(parent, "current.json")) ? parent : null;
+    }
+
     private string CurrentPath => Path.Combine(Root, "current.json");
     private string PreviousPath => Path.Combine(Root, "previous.json");
     public string JournalPath => Path.Combine(Root, "update.log");

@@ -134,7 +134,7 @@ public sealed class UpdateManifestVerifier
     }
 
     /// <summary>Serializes the JSON object with sorted property names, excluding "signature".</summary>
-    internal static byte[] CanonicalBytes(JsonElement root)
+    public static byte[] CanonicalBytes(JsonElement root)
     {
         var builder = new MemoryStream();
         using (var writer = new Utf8JsonWriter(builder))
