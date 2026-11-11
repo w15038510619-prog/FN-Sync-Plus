@@ -72,6 +72,23 @@ namespace FNSyncPlus.Tests
                 return _failed == 0 ? 0 : 1;
             }
 
+            if (args.Contains("--capacity-tests"))
+            {
+                string capacityRoot = Path.Combine(Path.GetTempPath(), "FNSync_capacity_suite_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var report = await new CapacityTestSuite().RunAsync(capacityRoot);
+                    foreach (var item in report.Cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    Console.WriteLine(report.ToSummary());
+                    return report.AllPassed ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(capacityRoot)) Directory.Delete(capacityRoot, true); } catch (IOException) { }
+                }
+            }
+
             if (args.Contains("--update-tests"))
             {
                 // Standalone run of the update-engine suite only, for fast iteration.
@@ -2051,6 +2068,11 @@ namespace FNSyncPlus.Tests
                 var updateReport = await new UpdateTestSuite().RunAsync(Path.Combine(root, "update-tests"));
                 foreach (var updateCase in updateReport.Cases)
                     Assert(updateCase.Passed, updateCase.Name, updateCase.Detail);
+
+                // ==================== 容量与保留策略（阶段 3） ====================
+                var capacityReport = await new CapacityTestSuite().RunAsync(Path.Combine(root, "capacity-tests"));
+                foreach (var capacityCase in capacityReport.Cases)
+                    Assert(capacityCase.Passed, capacityCase.Name, capacityCase.Detail);
             }
             finally
             {

@@ -142,6 +142,52 @@ public sealed class VersionedManifestStore
         return snapshot;
     }
 
+    /// <summary>
+    /// Lists every committed version, oldest first, for read-only capacity and retention analysis.
+    /// Damaged or ambiguous records make the whole listing unreliable, so this throws instead of
+    /// returning a partial history that a caller might mistake for complete.
+    /// </summary>
+    public async Task<IReadOnlyList<Snapshot>> LoadAllCommittedAsync(INasStorageProvider provider, string target,
+        CancellationToken token = default)
+    {
+        string directory = DirectoryPath(target);
+        if (!await DirectoryExistsAsync(provider, directory, token).ConfigureAwait(false))
+            return Array.Empty<Snapshot>();
+        var entries = await provider.ListEntriesAsync(directory, token).ConfigureAwait(false);
+        var receipts = new List<(long sequence, string id, string name)>();
+        foreach (var entry in entries)
+        {
+            if (entry.IsDirectory || !entry.Name.StartsWith("commit-", StringComparison.Ordinal)) continue;
+            if (!TryParseReceiptName(entry.Name, out long sequence, out string id))
+                throw new InvalidDataException($"存在无法解析的提交记录：{entry.Name}");
+            receipts.Add((sequence, id, entry.Name));
+        }
+        var snapshots = new List<Snapshot>();
+        foreach (var item in receipts.OrderBy(x => x.sequence))
+        {
+            token.ThrowIfCancellationRequested();
+            byte[] receiptBytes = await ReadBytesAsync(provider, $"{directory}/{item.name}", token).ConfigureAwait(false);
+            Receipt? receipt;
+            try { receipt = JsonSerializer.Deserialize<Receipt>(receiptBytes, JsonOptions); }
+            catch (JsonException) { throw new InvalidDataException($"提交记录无效：{item.name}"); }
+            if (receipt == null || receipt.Sequence != item.sequence || receipt.Id != item.id ||
+                receipt.Sha256 is not { Length: 64 })
+                throw new InvalidDataException($"提交记录内容与文件名不一致：{item.name}");
+            string candidatePath = $"{directory}/{CandidateName(item.id)}";
+            if (!await provider.ExistsAsync(candidatePath, token).ConfigureAwait(false))
+                throw new InvalidDataException($"提交记录缺少对应清单：{item.name}");
+            byte[] bytes = await ReadBytesAsync(provider, candidatePath, token).ConfigureAwait(false);
+            if (!string.Equals(Convert.ToHexString(SHA256.HashData(bytes)), receipt.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"提交清单校验失败：{item.name}");
+            try { snapshots.Add(new Snapshot(ParseManifest(bytes), item.sequence, item.id)); }
+            catch (Exception ex) when (ex is JsonException or InvalidDataException)
+            {
+                throw new InvalidDataException($"提交清单内容无效：{item.name}");
+            }
+        }
+        return snapshots;
+    }
+
     public async Task<RestoreInspection> InspectForRestoreAsync(INasStorageProvider provider, string target, CancellationToken token = default)
     {
         var (snapshot, _, hasReceipts, hasInvalidRecords) = await ScanAsync(provider, target, token).ConfigureAwait(false);
