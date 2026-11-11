@@ -1389,7 +1389,7 @@ namespace FNSyncPlus.Tests
                 File.WriteAllText(unrelatedNew, "different unrelated content");
                 bool missingBatchRejected = false;
                 try { await versionedBackup.RunAsync(versionProvider, batchSource, batchFixture.folder); }
-                catch (InvalidDataException) { missingBatchRejected = true; }
+                catch (FNSyncPlus.Core.Services.AmbiguousRenameException) { missingBatchRejected = true; }
                 Assert(missingBatchRejected && (await versions.LoadAsync(versionProvider, batchFixture.folder))?.Id == editedBatch.Snapshot.Id,
                     "无法确认新增与消失文件关系时拒绝提交");
                 File.Delete(unrelatedNew);
@@ -1496,8 +1496,12 @@ namespace FNSyncPlus.Tests
                 File.WriteAllText(Path.Combine(ambiguousVersionSource, "new-a.txt"), "legacy active");
                 File.WriteAllText(Path.Combine(ambiguousVersionSource, "new-b.txt"), "legacy active");
                 bool versionAmbiguityRejected = false;
+                string? versionAmbiguityMessage = null;
                 try { await versionedBackup.RunAsync(versionProvider, ambiguousVersionSource, ambiguousVersionFixture.folder); }
-                catch (InvalidDataException) { versionAmbiguityRejected = true; }
+                catch (FNSyncPlus.Core.Services.AmbiguousRenameException ex) { versionAmbiguityRejected = true; versionAmbiguityMessage = ex.Message; }
+                Assert(versionAmbiguityMessage != null && versionAmbiguityMessage.Contains("new-a.txt", StringComparison.Ordinal) &&
+                    versionAmbiguityMessage.Contains("new-b.txt", StringComparison.Ordinal) && versionAmbiguityMessage.Contains("上一份备份未改变", StringComparison.Ordinal),
+                    "版本化模糊改名停止时列出候选文件并说明原备份未改变");
                 Assert(versionAmbiguityRejected && (await versions.LoadAsync(versionProvider, ambiguousVersionFixture.folder))?.Id == ambiguousVersionBase.Id,
                     "版本化同步拒绝多个同内容重命名候选");
                 var existingDuplicateFixture = await MakeLegacyAsync("versioned-existing-duplicate", 4);
@@ -1516,7 +1520,7 @@ namespace FNSyncPlus.Tests
                 File.WriteAllText(Path.Combine(existingDuplicateSource, "new.txt"), "legacy active");
                 bool existingDuplicateRejected = false;
                 try { await versionedBackup.RunAsync(versionProvider, existingDuplicateSource, existingDuplicateFixture.folder); }
-                catch (InvalidDataException) { existingDuplicateRejected = true; }
+                catch (FNSyncPlus.Core.Services.AmbiguousRenameException) { existingDuplicateRejected = true; }
                 Assert(existingDuplicateRejected && (await versions.LoadAsync(versionProvider, existingDuplicateFixture.folder))?.Id == existingDuplicateBase.Id,
                     "已有同内容文件仍存在时不猜测新文件的重命名来源");
                 async Task<bool> TestVersionedEmptyRenameAsync(bool duplicateOld)
@@ -1542,7 +1546,7 @@ namespace FNSyncPlus.Tests
                         return !duplicateOld && result.RenamedFiles == 1 && result.Snapshot.Manifest.Files.Single().OriginalRel == "new.txt" &&
                             result.Snapshot.Manifest.History.Any(h => h.OriginalRel == "old-a.txt" && h.Reason == "renamed");
                     }
-                    catch (InvalidDataException)
+                    catch (FNSyncPlus.Core.Services.AmbiguousRenameException)
                     {
                         return duplicateOld && (await versions.LoadAsync(versionProvider, folder))?.Id == before.Id;
                     }
@@ -1722,8 +1726,12 @@ namespace FNSyncPlus.Tests
                     var changed = new SyncEngine(new LongNameEngine(), new ManifestManager(), new SmbAuthService());
                     changed.LogEmitted += (_, message) => { if (message.Contains("待处理差异", StringComparison.Ordinal)) warned = true; };
                     bool stopped = false;
+                    string? stopMessage = null;
                     try { await changed.RunSyncAsync(source, target, provider, BackupStrategy.Smart, null, CancellationToken.None); }
-                    catch (InvalidDataException) { stopped = true; }
+                    catch (InvalidDataException ex) { stopped = true; stopMessage = ex.Message; }
+                    catch (FNSyncPlus.Core.Services.AmbiguousRenameException ex) { stopped = true; stopMessage = ex.Message; }
+                    Assert(stopMessage != null && stopMessage.Contains("无法唯一确认", StringComparison.Ordinal),
+                        $"模糊改名停止时说明原因: {suffix}");
                     var manifest = await manifestManager.LoadManifestAsync(provider, target);
                     return stopped && warned &&
                         manifest.Files.Any(f => f.OriginalRel == "old-a.txt") &&
@@ -2832,7 +2840,7 @@ namespace FNSyncPlus.Tests
             File.WriteAllText(Path.Combine(source, "uncertain.txt"), "different content");
             bool ambiguousRejected = false;
             try { await new ExperimentalVersionedBackup().RunAsync(provider, source, target, strategy: BackupStrategy.Mirror, mirrorDeletionEnabled: true); }
-            catch (InvalidDataException) { ambiguousRejected = true; }
+            catch (FNSyncPlus.Core.Services.AmbiguousRenameException) { ambiguousRejected = true; }
             Assert(ambiguousRejected && (await versions.LoadAsync(provider, target))?.Id == first.Id &&
                 File.Exists(Path.Combine(root, target, "current", "remove.txt")) && provider.DeleteCalls == 0,
                 "镜像遇到无法确认的新增与消失文件时保留旧版本和当前文件");

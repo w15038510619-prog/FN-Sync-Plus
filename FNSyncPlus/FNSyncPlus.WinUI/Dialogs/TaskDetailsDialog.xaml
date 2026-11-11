@@ -82,6 +82,11 @@
                         <TextBlock Text="{x:Bind ViewModel.FailedFilesText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource SystemFillColorCriticalBrush}" FontWeight="Bold" />
                     </Border>
                 </StackPanel>
+
+                <!-- 无法唯一确认的改名差异：上一份备份保留，等待用户检查 -->
+                <InfoBar IsOpen="True" Severity="Warning" IsClosable="False"
+                         Visibility="{x:Bind GetPendingDifferencesVisibility(ViewModel.HasPendingDifferences), Mode=OneWay}"
+                         Message="{x:Bind ViewModel.PendingDifferenceNotice, Mode=OneWay}" />
             </StackPanel>
         </Border>
 

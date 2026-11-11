@@ -207,6 +207,7 @@ public sealed class ExperimentalVersionedBackup
             var additions = baselines.Values.Where(source => !previous.ContainsKey(source.RelativePath)).ToList();
             var renames = new Dictionary<string, ManifestFileEntry>(StringComparer.OrdinalIgnoreCase);
             var matchedOld = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var ambiguousGroups = new List<AmbiguousRenameException.Group>();
             foreach (var group in missing.GroupBy(old => (old.Size, Hash: old.Sha256.ToUpperInvariant())))
             {
                 var matches = additions.Where(source => source.Size == group.Key.Size &&
@@ -217,14 +218,23 @@ public sealed class ExperimentalVersionedBackup
                 int currentContentCount = baselines.Values.Count(source => source.Size == group.Key.Size &&
                     string.Equals(source.Sha256, group.Key.Hash, StringComparison.OrdinalIgnoreCase));
                 if (matches.Count != 1 || group.Count() != 1 || oldContentCount != 1 || currentContentCount != 1)
-                    throw new InvalidDataException("多个同内容文件无法唯一确认重命名，原备份未改变");
+                {
+                    ambiguousGroups.Add(new AmbiguousRenameException.Group(
+                        group.Count() == 1 ? group.Single().OriginalRel : string.Join(", ", group.Select(old => old.OriginalRel)),
+                        group.Key.Size, group.Key.Hash, matches.Select(source => source.RelativePath).ToList()));
+                    continue;
+                }
                 var old = group.Single();
                 renames.Add(matches[0].RelativePath, old);
                 matchedOld.Add(old.OriginalRel);
             }
             var deleted = missing.Where(old => !matchedOld.Contains(old.OriginalRel)).ToList();
-            if (deleted.Count > 0 && additions.Any(source => !renames.ContainsKey(source.RelativePath)))
-                throw new InvalidDataException("新增和消失的文件无法确认是否为重命名，原备份未改变");
+            var unmatchedAdditions = additions.Where(source => !renames.ContainsKey(source.RelativePath)).Select(source => source.RelativePath).ToList();
+            if (ambiguousGroups.Count > 0 || (deleted.Count > 0 && unmatchedAdditions.Count > 0))
+            {
+                var difference = new AmbiguousRenameException(string.Empty, ambiguousGroups, unmatchedAdditions);
+                throw new AmbiguousRenameException(difference.BuildUserSummary(), ambiguousGroups, unmatchedAdditions);
+            }
 
             var preparedFiles = new List<SourceFile>();
             var nextFiles = new List<ManifestFileEntry>();

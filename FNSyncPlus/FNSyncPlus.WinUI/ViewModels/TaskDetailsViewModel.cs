@@ -117,6 +117,12 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _manifestStatusNotice = string.Empty;
 
         [ObservableProperty]
+        private bool _hasPendingDifferences;
+
+        [ObservableProperty]
+        private string _pendingDifferenceNotice = string.Empty;
+
+        [ObservableProperty]
         private bool _hasLongNameMappings;
 
         [ObservableProperty]
@@ -185,6 +191,11 @@ namespace FNSyncPlus.WinUI.ViewModels
             UnchangedFilesText = $"跳过未改: {UnchangedFiles}";
             LongNameFilesText = $"超长映射: {LongNameFiles}";
             FailedFilesText = $"失败: {FailedFiles}";
+
+            // 无法唯一确认的改名差异需要用户检查；文本在同步失败时已由 TaskManager 生成。
+            HasPendingDifferences = string.Equals(task.LastSyncStatus, "待处理改名差异", StringComparison.Ordinal) &&
+                !string.IsNullOrWhiteSpace(task.LastError);
+            PendingDifferenceNotice = HasPendingDifferences ? task.LastError! : string.Empty;
 
             // 1. 加载日志 (支持磁盘持久化与实时流)
             await LoadLogsAsync(task.TaskId);

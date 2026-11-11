@@ -1006,6 +1006,19 @@ namespace FNSyncPlus.Core.Services
             {
                 task.State = TaskSyncState.Error;
                 task.LastFailureTime = DateTime.Now;
+                if (ex is AmbiguousRenameException ambiguous)
+                {
+                    // 需要用户检查的差异不是故障：上一份备份完整保留，等待人工整理后重新同步。
+                    task.LastError = ambiguous.BuildUserSummary();
+                    task.LastSyncStatus = "待处理改名差异";
+                    task.CurrentFile = "待处理改名差异：上一份备份未改变";
+                    if (task.LastScannedFiles == 0 && syncEngine.LastScannedCount > 0) task.LastScannedFiles = syncEngine.LastScannedCount;
+                    task.LastFailedFiles = 0;
+                    AppendTaskLog(task, "WARN", task.LastError);
+                    _settings.Save();
+                    TaskStateChanged?.Invoke(task);
+                    return;
+                }
                 task.LastError = ex.Message;
                 if (task.LastScannedFiles == 0 && syncEngine.LastScannedCount > 0)
                 {
