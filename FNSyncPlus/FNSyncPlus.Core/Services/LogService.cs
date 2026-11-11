@@ -25,6 +25,8 @@ namespace FNSyncPlus.Core.Services
 
         private readonly string _baseLogsDir;
         private readonly ConcurrentDictionary<string, ConcurrentQueue<TaskLogEntry>> _inMemoryRecentLogs = new();
+        private readonly ConcurrentDictionary<long, Task> _pendingTaskWrites = new();
+        private long _nextTaskWriteId;
         private readonly object _fileWriteLock = new();
 
         private static readonly Regex SensitivePatterns = new(
@@ -84,8 +86,15 @@ namespace FNSyncPlus.Core.Services
             }
 
             // 2. 异步持久化到磁盘
-            _ = Task.Run(() => WriteTaskLogToFile(entry));
+            long writeId = Interlocked.Increment(ref _nextTaskWriteId);
+            Task write = Task.Run(() => WriteTaskLogToFile(entry));
+            _pendingTaskWrites[writeId] = write;
+            _ = write.ContinueWith(completed => { _pendingTaskWrites.TryRemove(writeId, out _); },
+                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
+
+        /// <summary>Waits for task-log writes already queued; the writer does not report disk-write failures.</summary>
+        public Task FlushPendingTaskLogsAsync() => Task.WhenAll(_pendingTaskWrites.Values.ToArray());
 
         /// <summary>
         /// 便捷任务日志记录

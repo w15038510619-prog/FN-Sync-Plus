@@ -264,6 +264,22 @@ namespace FNSyncPlus.Tests
                     logPersisted = diskLog.GetTaskLogs("isolated-log-check").Any(x => x.Message == "isolated log marker");
                 }
                 Assert(logPersisted, "隔离任务日志写入测试目录后可由新实例读取");
+                var shutdownLog = new LogService(Path.Combine(root, "shutdown-log-check"));
+                object writeGate = typeof(LogService).GetField("_fileWriteLock", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(shutdownLog)!;
+                using var shutdownManager = new TaskManager(AppSettings.CreateInMemory(), new SmbAuthService(), shutdownLog);
+                bool flushWasPending, shutdownTimedOut;
+                System.Threading.Monitor.Enter(writeGate);
+                try
+                {
+                    shutdownLog.LogTask(new TaskLogEntry { TaskId = "shutdown-check", Message = "pending log marker" });
+                    flushWasPending = !shutdownLog.FlushPendingTaskLogsAsync().IsCompleted;
+                    shutdownTimedOut = !shutdownManager.ShutdownAsync(TimeSpan.FromMilliseconds(300)).GetAwaiter().GetResult();
+                }
+                finally { System.Threading.Monitor.Exit(writeGate); }
+                bool stoppedAfterLog = await shutdownManager.ShutdownAsync(TimeSpan.FromSeconds(10));
+                bool shutdownLogPersisted = new LogService(shutdownLog.LogsDirectory).GetTaskLogs("shutdown-check").Any(x => x.Message == "pending log marker");
+                Assert(flushWasPending && shutdownTimedOut && stoppedAfterLog && shutdownLogPersisted,
+                    "正常退出等待已排队日志写入，超时不误报退出完成");
                 string previewDir = new string('中', 90);
                 string previewName = new string('中', 98) + "ab.txt";
                 string previewObject = ".fnsync/objects/obj-" + Guid.NewGuid().ToString("N");

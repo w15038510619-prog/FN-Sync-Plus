@@ -1449,9 +1449,13 @@ namespace FNSyncPlus.Core.Services
         {
             if (timeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
             Task completion = BeginShutdown();
-            if (await Task.WhenAny(completion, Task.Delay(timeout)).ConfigureAwait(false) != completion) return false;
+            Task deadline = Task.Delay(timeout);
+            if (await Task.WhenAny(completion, deadline).ConfigureAwait(false) != completion) return false;
             try { await completion.ConfigureAwait(false); }
             catch (OperationCanceledException) { }
+            Task logs = _logService.FlushPendingTaskLogsAsync();
+            if (await Task.WhenAny(logs, deadline).ConfigureAwait(false) != logs) return false;
+            await logs.ConfigureAwait(false);
             return true;
         }
 

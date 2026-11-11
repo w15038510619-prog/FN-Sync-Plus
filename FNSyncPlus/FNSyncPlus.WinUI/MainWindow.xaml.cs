@@ -221,7 +221,7 @@ namespace FNSyncPlus.WinUI
             try
             {
                 ShowFromTray();
-                AppTitleText.Text = "正在停止任务，请稍候…";
+                AppTitleText.Text = "正在停止任务并处理日志，请稍候…";
                 bool stopped = await AppServices.GetService<TaskManager>().ShutdownAsync(TimeSpan.FromSeconds(15));
                 if (stopped)
                 {
@@ -231,8 +231,8 @@ namespace FNSyncPlus.WinUI
                 }
                 var dialog = new ContentDialog
                 {
-                    Title = "仍有任务正在停止",
-                    Content = "尚未确认所有任务已停止。请稍后重试退出；新的同步任务不会再启动。",
+                    Title = "任务或日志尚未处理完",
+                    Content = "尚未确认任务停止或待写日志处理完成。请稍后重试退出；新的同步任务不会再启动。",
                     CloseButtonText = "知道了",
                     XamlRoot = Content.XamlRoot
                 };
@@ -245,7 +245,7 @@ namespace FNSyncPlus.WinUI
             }
             finally
             {
-                if (!_shutdownComplete && AppTitleText.Text == "正在停止任务，请稍候…") AppTitleText.Text = priorTitle;
+                if (!_shutdownComplete && AppTitleText.Text == "正在停止任务并处理日志，请稍候…") AppTitleText.Text = priorTitle;
                 _shutdownInProgress = false;
             }
         }
