@@ -90,6 +90,12 @@ namespace FNSyncPlus.Core.Services
             _manifestManager = manifestManager;
         }
 
+        /// <summary>Maps a manifest relative path onto the host separator (POSIX hosts use '/').</summary>
+        private static string ToLocalSeparators(string relativePath) =>
+            OperatingSystem.IsWindows()
+                ? relativePath.Replace('/', '\\')
+                : relativePath.Replace('\\', '/');
+
         private void Log(string level, string message)
         {
             LogEmitted?.Invoke(level, $"[{DateTime.Now:HH:mm:ss}] [{level}] {message}");
@@ -420,7 +426,7 @@ namespace FNSyncPlus.Core.Services
                 foreach (var d in manifest.Directories)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    string dirTarget = Path.Combine(longLocal, d.OriginalRel.Replace('/', '\\'));
+                    string dirTarget = Path.Combine(longLocal, ToLocalSeparators(d.OriginalRel));
                     bool existed = Directory.Exists(dirTarget);
                     try
                     {
@@ -445,7 +451,7 @@ namespace FNSyncPlus.Core.Services
             {
                 if (!PathHelper.IsSafeRelativePath(file.StoredRel))
                     throw new InvalidDataException($"清单包含不安全的存储路径: {file.StoredRel}");
-                nasFiles.Add(new FileInfo(Path.Combine(longNas, file.StoredRel.Replace('/', '\\'))));
+                nasFiles.Add(new FileInfo(Path.Combine(longNas, ToLocalSeparators(file.StoredRel))));
             }
 
             report.TotalFiles = nasFiles.Count;
@@ -489,7 +495,7 @@ namespace FNSyncPlus.Core.Services
                     continue;
                 }
 
-                string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
+                string targetLocalFull = Path.Combine(longLocal, ToLocalSeparators(targetRel));
                 string targetDir = Path.GetDirectoryName(targetLocalFull)!;
 
                 // 冲突处理
@@ -711,7 +717,7 @@ namespace FNSyncPlus.Core.Services
                 string dirRel = PathHelper.NormalizeRelPath(dir.OriginalRel);
                 if (PathHelper.IsSafeRelativePath(dir.OriginalRel))
                 {
-                    string targetDir = Path.Combine(longLocal, dirRel.Replace('/', '\\'));
+                    string targetDir = Path.Combine(longLocal, ToLocalSeparators(dirRel));
                     if (!Directory.Exists(targetDir))
                     {
                         EnsureSafeRestoreDirectory(longLocal, targetDir);
@@ -742,7 +748,7 @@ namespace FNSyncPlus.Core.Services
                     continue;
                 }
 
-                string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
+                string targetLocalFull = Path.Combine(longLocal, ToLocalSeparators(targetRel));
                 string targetDir = Path.GetDirectoryName(targetLocalFull)!;
 
                 if (File.Exists(targetLocalFull))
@@ -937,7 +943,7 @@ namespace FNSyncPlus.Core.Services
                     continue;
                 }
                 string targetRel = PathHelper.NormalizeRelPath(fileEntry.OriginalRel);
-                string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
+                string targetLocalFull = Path.Combine(longLocal, ToLocalSeparators(targetRel));
                 string targetDir = Path.GetDirectoryName(targetLocalFull)!;
                 string tempRestorePath = Path.Combine(targetDir, $".fnsync_rst_retry_{Guid.NewGuid():N}.tmp");
                 try

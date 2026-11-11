@@ -197,6 +197,34 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
         }
 
+        [ObservableProperty]
+        private string _restoreSuiteSummary = string.Empty;
+
+        [RelayCommand]
+        public async Task RunRestoreCenterSuiteAsync()
+        {
+            IsBusy = true;
+            ExecutionLogs.Clear();
+            RestoreSuiteSummary = string.Empty;
+            var progress = new Progress<string>(msg => ExecutionLogs.Add($"[{DateTime.Now:HH:mm:ss}] {msg}"));
+            try
+            {
+                StatusText = "正在本地隔离 MockNas 上运行恢复中心自动化套件（不访问真实 NAS）...";
+                var report = await _engine.RunRestoreCenterSuiteAsync(progress);
+                foreach (var item in report.Cases)
+                    ExecutionLogs.Add($"{(item.Passed ? "PASS" : "FAIL")} [{item.Category}] {item.Name} :: {item.Detail}");
+                RestoreSuiteSummary = report.ToSummary();
+                StatusText = report.AllPassed
+                    ? $"恢复中心套件通过：{report.Passed} 项，用时 {report.Duration.TotalSeconds:F1}s"
+                    : $"恢复中心套件有 {report.Failed} 项失败，详见下方列表。";
+            }
+            catch (Exception ex)
+            {
+                StatusText = $"恢复中心套件执行异常: {ex.Message}";
+            }
+            finally { IsBusy = false; }
+        }
+
         [RelayCommand]
         public async Task ExportReportAsync()
         {

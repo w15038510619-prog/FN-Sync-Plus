@@ -56,6 +56,13 @@
                             <TextBlock Text="导出测试报告" FontSize="12" />
                         </StackPanel>
                     </Button>
+
+                    <Button Command="{x:Bind ViewModel.RunRestoreCenterSuiteCommand}" Padding="12,7" ToolTipService.ToolTip="在本地隔离目录运行名称、历史、损坏、安全与取消场景的恢复套件">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE777;" FontSize="12" />
+                            <TextBlock Text="恢复中心套件" FontSize="12" />
+                        </StackPanel>
+                    </Button>
                 </StackPanel>
             </Grid>
         </Border>

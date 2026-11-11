@@ -215,6 +215,23 @@ namespace FNSyncPlus.Core.Services
         /// <summary>
         /// 运行本地隔离环境全流程模拟测试
         /// </summary>
+        /// <summary>
+        /// Runs the automated restore-center suite (names, history, corruption, safety, cancel) on a
+        /// disposable local mock store. Never touches a real NAS; each case verifies SHA-256 itself.
+        /// </summary>
+        public async Task<RestoreSuiteReport> RunRestoreCenterSuiteAsync(IProgress<string>? progress = null, CancellationToken token = default)
+        {
+            string runDir = Directory.CreateTempSubdirectory("FNSyncPlus_RestoreSuite_").FullName;
+            string mockNasDir = Path.Combine(runDir, "MockNas");
+            string workDir = Path.Combine(runDir, "Work");
+            Directory.CreateDirectory(workDir);
+            progress?.Report("恢复中心套件：使用本地隔离 MockNas 目录，不访问真实 NAS。");
+            await using var provider = new SmbStorageProvider(rootUncPath: mockNasDir);
+            Directory.CreateDirectory(mockNasDir);
+            var suite = new RestoreCenterTestSuite();
+            return await suite.RunAsync(provider, workDir, progress, token);
+        }
+
         public async Task<TestLabReport> RunLocalSimulationTestAsync(IProgress<string>? progress = null)
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
