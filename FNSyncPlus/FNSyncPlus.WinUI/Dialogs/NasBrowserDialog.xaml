@@ -99,7 +99,7 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBox x:Name="TxtCustomPersonalRoot" Grid.Column="0" PlaceholderText="已开通？输入路径 (如 \\192.168.8.120\个人备份)" FontSize="11" />
+                                <TextBox x:Name="TxtCustomPersonalRoot" Grid.Column="0" PlaceholderText="已开通？输入路径 (如 \\192.168.1.100\个人备份)" FontSize="11" />
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
                                     <Button Click="BtnApplyCustomPersonalRoot_Click" Style="{ThemeResource AccentButtonStyle}">
                                         <TextBlock Text="验证并使用" FontSize="11" />

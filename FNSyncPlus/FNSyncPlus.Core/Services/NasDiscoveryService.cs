@@ -37,7 +37,7 @@ namespace FNSyncPlus.Core.Services
         {
             var discoveredMap = new ConcurrentDictionary<string, DiscoveredDevice>(StringComparer.OrdinalIgnoreCase);
 
-            // 1. 如果传入了已知 IP（例如历史记录中的 192.168.8.120），优先快速验证
+            // 1. 如果传入了已知地址，优先快速验证
             if (!string.IsNullOrWhiteSpace(knownIp))
             {
                 var known = await ProbeSingleIpAsync(knownIp.Trim(), cancellationToken).ConfigureAwait(false);
@@ -127,22 +127,11 @@ namespace FNSyncPlus.Core.Services
                 {
                     if (addr.Address.AddressFamily == AddressFamily.InterNetwork)
                     {
-                        string ip = addr.Address.ToString();
-                        string prefix = ip.Substring(0, ip.LastIndexOf('.') + 1);
-                        // 添加常用默认 NAS IP (如 .1, .120, .200, .250, .254)
-                        ipsToProbe.Add(prefix + "1");
-                        ipsToProbe.Add(prefix + "120");
-                        ipsToProbe.Add(prefix + "200");
-                        ipsToProbe.Add(prefix + "254");
+                        foreach (string candidate in BuildSubnetProbeTargets(addr.Address, addr.IPv4Mask))
+                            ipsToProbe.Add(candidate);
                     }
                 }
             }
-
-            // 补充常见家庭/办公网段探测目标
-            ipsToProbe.Add("192.168.8.120");
-            ipsToProbe.Add("192.168.1.120");
-            ipsToProbe.Add("192.168.0.120");
-            ipsToProbe.Add("192.168.31.120");
 
             var probeTasks = ipsToProbe.Select(async ip =>
             {
@@ -157,6 +146,31 @@ namespace FNSyncPlus.Core.Services
             await Task.WhenAll(probeTasks).ConfigureAwait(false);
         }
 
+        private static IReadOnlyList<string> BuildSubnetProbeTargets(IPAddress address, IPAddress? mask)
+        {
+            if (address.AddressFamily != AddressFamily.InterNetwork || IPAddress.IsLoopback(address) || mask?.AddressFamily != AddressFamily.InterNetwork)
+                return Array.Empty<string>();
+            byte[] local = address.GetAddressBytes(), subnetMask = mask.GetAddressBytes();
+            if (subnetMask.All(b => b == 0)) return Array.Empty<string>();
+            var targets = new List<string>();
+            foreach (byte last in new byte[] { 1, 120, 200, 254 })
+            {
+                byte[] candidate = (byte[])local.Clone();
+                candidate[3] = last;
+                bool sameSubnet = true, isNetwork = true, isBroadcast = true;
+                for (int i = 0; i < candidate.Length; i++)
+                {
+                    sameSubnet &= (candidate[i] & subnetMask[i]) == (local[i] & subnetMask[i]);
+                    int hostMask = 0xff ^ subnetMask[i];
+                    isNetwork &= (candidate[i] & hostMask) == 0;
+                    isBroadcast &= (candidate[i] & hostMask) == hostMask;
+                }
+                if (sameSubnet && !isNetwork && !isBroadcast && !candidate.SequenceEqual(local))
+                    targets.Add(new IPAddress(candidate).ToString());
+            }
+            return targets;
+        }
+
         public async Task<DiscoveredDevice?> ProbeSingleIpAsync(string ip, CancellationToken cancellationToken = default)
         {
             bool hasSmb = await TestTcpPortAsync(ip, 445, 600, cancellationToken).ConfigureAwait(false);
@@ -164,7 +178,7 @@ namespace FNSyncPlus.Core.Services
 
             if (!hasSmb && !hasFnWeb) return null;
 
-            string name = hasFnWeb ? $"飞牛 NAS ({ip})" : $"网络设备 ({ip})";
+            string name = hasFnWeb ? $"可能的飞牛设备（{ip}，端口已开放）" : $"网络设备 ({ip})";
             return new DiscoveredDevice
             {
                 Name = name,

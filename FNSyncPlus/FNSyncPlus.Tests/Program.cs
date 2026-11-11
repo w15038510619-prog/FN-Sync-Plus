@@ -203,6 +203,16 @@ namespace FNSyncPlus.Tests
             try
             {
                 await TestSingleInstanceAsync();
+                var probeTargetMethod = typeof(NasDiscoveryService).GetMethod("BuildSubnetProbeTargets", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+                string[] ProbeTargets(string address, string mask) => ((System.Collections.Generic.IReadOnlyList<string>)probeTargetMethod.Invoke(null,
+                    new object[] { System.Net.IPAddress.Parse(address), System.Net.IPAddress.Parse(mask) })!).ToArray();
+                Assert(ProbeTargets("192.0.2.130", "255.255.255.128").SequenceEqual(new[] { "192.0.2.200", "192.0.2.254" }) &&
+                    ProbeTargets("192.0.2.117", "255.255.255.240").SequenceEqual(new[] { "192.0.2.120" }),
+                    "自动探测地址限制在网卡实际子网内");
+                Assert(!ProbeTargets("192.0.2.120", "255.255.255.0").Contains("192.0.2.120") &&
+                    ProbeTargets("192.0.2.122", "255.255.255.248").Length == 0 &&
+                    ProbeTargets("192.0.2.5", "0.0.0.0").Length == 0 && ProbeTargets("127.0.0.1", "255.0.0.0").Length == 0,
+                    "自动探测跳过本机、网络地址、广播地址和未知掩码");
                 Assert(DesktopStartupProfileSelector.Select(Array.Empty<string>()) == DesktopStartupProfile.VersionedBeta &&
                     DesktopStartupProfileSelector.Select(new[] { "--versioned-beta" }) == DesktopStartupProfile.VersionedBeta &&
                     DesktopStartupProfileSelector.Select(new[] { "--isolated-test-session" }) == DesktopStartupProfile.IsolatedTest &&

@@ -298,7 +298,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         {
             if (string.IsNullOrWhiteSpace(customPath))
             {
-                CustomPathErrorMessage = "路径不能为空。请输入如 \\\\192.168.8.120\\个人备份 的完整 UNC 路径。";
+                CustomPathErrorMessage = "路径不能为空。请输入如 \\\\192.168.1.100\\个人备份 的完整 UNC 路径。";
                 return false;
             }
 
