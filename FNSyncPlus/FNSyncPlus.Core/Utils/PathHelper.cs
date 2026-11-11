@@ -133,6 +133,10 @@ namespace FNSyncPlus.Core.Utils
         {
             if (string.IsNullOrWhiteSpace(path)) return path;
 
+            // The \\?\ prefix and backslash separators are Windows-only. POSIX paths must be
+            // returned untouched (tests and tooling run on Linux CI).
+            if (!OperatingSystem.IsWindows()) return path;
+
             // Extended Windows paths do not normalize forward slashes. Keep drive roots intact.
             path = path.Replace('/', '\\');
             bool driveRoot = path.Length >= 3 && char.IsLetter(path[0]) && path[1] == ':' && path[2..].All(c => c == '\\');

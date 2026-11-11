@@ -1028,6 +1028,19 @@ namespace FNSyncPlus.Core.Services
         }
 
         #region 凭据 DPAPI 安全保存与读取
+        /// <summary>Windows DPAPI is the only supported credential protection for this app.</summary>
+        public static bool IsCredentialProtectionAvailable
+        {
+            get
+            {
+                try { _ = ProtectedData.Protect(new byte[] { 0 }, Entropy, DataProtectionScope.CurrentUser); return true; }
+                catch (PlatformNotSupportedException) { return false; }
+                catch (System.Security.Cryptography.CryptographicException) { return false; }
+                catch (DllNotFoundException) { return false; }
+                catch (EntryPointNotFoundException) { return false; }
+            }
+        }
+
 
         private static string GetCredentialStoragePath()
         {
