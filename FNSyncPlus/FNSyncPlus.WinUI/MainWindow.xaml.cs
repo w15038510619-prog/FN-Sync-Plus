@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
 using FNSyncPlus.WinUI.Dialogs;
@@ -21,7 +22,6 @@ namespace FNSyncPlus.WinUI
         private readonly AppWindow _appWindow;
         private readonly LogService _logService;
         private TrayIcon? _trayIcon;
-        private bool _explicitExit;
         private bool _shutdownInProgress;
         private bool _shutdownComplete;
         private int _logWarningQueued;
@@ -195,11 +195,7 @@ namespace FNSyncPlus.WinUI
             {
                 _trayIcon = new TrayIcon(
                     () => DispatcherQueue.TryEnqueue(ShowFromTray),
-                    () => DispatcherQueue.TryEnqueue(() =>
-                {
-                    _explicitExit = true;
-                    Close();
-                }));
+                    () => DispatcherQueue.TryEnqueue(async () => await RequestShutdownAsync()));
             }
             catch (Exception ex)
             {
@@ -209,17 +205,22 @@ namespace FNSyncPlus.WinUI
             }
         }
 
-        private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+        private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
         {
             if (_shutdownComplete) return;
-            if (!_explicitExit && _settings.MinimizeToTray && _trayIcon != null)
+            args.Cancel = true;
+            if (_settings.MinimizeToTray && _trayIcon != null)
             {
-                args.Cancel = true;
                 try { sender.Hide(); }
                 catch (Exception ex) { App.LogCrashException(ex, "MainWindow.HideToTray"); }
                 return;
             }
-            args.Cancel = true;
+            _ = RequestShutdownAsync();
+        }
+
+        private async Task RequestShutdownAsync()
+        {
+            if (_shutdownComplete) return;
             if (_shutdownInProgress) return;
             _shutdownInProgress = true;
             string priorTitle = AppTitleText.Text;
