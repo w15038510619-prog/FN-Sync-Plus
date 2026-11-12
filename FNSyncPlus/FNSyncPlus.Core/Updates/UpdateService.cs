@@ -4,7 +4,7 @@ using FNSyncPlus.Core.Services;
 
 namespace FNSyncPlus.Core.Updates;
 
-public sealed record UpdateInstallPlan(bool Ready, string Executable, string Arguments, string Reason);
+public sealed record UpdateInstallPlan(bool Ready, string Executable, string Arguments, string Reason, string OperationId = "");
 
 /// <summary>Check result that keeps the verified release, so a later download installs exactly the
 /// release that was checked instead of whatever the server serves on the second request.</summary>
@@ -179,6 +179,16 @@ public sealed class UpdateService
                 null, null, Log);
         }
 
+        // A version whose last handoff ended UNKNOWN is blocked for automatic and manual
+        // reinstalls alike: unknown never degrades into "assume failure, try again".
+        if (Settings.DiagnosisRequiredVersions.Contains(release.Version, StringComparer.Ordinal))
+        {
+            attempt.Lease!.Release();
+            return new UpdateInstallSession(new InstallReadiness(InstallDecision.Refuse,
+                $"版本 {release.Version} 的上次更新以未知状态结束，已阻止自动重装，请人工诊断后清除阻止标记"),
+                refuse with { Reason = "该版本需要人工诊断" }, null, null, Log);
+        }
+
         string descriptorPath = DescriptorPath(release.Version);
         try
         {
@@ -191,9 +201,13 @@ public sealed class UpdateService
                 $"写入更新交接描述失败，已恢复备份：{ex.Message}"), refuse, null, null, Log);
         }
 
+        // One operation id per attempt: updater journal lines, the durable operation state file
+        // and the watchdog verdicts all carry it, so historical evidence can never leak into
+        // this attempt.
+        string operationId = Guid.NewGuid().ToString("N");
         string arguments = $"--layout \"{_layout.Root}\" --apply --release \"{descriptorPath}\" " +
-                           $"--wait-pid {Environment.ProcessId} --wait-seconds 180";
-        var plan = new UpdateInstallPlan(true, updater, arguments, "备份已安全停止，可以安装");
+                           $"--wait-pid {Environment.ProcessId} --wait-seconds 180 --operation-id {operationId}";
+        var plan = new UpdateInstallPlan(true, updater, arguments, "备份已安全停止，可以安装", operationId);
         return new UpdateInstallSession(new InstallReadiness(InstallDecision.Proceed, "备份已安全停止，可以安装"),
             plan, release, attempt.Lease, Log);
 
@@ -232,23 +246,70 @@ public sealed class UpdateService
                 error = "更新器进程未能启动，已恢复备份任务";
                 return false;
             }
-            session.RecordUpdaterProcess(process.Id);
 
-            // Supervise the real process: the lease is released only when the watchdog proves
-            // the updater gave up. The journal baseline excludes everything written before this
-            // handoff, so historical lines cannot be mistaken for this attempt's outcome.
+            // Identity is more than a PID: start time (and path when readable) pins it against
+            // PID reuse, and the operation id scopes every piece of evidence to this attempt.
+            var identity = UpdaterProcessIdentity.Capture(process, session.OperationId);
+            session.RecordUpdaterProcess(identity);
+
+            // Durable operation record: WaitingForAppExit from the moment the updater exists.
+            // The updater itself transitions it to Installing/Installed/RolledBack/Abandoned/
+            // FailedBeforeInstall; a crash leaves the last durable state readable after reboot.
+            string preVersion = _layout?.ActiveVersion ?? "";
+            string targetVersion = session.Release?.Version ?? "";
+            var stateStore = _layout == null ? null : new UpdateOperationStateStore(_layout.Root);
+            try
+            {
+                stateStore?.Save(new UpdateOperationState
+                {
+                    OperationId = session.OperationId,
+                    Version = targetVersion,
+                    PreviousVersion = preVersion,
+                    UpdaterPid = identity.ProcessId,
+                    UpdaterStartUtcTicks = identity.StartTimeUtc.Ticks,
+                    UpdaterPath = identity.ExecutablePath,
+                    Status = InstallOperationStatus.WaitingForAppExit,
+                });
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // The state file is the watchdog's primary evidence. If it cannot even be written,
+                // the handoff would become unverifiable — refuse it instead of degrading silently.
+                session.Abort($"无法写入更新操作状态文件：{ex.Message}");
+                try { if (!process.HasExited) process.Kill(); } catch { }
+                error = "无法写入更新操作状态文件，已恢复备份任务";
+                return false;
+            }
+
+            // Supervise the real process: the lease is released only when the watchdog proves the
+            // updater gave up AND the installation is provably untouched. Unknown never releases.
             string journalPath = _layout?.JournalPath ?? "";
             long journalBaseline = 0L;
             try { if (File.Exists(journalPath)) journalBaseline = new FileInfo(journalPath).Length; }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            var intactness = new InstallIntactnessProbe(_layout!.Root, preVersion, targetVersion);
             var watchdog = new ProcessHandoffWatchdog(
-                updaterStillRunning: () =>
+                updaterProbe: () => identity.Probe(out _),
+                operationStatus: () =>
                 {
-                    try { return !process.HasExited; }
-                    catch (Exception) { return false; } // handle gone: treat as exited
+                    if (stateStore == null) return InstallOperationStatus.Unknown;
+                    var state = stateStore.Load(session.OperationId, out _);
+                    return state?.Status ?? InstallOperationStatus.Unknown;
                 },
-                journalTail: () => ReadJournalTail(journalPath, journalBaseline),
+                journalEvidence: () => FilterOperationEvidence(
+                    ReadJournalTail(journalPath, journalBaseline), session.OperationId),
+                installProvenIntact: () => intactness.ProveInstallNeverBegan(out _),
                 onConfirmedAbandon: reason => session.ConfirmHandoffAbandoned(reason),
+                onNeedsDiagnosis: reason =>
+                {
+                    Log(reason);
+                    if (targetVersion.Length > 0 &&
+                        !Settings.DiagnosisRequiredVersions.Contains(targetVersion, StringComparer.Ordinal))
+                    {
+                        Settings.DiagnosisRequiredVersions.Add(targetVersion);
+                        try { Save(); } catch { }
+                    }
+                },
                 log: Log,
                 initialDelay: abandonAfter ?? TimeSpan.FromMinutes(2));
             session.CommitHandOff(watchdog);
@@ -272,8 +333,84 @@ public sealed class UpdateService
         return reader.ReadToEnd();
     }
 
+    /// <summary>
+    /// Keeps only journal lines tagged with THIS operation id. Untagged lines (older updater
+    /// builds, previous attempts, foreign writes) are never admissible evidence for the current
+    /// operation, which is what stops a historical "failed"/"installed" from being misread.
+    /// </summary>
+    internal static string FilterOperationEvidence(string journalTail, string operationId)
+    {
+        if (string.IsNullOrEmpty(journalTail) || string.IsNullOrEmpty(operationId)) return "";
+        string tag = "[op " + operationId + "]";
+        var kept = new System.Text.StringBuilder();
+        foreach (string line in journalTail.Split('\n'))
+        {
+            if (line.Contains(tag, StringComparison.Ordinal))
+                kept.Append(line).Append('\n');
+        }
+        return kept.ToString();
+    }
+
+    /// <summary>
+    /// Startup reconciliation: after a crash or reboot, classify every recorded operation as
+    /// not-started / in-progress / succeeded / failed / unknown. Operations left in
+    /// WaitingForAppExit or Installing whose updater is no longer running are marked Unknown and
+    /// their version is blocked from automatic reinstall — unknown never degrades into
+    /// "assume it failed and reinstall". Nothing is rolled back or deleted here.
+    /// </summary>
+    public void ReconcileInterruptedOperations()
+    {
+        if (_layout == null) return;
+        var store = new UpdateOperationStateStore(_layout.Root);
+        IReadOnlyList<UpdateOperationState> operations;
+        try { operations = store.LoadAll(out int corrupt); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log($"更新操作状态目录无法读取（{ex.Message}），保持谨慎：不自动重装任何版本");
+            return;
+        }
+        foreach (var operation in operations)
+        {
+            if (operation.Status is not (InstallOperationStatus.WaitingForAppExit or InstallOperationStatus.Installing))
+                continue;
+            var identity = new UpdaterProcessIdentity(operation.UpdaterPid,
+                new DateTime(operation.UpdaterStartUtcTicks, DateTimeKind.Utc), operation.UpdaterPath, operation.OperationId);
+            var probe = identity.Probe(out string detail);
+            if (probe == ProcessProbeState.Running)
+            {
+                Log($"检测到仍在进行的更新操作 {operation.OperationId}（{detail}），不重复发起安装");
+                continue;
+            }
+            if (probe == ProcessProbeState.Exited)
+            {
+                store.Save(operation with
+                {
+                    Status = InstallOperationStatus.Unknown,
+                    FailureReason = "程序重启时发现更新器已退出但操作未记录结果，状态未知，需人工诊断",
+                });
+                if (operation.Version.Length > 0 &&
+                    !Settings.DiagnosisRequiredVersions.Contains(operation.Version, StringComparer.Ordinal))
+                {
+                    Settings.DiagnosisRequiredVersions.Add(operation.Version);
+                }
+                Log($"警告：更新操作 {operation.OperationId}（版本 {operation.Version}）以未知状态结束，" +
+                    "已阻止该版本的自动重装，请人工诊断安装目录后清除阻止标记");
+            }
+            else
+            {
+                Log($"更新操作 {operation.OperationId} 的更新器状态无法确认（{detail}），保持谨慎：不自动重装");
+                if (operation.Version.Length > 0 &&
+                    !Settings.DiagnosisRequiredVersions.Contains(operation.Version, StringComparer.Ordinal))
+                {
+                    Settings.DiagnosisRequiredVersions.Add(operation.Version);
+                }
+            }
+        }
+        try { Save(); } catch { }
+    }
+
     public string DescriptorPath(string version) =>
-        Path.Combine(_layout?.Root ?? Path.GetTempPath(), ".pending", $"release-{version}.json");
+        Path.Combine(_layout?.Root ?? AppStorageRoot.TempRoot(), ".pending", $"release-{version}.json");
 
     /// <summary>
     /// Acceptance seam: starts a REAL handoff from an already-signed descriptor on disk,
@@ -314,7 +451,7 @@ public sealed class UpdateService
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
     }
 
-    public string DownloadDirectory => Path.Combine(_layout?.Root ?? Path.GetTempPath(), "FNSyncPlus", ".downloads");
+    public string DownloadDirectory => Path.Combine(_layout?.Root ?? AppStorageRoot.TempRoot(), "FNSyncPlus", ".downloads");
 
     public ClientUpdateIdentity Identity() => new(Settings.MachineGroup, Settings.ReleaseBatch);
 

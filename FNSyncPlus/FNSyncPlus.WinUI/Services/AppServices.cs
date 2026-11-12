@@ -70,11 +70,14 @@ namespace FNSyncPlus.WinUI.Services
             }
             if (IsIsolatedTestSession)
             {
-                settings.IsolatedCredentialPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "FNSyncPlus", "test-session", "credentials.dat");
+                settings.IsolatedCredentialPath = Path.Combine(AppStorageRoot.LocalAppDataDir(),
+                    "test-session", "credentials.dat");
                 settings.RememberCredentials = File.Exists(settings.IsolatedCredentialPath);
-                string productionSettings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FNSyncPlus", "settings.json");
-                settings.TrustedCertThumbprints = AppSettings.ReadTrustedCertificates(productionSettings);
+                // Trusted certificate fingerprints come from the environment's own roaming
+                // settings. With an isolated test data root that file lives under the test root,
+                // so a test session can never even read the production configuration.
+                string environmentSettings = Path.Combine(AppStorageRoot.RoamingAppDataDir(), "settings.json");
+                settings.TrustedCertThumbprints = AppSettings.ReadTrustedCertificates(environmentSettings);
             }
             services.AddSingleton(settings);
 
@@ -109,16 +112,20 @@ namespace FNSyncPlus.WinUI.Services
 
             // 2. Auto update (phase 2). A managed installation is required for in-place upgrades;
             //    an unpacked ZIP run can still check but never replaces itself.
-            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             string updateSettingsPath = IsIsolatedTestSession
                 ? Path.Combine(settings.GetIsolatedLogDirectory(), "updates.json")
-                : Path.Combine(localAppData, "FNSyncPlus", "updates.json");
+                : Path.Combine(AppStorageRoot.LocalAppDataDir(), "updates.json");
             var updateSettings = UpdateService.LoadSettings(updateSettingsPath);
             // Isolation hygiene: an isolated test session must not leak even log lines into the
             // production connection log, so the update log follows the session-aware log service.
             var updateLog = (Action<string>)(message => logService.LogConnection("INFO", "[update] " + message));
             var updateService = new UpdateService(updateSettings, updateSettingsPath, AppContext.BaseDirectory, taskManager, updateLog);
             services.AddSingleton(updateService);
+            // Restart discernment: classify any interrupted handoff (state file says the updater
+            // was mid-flight when this process died) and block its version from automatic
+            // reinstall until a human diagnoses the machine. Never auto-assumes failure.
+            try { updateService.ReconcileInterruptedOperations(); }
+            catch (Exception ex) { updateLog("更新操作启动对账异常（保持谨慎，不自动重装）：" + ex.Message); }
 
             // Background checks: one loop, so checks never overlap. Not started in isolated test
             // sessions, where no network access is allowed. The shutdown coordinator is the one

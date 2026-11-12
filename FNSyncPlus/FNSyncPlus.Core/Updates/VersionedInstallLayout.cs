@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FNSyncPlus.Core.Services;
 
 namespace FNSyncPlus.Core.Updates;
 
@@ -28,6 +29,10 @@ public sealed class VersionedInstallLayout
         /// <summary>Data format the installed binaries can read. 0 means the payload did not
         /// declare it, which makes a rollback to it unsafe in a production install.</summary>
         [JsonPropertyName("supported_data_format")] public int SupportedDataFormat { get; set; }
+
+        /// <summary>Install operation that produced this pointer, or empty for pre-existing
+        /// installs. Ties the pointer to exactly one handoff for post-incident diagnosis.</summary>
+        [JsonPropertyName("operation_id")] public string OperationId { get; set; } = "";
     }
 
     public string Root { get; }
@@ -40,7 +45,7 @@ public sealed class VersionedInstallLayout
         if (string.IsNullOrWhiteSpace(root)) throw new ArgumentException("安装根目录不能为空", nameof(root));
         Root = Path.GetFullPath(root);
         DataFormatMarkerPath = dataFormatMarkerPath ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "data-format.json");
+            AppStorageRoot.LocalAppDataDir(), "data-format.json");
     }
 
     /// <summary>
@@ -106,7 +111,7 @@ public sealed class VersionedInstallLayout
     /// version starts; when it fails, the previous pointer is restored.
     /// </summary>
     public async Task<InstallOutcome> InstallAsync(string version, string payloadDirectory, Func<CancellationToken, Task<bool>> launchVerification,
-        CancellationToken token = default)
+        CancellationToken token = default, string? operationId = null)
     {
         if (!Version.TryParse(version, out _)) return new InstallOutcome(false, "", "版本号无效", false, "");
         if (!Directory.Exists(payloadDirectory)) return new InstallOutcome(false, "", "更新载荷目录不存在", false, "");
@@ -125,7 +130,7 @@ public sealed class VersionedInstallLayout
             var pointer = new Pointer
             {
                 Version = version, Directory = target, InstalledAt = DateTimeOffset.UtcNow, PayloadSha256 = payloadHash,
-                SupportedDataFormat = metadata?.SupportedDataFormat ?? 0
+                SupportedDataFormat = metadata?.SupportedDataFormat ?? 0, OperationId = operationId ?? ""
             };
             var previous = ReadPointer(CurrentPath);
             WritePointerAtomic(PreviousPath, previous);

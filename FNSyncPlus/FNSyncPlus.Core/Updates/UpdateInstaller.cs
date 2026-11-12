@@ -25,7 +25,7 @@ public sealed class UpdateInstaller
     /// install is rejected before anything is extracted.
     /// </summary>
     public async Task<ApplyOutcome> ApplyAsync(VerifiedRelease release, string workDirectory,
-        CancellationToken token = default)
+        CancellationToken token = default, string? operationId = null)
     {
         ArgumentNullException.ThrowIfNull(release);
         if (string.IsNullOrWhiteSpace(release.LocalPackagePath))
@@ -41,12 +41,12 @@ public sealed class UpdateInstaller
             _layout.Journal($"refused {release.Version}: size mismatch (expected {release.Size}, got {size})");
             return new ApplyOutcome(false, release.Version, "更新包大小与已签名清单不一致，拒绝安装", false, "");
         }
-        return await ApplyAsync(release.LocalPackagePath, release.Version, release.Sha256, workDirectory, token)
+        return await ApplyAsync(release.LocalPackagePath, release.Version, release.Sha256, workDirectory, token, operationId)
             .ConfigureAwait(false);
     }
 
     public async Task<ApplyOutcome> ApplyAsync(string packagePath, string version, string expectedSha256,
-        string workDirectory, CancellationToken token = default)
+        string workDirectory, CancellationToken token = default, string? operationId = null)
     {
         if (!Version.TryParse(version, out _)) return new ApplyOutcome(false, version, "版本号无效", false, "");
         if (!Directory.Exists(workDirectory)) Directory.CreateDirectory(workDirectory);
@@ -72,7 +72,7 @@ public sealed class UpdateInstaller
         }
 
         _layout.Journal($"applying {version} from {extracted.FileCount} files / {extracted.TotalBytes} bytes");
-        var outcome = await _layout.InstallAsync(version, extracted.PayloadDirectory, _launchVerification, token)
+        var outcome = await _layout.InstallAsync(version, extracted.PayloadDirectory, _launchVerification, token, operationId)
             .ConfigureAwait(false);
         _layout.Journal(outcome.Ok
             ? $"apply ok {version}"

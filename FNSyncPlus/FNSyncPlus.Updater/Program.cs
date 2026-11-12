@@ -86,18 +86,43 @@ internal static class Program
             return ExitUsage;
         }
 
+        // Operation-scoped evidence: when the app handed us an operation id, every journal line
+        // and every state transition is tagged with it, so the supervisor in the old process can
+        // never mistake history (or a different attempt) for this install.
+        var opStore = options.OperationId != null ? new UpdateOperationStateStore(layout.Root) : null;
+        void JournalOp(string message) =>
+            layout.Journal(options.OperationId != null ? $"[op {options.OperationId}] {message}" : message);
+        void Transition(InstallOperationStatus status, string reason, string version = "")
+        {
+            if (opStore == null || options.OperationId == null) return;
+            try
+            {
+                opStore.Transition(options.OperationId, status, reason,
+                    seed => seed with { Version = version, UpdaterPath = Environment.ProcessPath });
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // The state file is diagnostic evidence; the install protocol itself continues
+                // (the pointer swap is already atomic). A supervisor that cannot read the state
+                // falls back to journal evidence, then to the filesystem intactness proof.
+                layout.Journal($"operation state write failed: {ex.Message}");
+            }
+        }
+
         // 1. Wait for the app that requested the update to stop on its own. Never kill it: an
         //    in-flight backup commit must be allowed to finish or fail safely.
         if (options.WaitProcessId is int pid && !WaitForExit(pid, options.WaitSeconds))
         {
-            layout.Journal($"apply: app pid {pid} still running after {options.WaitSeconds}s, aborting");
+            JournalOp($"apply: app pid {pid} still running after {options.WaitSeconds}s, aborting");
+            Transition(InstallOperationStatus.Abandoned, $"主程序在 {options.WaitSeconds}s 内未退出，更新器放弃安装");
             return ExitAppStillRunning;
         }
 
         var descriptor = ReleaseDescriptor.TryLoad(options.ReleasePath);
         if (descriptor == null)
         {
-            layout.Journal("apply refused: release descriptor missing or malformed");
+            JournalOp("apply refused: release descriptor missing or malformed");
+            Transition(InstallOperationStatus.FailedBeforeInstall, "发布描述缺失或格式无效");
             Console.WriteLine("REFUSED 发布描述缺失或格式无效。");
             return ExitReleaseRejected;
         }
@@ -105,7 +130,8 @@ internal static class Program
         var verifier = PinnedUpdateKey.TryCreateVerifier(out string keyError);
         if (verifier == null)
         {
-            layout.Journal($"apply refused: no pinned update key ({keyError})");
+            JournalOp($"apply refused: no pinned update key ({keyError})");
+            Transition(InstallOperationStatus.FailedBeforeInstall, $"缺少内嵌更新公钥：{keyError}");
             Console.WriteLine($"REFUSED {keyError}");
             return ExitReleaseRejected;
         }
@@ -113,24 +139,30 @@ internal static class Program
         // 2. Re-verify the signed manifest. Everything below is derived from it, never from the
         //    caller's claims. ReleaseHandoff also refuses when the installed version is unknown,
         //    because "cannot prove it is an upgrade" must not silently allow a downgrade.
+        string? preVersion = layout.ActiveVersion;
         var handoff = ReleaseHandoff.Verify(descriptor, verifier, CurrentVersion(layout), layout.Root, DateTimeOffset.UtcNow);
         if (!handoff.Ok)
         {
-            layout.Journal($"apply refused: {handoff.Error}");
+            JournalOp($"apply refused: {handoff.Error}");
+            Transition(InstallOperationStatus.FailedBeforeInstall, handoff.Error);
             Console.WriteLine($"REFUSED {handoff.Error}");
             return ExitReleaseRejected;
         }
         var release = handoff.Release!;
-        layout.Journal($"apply {release.Version} from verified release (sha {release.ShortSha})");
+        Transition(InstallOperationStatus.WaitingForAppExit, "", release.Version);
+        JournalOp($"apply {release.Version} from verified release (sha {release.ShortSha})");
+        Transition(InstallOperationStatus.Installing, "", release.Version);
         var installer = new UpdateInstaller(layout,
             token => VerifyLaunch(layout, health, release.Version, options.HealthTimeoutSeconds, token));
         var outcome = installer.ApplyAsync(release, options.WorkDirectory ?? Path.Combine(layout.Root, ".update-work"),
-            CancellationToken.None).GetAwaiter().GetResult();
+            CancellationToken.None, options.OperationId).GetAwaiter().GetResult();
 
         if (!outcome.Ok)
         {
-            layout.Journal($"apply {release.Version} failed: {outcome.Error}");
+            JournalOp($"apply {release.Version} failed: {outcome.Error}");
             Console.WriteLine($"APPLY-FAILED {outcome.Error}");
+            Transition(outcome.RolledBack ? InstallOperationStatus.RolledBack : InstallOperationStatus.FailedBeforeInstall,
+                outcome.Error, release.Version);
             // Put the user back into a working program instead of leaving them with nothing.
             if (options.NoLaunch) return ExitInstallFailed;
             string? active = layout.ActiveVersion;
@@ -140,8 +172,32 @@ internal static class Program
         }
 
         Console.WriteLine($"APPLIED {outcome.Version}");
-        if (options.NoLaunch) return ExitOk;
-        return LaunchActive(layout, health, allowRollback: true);
+        JournalOp($"installed {release.Version} verified (pointer switched)");
+        if (options.NoLaunch)
+        {
+            Transition(InstallOperationStatus.Installed, "", release.Version);
+            return ExitOk;
+        }
+        int launchResult = LaunchActive(layout, health, allowRollback: true);
+        // Classify the final state from filesystem facts, not from the exit code alone.
+        string? activeAfter = layout.ActiveVersion;
+        if (launchResult == ExitOk)
+        {
+            Transition(InstallOperationStatus.Installed, "", release.Version);
+            JournalOp($"operation completed: {release.Version} running and healthy");
+        }
+        else if (string.Equals(activeAfter, preVersion, StringComparison.Ordinal))
+        {
+            Transition(InstallOperationStatus.RolledBack, "新版本启动失败，已回滚到上一版本", release.Version);
+            JournalOp($"launch of {release.Version} failed; pointer restored to {preVersion}");
+        }
+        else
+        {
+            Transition(InstallOperationStatus.Unknown,
+                $"新版本启动失败且未能确认回滚（当前指针 {activeAfter ?? "缺失"}），需人工诊断", release.Version);
+            JournalOp($"launch of {release.Version} failed and rollback state is unclear; manual diagnosis required");
+        }
+        return launchResult;
     }
 
     /// <summary>Version currently installed, used as the "must be newer" baseline. Unknown means the
@@ -286,6 +342,7 @@ internal static class Program
         public int HealthTimeoutSeconds { get; private set; } = 25;
         public bool NoLaunch { get; private set; }
         public bool RejectedArguments { get; private set; }
+        public string? OperationId { get; private set; }
 
         public static Options Parse(string[] args)
         {
@@ -307,6 +364,12 @@ internal static class Program
                         if (int.TryParse(Next(args, ref i), out int health)) options.HealthTimeoutSeconds = health;
                         break;
                     case "--no-launch": options.NoLaunch = true; break;
+                    case "--operation-id":
+                    {
+                        string? id = Next(args, ref i);
+                        if (!string.IsNullOrWhiteSpace(id)) options.OperationId = id.Trim();
+                        break;
+                    }
                     // A caller-supplied hash or version can never be trusted; keep parsing them only
                     // so a stale shortcut is rejected loudly instead of silently ignored.
                     case "--sha256": case "--version": options.RejectedArguments = true; Next(args, ref i); break;

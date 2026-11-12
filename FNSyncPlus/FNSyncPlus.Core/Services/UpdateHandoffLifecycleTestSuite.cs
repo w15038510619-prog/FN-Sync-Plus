@@ -151,8 +151,10 @@ public sealed class UpdateHandoffLifecycleTestSuite
         // ---- 真实进程级 watchdog ----
         // A REAL child process plays the updater, and a REAL journal file on disk carries the
         // updater's verdict — the liveness probe and journal evidence are genuine, not fakes.
-        async Task<(string Reason, bool HoldActive, InstallSessionState State, string Logs)> SuperviseAsync(
-            string name, string fakeUpdaterScript, string journalAfterExit, TimeSpan maxWait)
+        // The watchdog probes the child through the three-state identity probe (PID reuse proof
+        // is covered by the fail-closed suite); evidence lambdas mirror the production wiring.
+        async Task<(string Reason, bool HoldActive, InstallSessionState State, string Logs, string Diagnosis)> SuperviseAsync(
+            string name, string fakeUpdaterScript, string journalAfterExit, TimeSpan maxWait, bool intactProof)
         {
             string dir = Path.Combine(workspace, name);
             Directory.CreateDirectory(dir);
@@ -169,28 +171,33 @@ public sealed class UpdateHandoffLifecycleTestSuite
                 UseShellExecute = false,
                 CreateNoWindow = true
             })!;
+            var identity = UpdaterProcessIdentity.Capture(process, "watchdog-suite-op");
 
             var manager = NewManager(name);
             if (!manager.TryEnterMaintenanceHold(out var lease, "watchdog 测试"))
                 throw new InvalidOperationException("无法获取维护租约，测试前置失败");
             var session = new UpdateInstallSession(
                 new InstallReadiness(InstallDecision.Proceed, "ok"),
-                new UpdateInstallPlan(true, "x", "y", "ok"), null, lease, null);
+                new UpdateInstallPlan(true, "x", "y", "ok", "watchdog-suite-op"), null, lease, null);
             var verdict = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var diagnosis = new System.Text.StringBuilder();
             var supervisionLog = new System.Text.StringBuilder();
             session.CommitHandOff(new ProcessHandoffWatchdog(
-                updaterStillRunning: () =>
-                {
-                    try { return !process.HasExited; }
-                    catch { return false; }
-                },
-                journalTail: () => ReadTail(journal, baseline),
+                updaterProbe: () => identity.Probe(out _),
+                operationStatus: () => InstallOperationStatus.Unknown, // no state store in this harness
+                journalEvidence: () => ReadTail(journal, baseline),
+                installProvenIntact: () => intactProof,
                 onConfirmedAbandon: reason =>
                 {
                     // Same wiring the production UpdateService uses: the supervised release goes
                     // through the session so the lease is released exactly once.
                     session.ConfirmHandoffAbandoned(reason);
                     verdict.TrySetResult(reason);
+                },
+                onNeedsDiagnosis: reason =>
+                {
+                    lock (diagnosis) diagnosis.AppendLine(reason);
+                    verdict.TrySetResult("DIAG:" + reason);
                 },
                 log: message => { lock (supervisionLog) supervisionLog.AppendLine(message); },
                 initialDelay: TimeSpan.FromMilliseconds(250),
@@ -212,15 +219,17 @@ public sealed class UpdateHandoffLifecycleTestSuite
             try { if (!process.HasExited) process.Kill(true); }
             catch { /* already gone or handle closed: nothing to clean up */ }
 
-            return (reason, manager.IsMaintenanceHoldActive, session.State, supervisionLog.ToString());
+            string diag;
+            lock (diagnosis) diag = diagnosis.ToString();
+            return (reason, manager.IsMaintenanceHoldActive, session.State, supervisionLog.ToString(), diag);
         }
 
         await Case("更新器放弃等待后监督机制释放维护租约（真实进程）", async () =>
         {
-            var (reason, holdActive, state, _) = await SuperviseAsync("wd-abandon",
+            var (reason, holdActive, state, _, _) = await SuperviseAsync("wd-abandon",
                 "@echo off\r\nping -n 2 127.0.0.1 > nul\r\n",
                 "apply: app pid 4242 still running after 180s, aborting",
-                TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                TimeSpan.FromSeconds(10), intactProof: false).ConfigureAwait(false);
             bool pass = reason.Contains("still running after") && !holdActive &&
                         state == InstallSessionState.HandoffFailed;
             return (pass, $"reason={reason} holdActive={holdActive} state={state}");
@@ -228,9 +237,9 @@ public sealed class UpdateHandoffLifecycleTestSuite
 
         await Case("更新器仍在运行时绝不按时间释放租约（真实进程）", async () =>
         {
-            var (reason, holdActive, _, logs) = await SuperviseAsync("wd-alive",
+            var (reason, holdActive, _, logs, _) = await SuperviseAsync("wd-alive",
                 "@echo off\r\nping -n 60 127.0.0.1 > nul\r\n", "",
-                TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                TimeSpan.FromSeconds(2), intactProof: false).ConfigureAwait(false);
             // The watchdog must stay silent while the updater lives and keep the hold.
             return (reason.Length == 0 && holdActive,
                 $"watchdog 不应确认（reason=\"{reason}\"）holdActive={holdActive}（2 秒后仍须为 True）logs={logs.Trim()}");
@@ -238,10 +247,10 @@ public sealed class UpdateHandoffLifecycleTestSuite
 
         await Case("更新器完成安装但主进程未退出时保持维护暂停（真实进程）", async () =>
         {
-            var (reason, holdActive, state, logs) = await SuperviseAsync("wd-zombie",
+            var (reason, holdActive, state, logs, _) = await SuperviseAsync("wd-zombie",
                 "@echo off\r\nping -n 2 127.0.0.1 > nul\r\n",
                 "apply 0.6.0 from verified release (sha abc)\r\ninstalled 0.6.0 (payload deadbeef)",
-                TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                TimeSpan.FromSeconds(10), intactProof: false).ConfigureAwait(false);
             // No abandon may be confirmed here: the callback must never fire, the hold stays,
             // and the anomaly is visible in the supervision log.
             bool pass = reason.Length == 0 && holdActive && state == InstallSessionState.UpdaterStarted &&
@@ -249,12 +258,13 @@ public sealed class UpdateHandoffLifecycleTestSuite
             return (pass, $"reason=\"{reason}\" holdActive={holdActive} state={state} logs={logs.Trim()}");
         });
 
-        await Case("更新器异常退出无日志时宽限后恢复备份（真实进程）", async () =>
+        await Case("更新器异常退出且无记录时凭文件系统证据证明未安装后恢复备份（真实进程）", async () =>
         {
-            var (reason, holdActive, state, _) = await SuperviseAsync("wd-vanish",
+            var (reason, holdActive, state, _, _) = await SuperviseAsync("wd-vanish",
                 "@echo off\r\nping -n 2 127.0.0.1 > nul\r\n", "",
-                TimeSpan.FromSeconds(10)).ConfigureAwait(false);
-            bool pass = reason.Contains("异常退出") && !holdActive && state == InstallSessionState.HandoffFailed;
+                TimeSpan.FromSeconds(10), intactProof: true).ConfigureAwait(false);
+            bool pass = reason.Contains("安装从未开始") && reason.Contains("确认放弃") &&
+                        !holdActive && state == InstallSessionState.HandoffFailed;
             return (pass, $"reason={reason} holdActive={holdActive} state={state}");
         });
 

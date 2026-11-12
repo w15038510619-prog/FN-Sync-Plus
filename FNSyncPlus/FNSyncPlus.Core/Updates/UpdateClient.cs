@@ -28,6 +28,12 @@ public sealed class UpdateSettings
     /// <summary>Version the updater was handed off for. Prevents a restart loop if the install
     /// keeps failing before the app can start.</summary>
     [JsonPropertyName("handoff_version")] public string? HandoffVersion { get; set; }
+
+    /// <summary>Versions whose last handoff ended in an UNKNOWN state (state file corrupt, process
+    /// unverifiable, evidence contradictory). Automatic installs of these versions are blocked:
+    /// "cannot tell what happened" must never silently become "assume it failed and reinstall".
+    /// A human clears the entry after diagnosing the machine.</summary>
+    [JsonPropertyName("diagnosis_required_versions")] public System.Collections.Generic.List<string> DiagnosisRequiredVersions { get; set; } = new();
 }
 
 public sealed record UpdateCheckResult(bool HasUpdate, string Version, string Notes, string ManifestUrl, string Error);

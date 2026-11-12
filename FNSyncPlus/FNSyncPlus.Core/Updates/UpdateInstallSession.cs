@@ -73,7 +73,19 @@ public sealed class UpdateInstallSession : IDisposable
     /// process-level acceptance report (which must name both PIDs).</summary>
     public int? UpdaterProcessId { get; private set; }
 
-    internal void RecordUpdaterProcess(int processId) => UpdaterProcessId = processId;
+    /// <summary>Unique ID of this install attempt. The updater's journal lines, the operation
+    /// state file, the version pointer and the watchdog all share it, so evidence from older
+    /// attempts can never be mistaken for this one.</summary>
+    public string OperationId => Plan.OperationId;
+
+    /// <summary>Full identity of the updater process (PID + start time + path), captured at start.</summary>
+    public UpdaterProcessIdentity? UpdaterIdentity { get; private set; }
+
+    internal void RecordUpdaterProcess(UpdaterProcessIdentity identity)
+    {
+        UpdaterIdentity = identity;
+        UpdaterProcessId = identity.ProcessId;
+    }
 
     public InstallSessionState State => (InstallSessionState)Volatile.Read(ref _state);
 
