@@ -44,6 +44,30 @@ namespace FNSyncPlus.Tests
         {
             Console.OutputEncoding = Encoding.UTF8;
 
+            // Storage-isolation children must be dispatched before ANYTHING else: the whole
+            // point of the scenario is that the child resolves its own data root, so no parent
+            // code path may run first.
+            if (StorageIsolationTestSuite.IsChild(args))
+                return await StorageIsolationTestSuite.RunChildAsync(args);
+
+            if (args.Contains("--storage-isolation-tests"))
+            {
+                string root = Path.Combine(Path.GetTempPath(), "FNSync_storageiso_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var cases = await new StorageIsolationTestSuite().RunAsync(root);
+                    foreach (var item in cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    int failed = cases.Count(c => !c.Passed);
+                    Console.WriteLine($"存储隔离专项测试：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                    return failed == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch (IOException) { }
+                }
+            }
+
             if (args.Length == 2 && args[0] == "--single-instance-probe")
             {
                 using var probe = new SingleInstanceCoordinator(args[1]);
@@ -113,6 +137,24 @@ namespace FNSyncPlus.Tests
                 }
             }
 
+            if (args.Contains("--signature-audit-tests"))
+            {
+                string root = Path.Combine(Path.GetTempPath(), "FNSync_sigaudit_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var cases = await new SignatureChainAuditTestSuite().RunAsync(root);
+                    foreach (var item in cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    int failed = cases.Count(c => !c.Passed);
+                    Console.WriteLine($"签名链审计专项测试：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                    return failed == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch (IOException) { }
+                }
+            }
+
             if (args.Contains("--handoff-process-tests"))
             {
                 string root = Path.Combine(Path.GetTempPath(), "FNSync_handoff_" + Guid.NewGuid().ToString("N"));
@@ -120,6 +162,7 @@ namespace FNSyncPlus.Tests
                 {
                     var cases = new List<UpdateSuiteCase>();
                     cases.AddRange(await new UpdateHandoffLifecycleTestSuite().RunAsync(Path.Combine(root, "lifecycle")));
+                    cases.AddRange(await new WatchdogFailClosedTestSuite().RunAsync(Path.Combine(root, "failclosed")));
                     foreach (var item in cases)
                         Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
                     int failed = cases.Count(c => !c.Passed);
@@ -7159,7 +7202,7 @@ namespace FNSyncPlus.Tests
             await Task.Delay(150);
 
             // 2. 验证日志磁盘文件存在
-            string baseLogDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "logs");
+            string baseLogDir = Path.Combine(FNSyncPlus.Core.Services.AppStorageRoot.LocalAppDataDir(), "logs");
             string taskLogDir = Path.Combine(baseLogDir, "tasks", testTaskId);
             Assert(Directory.Exists(taskLogDir), "任务日志独立目录按 TaskId 创建", taskLogDir);
 
@@ -7513,8 +7556,8 @@ namespace FNSyncPlus.Tests
 
                 // ---- P0-4: 演示任务与脏数据排查 ----
                 Console.WriteLine("\n--- [P0-4 测试] 真实配置与演示任务污染排查 ---");
-                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                string configPath = Path.Combine(appData, "FNSyncPlus", "settings.json");
+                string appData = FNSyncPlus.Core.Services.AppStorageRoot.RoamingAppDataDir();
+                string configPath = Path.Combine(appData, "settings.json");
                 if (File.Exists(configPath))
                 {
                     string content = File.ReadAllText(configPath);
