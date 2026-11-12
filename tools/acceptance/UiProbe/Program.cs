@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
@@ -17,6 +17,11 @@ internal static class Program
 {
     private const int SwRestore = 9;
     private const uint SwpNoZOrder = 0x0004;
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
+    private const uint SwpShowWindow = 0x0040;
+    private static readonly IntPtr HwndTopMost = new(-1);
+    private static readonly IntPtr HwndNotTopMost = new(-2);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct Rect
@@ -62,7 +67,90 @@ internal static class Program
     [DllImport("user32.dll")]
     private static extern bool PrintWindow(IntPtr hWnd, IntPtr hdc, uint flags);
 
+    [DllImport("user32.dll")]
+    private static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    private const int WmMouseWheel = 0x020A;
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out System.Drawing.Point point);
+
+    [DllImport("user32.dll")]
+    private static extern void mouse_event(uint flags, int dx, int dy, int data, UIntPtr extraInfo);
+
     private const uint PwRenderFullContent = 0x00000002;
+    private const uint MouseEventWheel = 0x0800;
+
+    /// <summary>
+    /// True when the two frames are effectively identical (99% of sampled pixels equal within a
+    /// small tolerance). A wheel scroll that did not reach the target window leaves the page
+    /// untouched, and the harness must not save that frame as "the scrolled section".
+    /// </summary>
+    private static bool NearlyIdentical(Bitmap a, Bitmap b)
+    {
+        if (a.Width != b.Width || a.Height != b.Height) return false;
+        int total = 0;
+        int different = 0;
+        for (int y = 0; y < a.Height; y += 6)
+        {
+            for (int x = 0; x < a.Width; x += 6)
+            {
+                total++;
+                var pa = a.GetPixel(x, y);
+                var pb = b.GetPixel(x, y);
+                if (Math.Abs(pa.R - pb.R) > 4 || Math.Abs(pa.G - pb.G) > 4 || Math.Abs(pa.B - pb.B) > 4)
+                {
+                    different++;
+                }
+            }
+        }
+        return total == 0 || different <= total / 100;
+    }
+
+    /// <summary>
+    /// Scrolls the window's content with REAL wheel input (the pointer is parked over the window
+    /// centre for the duration and restored afterwards). WinUI routes wheel messages by pointer
+    /// position, so synthetic PostMessage scrolling is unreliable; this is the deterministic way
+    /// to reach a section that starts below the fold.
+    /// </summary>
+    private static void ScrollWindow(IntPtr hwnd, int notches)
+    {
+        if (notches == 0) return;
+        // Wheel input only reaches the window that owns the pointer: bring it to the front and
+        // move it fully on-screen first (a background window, or one whose centre is covered by
+        // the terminal, silently ignores the wheel and the page never moves).
+        ShowWindow(hwnd, SwRestore);
+        SetWindowPos(hwnd, HwndTopMost, 0, 0, 0, 0, SwpNoSize | SwpShowWindow);
+        SetForegroundWindow(hwnd);
+        Thread.Sleep(250);
+        if (!GetWindowRect(hwnd, out Rect rect)) return;
+        int centerX = rect.Left + (rect.Right - rect.Left) / 2;
+        int centerY = rect.Top + (rect.Bottom - rect.Top) / 2;
+        GetCursorPos(out var original);
+        SetCursorPos(centerX, centerY);
+        Thread.Sleep(200);
+        for (int i = 0; i < Math.Abs(notches); i++)
+        {
+            int delta = notches > 0 ? -120 : 120;
+            // Physical wheel first (exercises the real input pipeline when the window holds the
+            // pointer focus)...
+            mouse_event(MouseEventWheel, 0, 0, delta, UIntPtr.Zero);
+            // ...and the same wheel as a window message: wheel input is delivered to the focused
+            // window, so a background app would silently ignore it. SendMessage targets this hwnd
+            // and carries the pointer position for WinUI's hit test.
+            IntPtr wheelWParam = (IntPtr)((delta << 16) & unchecked((int)0xFFFF0000));
+            IntPtr wheelLParam = (IntPtr)((centerY << 16) | (centerX & 0xFFFF));
+            SendMessage(hwnd, WmMouseWheel, wheelWParam, wheelLParam);
+            Thread.Sleep(140);
+        }
+        Thread.Sleep(600);
+        SetCursorPos(original.X, original.Y);
+        // Leave the window where the rest of the probe expects it (not always-on-top).
+        SetWindowPos(hwnd, HwndNotTopMost, 0, 0, 0, 0, SwpNoMove | SwpNoSize);
+    }
 
     private static bool PrintWindowBitmap(IntPtr hwnd, Bitmap bitmap)
     {
@@ -128,6 +216,30 @@ internal static class Program
             var title = new StringBuilder(GetWindowTextLength(hwnd) + 2);
             GetWindowText(hwnd, title, title.Capacity);
 
+            if (options.ScrollNotches != 0)
+            {
+                // Capture a reference frame, then verify the wheel really moved the page. A
+                // previous run saved an identical "scrolled" screenshot because the wheel went to
+                // the terminal window; the harness must detect that instead of accepting it.
+                using var before = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+                PrintWindowBitmap(hwnd, before);
+                bool effective = false;
+                int attempt = 0;
+                int notches = options.ScrollNotches;
+                while (attempt < 3 && !effective)
+                {
+                    attempt++;
+                    ScrollWindow(hwnd, notches);
+                    Thread.Sleep(350);
+                    using var after = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+                    PrintWindowBitmap(hwnd, after);
+                    if (!NearlyIdentical(before, after)) { effective = true; break; }
+                    notches *= 2;
+                }
+                result["scroll_effective"] = effective;
+                result["scroll_attempts"] = attempt;
+            }
+
             if (options.Capture)
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(options.OutPath))!);
@@ -137,13 +249,15 @@ internal static class Program
                 // is kept as a fallback for windows that refuse to render off-screen.
                 bool printed = PrintWindowBitmap(hwnd, bitmap);
                 double ratio = ContentRatio(bitmap);
-                if (!printed || ratio < 0.02)
+                double coverage = ContentCoverage(bitmap);
+                if (!printed || (ratio < 0.02 && coverage < 0.05))
                 {
                     SetForegroundWindow(hwnd);
                     Thread.Sleep(400);
                     using var graphics = Graphics.FromImage(bitmap);
                     graphics.CopyFromScreen(rect.Left, rect.Top, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
                     ratio = ContentRatio(bitmap);
+                    coverage = ContentCoverage(bitmap);
                     result["capture"] = "screen";
                 }
                 else
@@ -152,6 +266,7 @@ internal static class Program
                 }
                 bitmap.Save(options.OutPath, ImageFormat.Png);
                 result["content_ratio"] = ratio;
+                result["content_coverage"] = coverage;
                 result["mean_luminance"] = MeanLuminance(bitmap);
             }
 
@@ -245,6 +360,33 @@ internal static class Program
         return Math.Round(colours.Count / 256.0, 4);
     }
 
+    /// <summary>
+    /// Share of sampled pixels that differ from the dominant colour. Independent of the number of
+    /// distinct shades, so a page rendered without subpixel anti-aliasing (or without Mica, when
+    /// the window is not the active one) still scores as content, while a flat unpainted surface
+    /// scores near zero.
+    /// </summary>
+    private static double ContentCoverage(Bitmap bitmap)
+    {
+        var counts = new Dictionary<int, int>();
+        int sampled = 0;
+        for (int y = 0; y < bitmap.Height; y += 6)
+        {
+            for (int x = 0; x < bitmap.Width; x += 6)
+            {
+                sampled++;
+                var pixel = bitmap.GetPixel(x, y);
+                int key = (pixel.R << 16) | (pixel.G << 8) | pixel.B;
+                counts.TryGetValue(key, out int seen);
+                counts[key] = seen + 1;
+            }
+        }
+        if (sampled == 0 || counts.Count == 0) return 0;
+        int dominant = 0;
+        foreach (var pair in counts) { if (pair.Value > dominant) dominant = pair.Value; }
+        return Math.Round(1.0 - (double)dominant / sampled, 4);
+    }
+
     /// <summary>Average luminance (0-255) so the harness can tell a dark theme from a light one.</summary>
     private static int MeanLuminance(Bitmap bitmap)
     {
@@ -273,6 +415,7 @@ internal static class Program
         public int WaitSeconds { get; init; } = 20;
         public string? TitleMatch { get; init; }
         public bool Capture { get; init; } = true;
+        public int ScrollNotches { get; init; }
     }
 
     private static Options ParseArgs(string[] args)
@@ -281,6 +424,7 @@ internal static class Program
         string? name = null, json = null, titleMatch = null;
         string output = "window.png";
         bool capture = true;
+        int scrollNotches = 0;
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
@@ -297,6 +441,7 @@ internal static class Program
                 case "--wait" when i + 1 < args.Length: wait = int.Parse(args[++i]); break;
                 case "--title-match" when i + 1 < args.Length: titleMatch = args[++i]; break;
                 case "--no-capture": capture = false; break;
+                case "--scroll" when i + 1 < args.Length: scrollNotches = int.Parse(args[++i]); break;
             }
         }
         return new Options
@@ -309,7 +454,8 @@ internal static class Program
             Height = height,
             WaitSeconds = wait,
             TitleMatch = titleMatch,
-            Capture = capture
+            Capture = capture,
+            ScrollNotches = scrollNotches
         };
     }
 }

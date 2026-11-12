@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -11,5 +11,6 @@
     <!-- Acceptance-only helper; not shipped with the product. -->
     <IsPackable>false</IsPackable>
   </PropertyGroup>
+
 
 </Project>
