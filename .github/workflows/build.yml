@@ -61,6 +61,14 @@ jobs:
     - name: Run P0 Remediation Suite
       run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release -- --p0-tests
 
+    # 第三轮专项：真实进程级交接生命周期（安装会话状态机 + 监督式看门狗，含 cmd.exe 假更新器）。
+    - name: Run Update Handoff Process Tests
+      run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release -- --handoff-process-tests
+
+    # 第三轮专项：UI 验收进程隔离（实例共存、纯视觉会话不带凭据）。
+    - name: Run UI Isolation Tests
+      run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release -- --ui-isolation-tests
+
     - name: Run Automated Tests
       run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release
 
