@@ -108,31 +108,42 @@
                                     <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
 
-                                <!-- Header: Folder Icon + Task Name + Badge + Actions -->
+                                <!-- Header: Folder Icon + Task Name + Badge + Actions.
+                                     The name lives in a star-sized column with CharacterEllipsis
+                                     and a ToolTip, so a 255-byte Chinese or unbroken ASCII name
+                                     degrades to an ellipsis instead of hard-clipping the card or
+                                     pushing the badge and buttons out of view. -->
                                 <Grid Grid.Row="0">
                                     <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" MinWidth="0" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
 
-                                    <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-                                        <Border Width="32" Height="32" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="6">
-                                            <FontIcon Glyph="&#xE8B7;" FontSize="16" Foreground="{ThemeResource AccentFillColorDefaultBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
-                                        </Border>
-                                        <StackPanel VerticalAlignment="Center">
-                                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                                <TextBlock Text="{x:Bind TaskName, Mode=OneWay}" FontWeight="SemiBold" FontSize="14" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                                                <Border
-                                                    Background="{x:Bind StatusBadgeBgHex, Mode=OneWay, Converter={StaticResource HexToBrushConverter}}"
-                                                    CornerRadius="10"
-                                                    Padding="8,1"
-                                                    VerticalAlignment="Center">
-                                                    <TextBlock Text="{x:Bind DisplayStatus, Mode=OneWay}" FontSize="11" FontWeight="SemiBold" Foreground="{x:Bind StatusBadgeColorHex, Mode=OneWay, Converter={StaticResource HexToBrushConverter}}" />
-                                                </Border>
-                                            </StackPanel>
-                                            <TextBlock Text="{x:Bind FormattedLastSync, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="0,2,0,0" />
-                                            <TextBlock Text="{x:Bind ScheduleSummaryText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" Margin="0,2,0,0" />
-                                        </StackPanel>
+                                    <Border Grid.Column="0" Width="32" Height="32" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="6">
+                                        <FontIcon Glyph="&#xE8B7;" FontSize="16" Foreground="{ThemeResource AccentFillColorDefaultBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Margin="10,0,12,0" VerticalAlignment="Center" MinWidth="0">
+                                        <Grid MinWidth="0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" MinWidth="0" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="{x:Bind TaskName, Mode=OneWay}" FontWeight="SemiBold" FontSize="14"
+                                                       Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                                       TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind TaskName, Mode=OneWay}" />
+                                            <Border
+                                                Grid.Column="1"
+                                                Margin="8,0,0,0"
+                                                Background="{x:Bind StatusBadgeBgHex, Mode=OneWay, Converter={StaticResource HexToBrushConverter}}"
+                                                CornerRadius="10"
+                                                Padding="8,1"
+                                                VerticalAlignment="Center">
+                                                <TextBlock Text="{x:Bind DisplayStatus, Mode=OneWay}" FontSize="11" FontWeight="SemiBold" Foreground="{x:Bind StatusBadgeColorHex, Mode=OneWay, Converter={StaticResource HexToBrushConverter}}" />
+                                            </Border>
+                                        </Grid>
+                                        <TextBlock Text="{x:Bind FormattedLastSync, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Margin="0,2,0,0" />
+                                        <TextBlock Text="{x:Bind ScheduleSummaryText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" Margin="0,2,0,0" TextTrimming="CharacterEllipsis" />
                                     </StackPanel>
 
                                     <!-- Action Buttons -->
