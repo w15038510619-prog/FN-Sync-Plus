@@ -20,6 +20,30 @@ jobs:
       with:
         dotnet-version: 8.0.x
 
+    # 凭据扫描：私钥、保存的凭据、以及任何被误提交的签名材料都必须在这里失败，
+    # 而不是等到打包后才发现。
+    - name: Scan Repository for Credentials and Private Keys
+      shell: pwsh
+      run: |
+        $tracked = & git ls-files
+        if ($LASTEXITCODE -ne 0) { throw 'git ls-files 失败，无法执行凭据扫描' }
+        $bad = @()
+        foreach ($file in $tracked) {
+          if ($file -match '(?i)(^|/)(credentials\.dat|update-private\.pem|\.env(\..*)?)$') {
+            $bad += "凭据文件: $file"
+            continue
+          }
+          if ($file -match '(?i)\.(cs|ps1|psm1|json|yml|yaml|md|txt|xaml|csproj|props|targets|sln)$') {
+            $content = Get-Content -LiteralPath $file -Raw -ErrorAction SilentlyContinue
+            if ($content -match '-----BEGIN [A-Z ]*PRIVATE KEY-----') { $bad += "私钥内容: $file" }
+          }
+        }
+        if ($bad.Count -gt 0) {
+          $bad | ForEach-Object { Write-Host "FAIL $_" }
+          throw "仓库中发现凭据或私钥（$($bad.Count) 项），已阻止构建"
+        }
+        Write-Host "凭据扫描通过：检查了 $($tracked.Count) 个受版本管理的文件"
+
     - name: Restore Dependencies
       run: dotnet restore FNSyncPlus/FNSyncPlus.sln
 
@@ -28,6 +52,14 @@ jobs:
 
     - name: Run Isolated Integrity Regressions
       run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release -- --integrity-regressions
+
+    # 多账号隔离：任务归属（UID/账号名）与隔离会话沙盒都必须拦截跨账号访问。
+    - name: Run Multi-Account Isolation Acceptance
+      run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release -- --account-isolation
+
+    # P0 整改专项：维护租约、发布信任链、数据格式守卫、后台更新调度。
+    - name: Run P0 Remediation Suite
+      run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release -- --p0-tests
 
     - name: Run Automated Tests
       run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release

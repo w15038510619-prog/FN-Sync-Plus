@@ -34,7 +34,13 @@ param(
     [string]$SigningKeyPath = '',
     [string]$ManifestBaseUrl = '',
     [int]$ReleaseBatch = 0,
-    [string]$Audience = '*'
+    [string]$Audience = '*',
+    # Public key pinned into the client (and reused by the updater). Required for any build that
+    # must verify updates; omit it and the updater fails closed instead of trusting the network.
+    [string]$UpdatePublicKeyPath = '',
+    # Data format this build can read. Written into the payload and the pointer so a rollback can
+    # be refused when it would move backwards onto data it cannot read.
+    [int]$SupportedDataFormat = 1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,8 +68,14 @@ try {
 
     # 1. Application payload
     New-Item -ItemType Directory -Path $appDir -Force | Out-Null
-    Invoke-Dotnet -Arguments @('publish', 'FNSyncPlus.WinUI\FNSyncPlus.WinUI.csproj', '-c', 'Release', '-r', 'win-x64',
-        '--self-contained', 'true', '-p:WindowsPackageType=None', "-p:Version=$Version", "-o", $appDir)
+    $commonPublish = @()
+    if (-not [string]::IsNullOrWhiteSpace($UpdatePublicKeyPath)) {
+        if (-not (Test-Path -LiteralPath $UpdatePublicKeyPath -PathType Leaf)) { throw "更新公钥不存在：$UpdatePublicKeyPath" }
+        $resolvedKey = (Resolve-Path -LiteralPath $UpdatePublicKeyPath).Path
+        $commonPublish = @("-p:UpdatePublicKeyPath=$resolvedKey")
+    }
+    Invoke-Dotnet -Arguments (@('publish', 'FNSyncPlus.WinUI\FNSyncPlus.WinUI.csproj', '-c', 'Release', '-r', 'win-x64',
+        '--self-contained', 'true', '-p:WindowsPackageType=None', "-p:Version=$Version", '-o', $appDir) + $commonPublish)
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'TEST_ONLY.txt') -Destination (Join-Path $appDir 'TEST_ONLY.txt') -Force
 
     $required = @('FNSyncPlus.WinUI.exe', 'resources.pri', 'hostfxr.dll', 'Microsoft.WindowsAppRuntime.Bootstrap.dll')
@@ -72,20 +84,32 @@ try {
     }
 
     # 2. Never ship credentials or configuration
-    $privateNames = @('credentials.dat', 'settings.json', 'updates.json', 'data-format.json')
+    $privateNames = @('credentials.dat', 'settings.json', 'updates.json', 'data-format.json', 'update-private.pem', 'update-public.pem')
     $privateFiles = @(Get-ChildItem -LiteralPath $appDir -File -Recurse -Force | Where-Object {
-        $privateNames -contains $_.Name -or ($privateNames | Where-Object { $_.Name -like "$_*" })
+        $name = $_.Name
+        $match = $privateNames -contains $name
+        if (-not $match) {
+            # Preserved copies such as data-format.json.corrupt-<ts> are secrets too.
+            foreach ($prefix in $privateNames) {
+                if ($name -like "$prefix*") { $match = $true; break }
+            }
+        }
+        $match
     })
     if ($privateFiles.Count -gt 0) { throw "程序目录意外包含凭据或配置：$($privateFiles[0].FullName)" }
 
-    # 3. Stable, version-independent launcher in the install root
-    $launcherTmp = Join-Path $OutputRoot 'updater-tmp'
-    Invoke-Dotnet -Arguments @('publish', 'FNSyncPlus.Updater\FNSyncPlus.Updater.csproj', '-c', 'Release', '-r', 'win-x64',
+    # 3. Stable, version-independent launcher in the install root.
+    #    Published straight into the install root: a temporary publish directory would have to be
+    #    deleted afterwards, and deleting hundreds of freshly published files is exactly what
+    #    endpoint protection (and the safe-delete policy on build machines) refuses to do.
+    Invoke-Dotnet -Arguments (@('publish', 'FNSyncPlus.Updater\FNSyncPlus.Updater.csproj', '-c', 'Release', '-r', 'win-x64',
         '--self-contained', 'true', '-p:PublishSingleFile=true', '-p:IncludeNativeLibrariesForSelfExtract=true',
-        "-p:Version=$Version", '-o', $launcherTmp)
-    Copy-Item -LiteralPath (Join-Path $launcherTmp 'FNSyncPlus.Updater.exe') -Destination (Join-Path $installDir 'FN_Sync_Plus.exe') -Force
-    Copy-Item -LiteralPath (Join-Path $launcherTmp 'FNSyncPlus.Updater.exe') -Destination (Join-Path $installDir 'FNSyncPlus.Updater.exe') -Force
-    Remove-Item -LiteralPath $launcherTmp -Recurse -Force
+        "-p:Version=$Version", '-o', $installDir) + $commonPublish)
+    Copy-Item -LiteralPath (Join-Path $installDir 'FNSyncPlus.Updater.exe') -Destination (Join-Path $installDir 'FN_Sync_Plus.exe') -Force
+
+    # 3b. Declare what this build can read. The updater uses it to refuse an unsafe rollback.
+    @{ version = $Version; supported_data_format = $SupportedDataFormat } |
+        ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $appDir 'build-meta.json') -Encoding utf8
 
     # 4. Package the payload (what the updater extracts)
     Compress-Archive -Path (Join-Path $appDir '*') -DestinationPath $packagePath -CompressionLevel Optimal
@@ -94,7 +118,7 @@ try {
 
     # 5. Initial pointers so the launcher works before the first update
     $payloadHash = 'built-' + (Get-Date -Format 'yyyyMMddHHmmss')
-    @{ version = $Version; directory = $appDir; installed_at = (Get-Date).ToUniversalTime().ToString('o'); payload_sha256 = $payloadHash } |
+    @{ version = $Version; directory = $appDir; installed_at = (Get-Date).ToUniversalTime().ToString('o'); payload_sha256 = $payloadHash; supported_data_format = $SupportedDataFormat } |
         ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $installDir 'current.json') -Encoding utf8
     if (Test-Path -LiteralPath (Join-Path $installDir 'previous.json')) { Remove-Item -LiteralPath (Join-Path $installDir 'previous.json') -Force }
 
