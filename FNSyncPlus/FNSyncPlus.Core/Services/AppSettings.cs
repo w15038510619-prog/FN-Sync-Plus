@@ -90,18 +90,18 @@ namespace FNSyncPlus.Core.Services
             string? profile = IsolatedSessionPath ?? (IsVersionedBetaTestProfile ? VersionedBetaProfilePath : null);
             if (profile != null) return Path.Combine(Path.GetDirectoryName(profile)!, "logs");
             if (!RequiresIsolatedTestBoundary) throw new InvalidOperationException("当前配置不是隔离测试会话");
-            return EphemeralIsolatedLogDirectory ??= Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"WinUiLogs_{Guid.NewGuid():N}");
+            return EphemeralIsolatedLogDirectory ??= Path.Combine(AppStorageRoot.TestSessionsRoot(), $"WinUiLogs_{Guid.NewGuid():N}");
         }
 
         public static AppSettings LoadVersionedBetaProfile() => LoadVersionedProfileAt(
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "versioned-beta"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FNSyncPlus", "settings.json"));
+            Path.Combine(AppStorageRoot.LocalAppDataDir(), "versioned-beta"),
+            Path.Combine(AppStorageRoot.RoamingAppDataDir(), "settings.json"));
 
         // This isolated test path is never selected by ordinary application startup.
         public static AppSettings LoadVersionedBetaTestProfile(Guid id)
         {
             if (id == Guid.Empty) throw new ArgumentException("测试配置标识无效", nameof(id));
-            string folder = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"VersionedProfile_{id:N}");
+            string folder = Path.Combine(AppStorageRoot.TestSessionsRoot(), $"VersionedProfile_{id:N}");
             string legacyFolder = Path.Combine(folder, "legacy-fixture");
             Directory.CreateDirectory(legacyFolder);
             var settings = LoadVersionedProfileAt(folder, Path.Combine(legacyFolder, "settings.json"));
@@ -163,7 +163,7 @@ namespace FNSyncPlus.Core.Services
         public static AppSettings LoadIsolatedTestSession(Guid id)
         {
             if (id == Guid.Empty) throw new ArgumentException("隔离会话标识无效", nameof(id));
-            string folder = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"WinUiSession_{id:N}");
+            string folder = Path.Combine(AppStorageRoot.TestSessionsRoot(), $"WinUiSession_{id:N}");
             Directory.CreateDirectory(folder);
             string path = Path.Combine(folder, "settings.json");
             // A brand-new session has never saved credentials, so it must not claim to remember
@@ -202,7 +202,7 @@ namespace FNSyncPlus.Core.Services
                 throw new InvalidOperationException("隔离测试尚未指定远端父目录，请重新启动并指定授权的测试目录后创建任务");
             if (IsolatedSessionPath == null && IsolatedTestRemoteRoot == null) return;
             if (IsolatedTestRemoteRoot == null) throw new InvalidOperationException("隔离测试尚未指定远端父目录");
-            string localRoot = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests");
+            string localRoot = AppStorageRoot.TestSessionsRoot();
             string fullSource = Path.GetFullPath(task.SourceFolder);
             string relative = Path.GetRelativePath(localRoot, fullSource);
             bool WithinRemote(string path)
@@ -266,8 +266,7 @@ namespace FNSyncPlus.Core.Services
 
         private static string GetConfigFilePath()
         {
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            string folder = Path.Combine(appData, "FNSyncPlus");
+            string folder = AppStorageRoot.RoamingAppDataDir();
             if (!Directory.Exists(folder))
             {
                 Directory.CreateDirectory(folder);

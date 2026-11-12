@@ -37,6 +37,15 @@ if ([string]::IsNullOrWhiteSpace($ProbeProject)) {
 }
 New-Item -ItemType Directory -Path $OutRoot -Force | Out-Null
 
+# Architectural isolation (round 4): every launched app instance resolves ALL storage under
+# this test data root — never the machine's production APPDATA/LOCALAPPDATA. Nothing is moved
+# or restored; production bytes are simply never touched.
+$testDataRoot = Join-Path $OutRoot 'testdata'
+New-Item -ItemType Directory -Path $testDataRoot -Force | Out-Null
+$env:FNSYNC_DATA_ROOT = $testDataRoot
+$env:FNSYNC_STORAGE_AUDIT = Join-Path $OutRoot 'storage-audit.log'
+$testSessionsRoot = Join-Path $testDataRoot 'temp\FNSyncPlus_CodexTests'
+
 $dotnet = $null
 foreach ($candidate in @('D:\FNSyncPlus_Toolchain\dotnet\dotnet.exe', 'C:\Program Files\dotnet\dotnet.exe')) {
     if (Test-Path -LiteralPath $candidate) { $dotnet = $candidate; break }
@@ -118,11 +127,11 @@ $longName3 = 'VeryLongEnglishTaskName_ForTruncationTesting_ABCDEFGHIJKLMNOPQRSTU
 
 function New-SessionSettings {
     param([string]$SessionId, [string]$Theme, [string[]]$Names)
-    $sessionDir = Join-Path $env:TEMP "FNSyncPlus_CodexTests\WinUiSession_$SessionId"
+    $sessionDir = Join-Path $testSessionsRoot "WinUiSession_$SessionId"
     New-Item -ItemType Directory -Path $sessionDir -Force | Out-Null
     # Fresh readiness beacon per session: a stale file must never satisfy a new scenario.
     Remove-Item -LiteralPath (Join-Path $sessionDir 'ui-ready.json') -Force -ErrorAction SilentlyContinue
-    $localRoot = Join-Path $env:TEMP 'FNSyncPlus_CodexTests'
+    $localRoot = $testSessionsRoot
     $tasks = @()
     $index = 0
     foreach ($name in $Names) {
@@ -171,7 +180,7 @@ function New-SessionSettings {
 
 function Wait-PageReady {
     param([string]$SessionId, [string]$Page, [int]$TimeoutSeconds)
-    $sessionDir = Join-Path $env:TEMP "FNSyncPlus_CodexTests\WinUiSession_$SessionId"
+    $sessionDir = Join-Path $testSessionsRoot "WinUiSession_$SessionId"
     $readyPath = Join-Path $sessionDir 'ui-ready.json'
     $began = Get-Date
     $polls = 0

@@ -48,8 +48,7 @@ namespace FNSyncPlus.Core.Services
             }
             else
             {
-                string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                _baseLogsDir = Path.Combine(localAppData, "FNSyncPlus", "logs");
+                _baseLogsDir = Path.Combine(AppStorageRoot.LocalAppDataDir(), "logs");
             }
 
             try

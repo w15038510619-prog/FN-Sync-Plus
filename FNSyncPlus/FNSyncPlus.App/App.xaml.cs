@@ -21,8 +21,9 @@ namespace FNSyncPlus.App
             // 1. 注册全局未处理异常安全防护与诊断日志
             SetupExceptionHandling();
 
-            // 2. 单实例互斥锁
-            const string mutexName = "Global\\FNSyncPlus_SingleInstance_Mutex_2026";
+            // 2. 单实例互斥锁（隔离测试数据根目录下使用独立实例标识，绝不占用生产互斥锁）
+            string mutexName = "Global\\FNSyncPlus_SingleInstance_Mutex_2026" +
+                (FNSyncPlus.Core.Services.AppStorageRoot.SingleInstanceSuffix() ?? "");
             _appMutex = new Mutex(true, mutexName, out bool createdNew);
 
             if (!createdNew)
@@ -77,7 +78,7 @@ namespace FNSyncPlus.App
         {
             try
             {
-                string logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "logs");
+                string logDir = Path.Combine(FNSyncPlus.Core.Services.AppStorageRoot.LocalAppDataDir(), "logs");
                 if (!Directory.Exists(logDir))
                 {
                     Directory.CreateDirectory(logDir);

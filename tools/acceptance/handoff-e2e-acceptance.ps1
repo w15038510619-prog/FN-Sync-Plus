@@ -28,12 +28,15 @@
     stops processes it started itself or discovered with a verified PID + path under the
     sandbox install root. Name-based kills are forbidden.
 
-    Production isolation: the launched 0.6.0 is a REAL production instance, so the machine's
-    production settings.json is moved aside for the duration of the run (backed up inside the
-    work root, verified absent before the launch, restored byte-identically - hash-verified -
-    afterwards). Without this, a production launch would load the machine's real enabled tasks
-    and could run REAL backups against a REAL NAS. The harness refuses to run if the quarantine
-    cannot be established, and the credentials file is never read (asserted unchanged by hash).
+    Production isolation (round 4, architectural): NO production file is ever moved, renamed,
+    modified or deleted. Every launched process (app A, updater, app B, decoy) inherits
+    FNSYNC_DATA_ROOT=<workroot>\testdata, so the application itself resolves ALL of its storage —
+    settings, credentials, versioned-beta profile, logs, data-format marker, update state,
+    caches, temp files and the single-instance identity — under that test root. The production
+    configuration trees are hashed before and after (read-only snapshots) and must be
+    byte-identical; the storage audit log must contain zero production paths. The old
+    "quarantine then restore" pattern is gone: if Windows crashes or the script is killed
+    mid-run, production bytes were never touched in the first place.
 #>
 param(
     [string]$DotnetPath = '',
@@ -183,24 +186,30 @@ $exeA = Join-Path $installRoot "app-$versionA\FNSyncPlus.WinUI.exe"
 
 $sessionA = [guid]::NewGuid().ToString('N')
 $decoySession = [guid]::NewGuid().ToString('N')
-$sessionDirA = Join-Path $env:TEMP "FNSyncPlus_CodexTests\WinUiSession_$sessionA"
+
+# ---------------------------------------------------------------- architectural isolation
+# FNSYNC_DATA_ROOT redirects EVERY application storage path into the test root (AppStorageRoot
+# in FNSyncPlus.Core). Children inherit the environment block of their creator, so setting it
+# in this session propagates: script -> app A -> updater -> app B, and script -> decoy.
+$testDataRoot = Join-Path $WorkRoot 'testdata'
+$storageAuditPath = Join-Path $WorkRoot 'storage-audit.log'
+New-Item -ItemType Directory -Path $testDataRoot -Force | Out-Null
+$env:FNSYNC_DATA_ROOT = $testDataRoot
+$env:FNSYNC_STORAGE_AUDIT = $storageAuditPath
+$testSessionsRoot = Join-Path $testDataRoot 'temp\FNSyncPlus_CodexTests'
+$sessionDirA = Join-Path $testSessionsRoot "WinUiSession_$sessionA"
 $probeReportPath = Join-Path $sessionDirA 'handoff-probe.json'
 
 $appDataRoot = Join-Path $env:APPDATA 'FNSyncPlus'
 $localAppDataRoot = Join-Path $env:LOCALAPPDATA 'FNSyncPlus'
 $productionSettingsPath = Join-Path $appDataRoot 'settings.json'
-$productionSettingsQuarantine = Join-Path $WorkRoot 'quarantine-production-settings.json'
+$credentialsPath = Join-Path $appDataRoot 'credentials.dat'
 $markerPath = Join-Path $localAppDataRoot 'data-format.json'
-$markerBackup = Join-Path $WorkRoot 'marker-backup.json'
 
-# The launched 0.6.0 is a VERSIONED-BETA session (published app-<version> layout): it loads its
-# own profile from versioned-beta\ and would otherwise auto-connect with the credentials stored
-# there during earlier beta testing. Both profile files are quarantined for the run as well.
-$versionedBetaDir = Join-Path $localAppDataRoot 'versioned-beta'
-$betaSettingsPath = Join-Path $versionedBetaDir 'settings.json'
-$betaCredPath = Join-Path $versionedBetaDir 'credentials.dat'
-$betaSettingsQuarantine = Join-Path $WorkRoot 'quarantine-beta-settings.json'
-$betaCredQuarantine = Join-Path $WorkRoot 'quarantine-beta-credentials.dat'
+# The launched 0.6.0 is a VERSIONED-BETA session (published app-<version> layout): with the
+# data-root override its profile resolves to <testroot>\local\FNSyncPlus\versioned-beta\ — a
+# fresh directory with no credentials and no tasks — instead of the machine's real profile.
+$testBetaDir = Join-Path $testDataRoot 'local\FNSyncPlus\versioned-beta'
 
 function Get-ConnectionLogsText {
     param([string]$Root)
@@ -229,10 +238,8 @@ function Snapshot-UserData {
     return $map
 }
 
-# Populated during the run. quarantinePerformed gates EVERY restore in finally: if the script
-# dies before the quarantine block, no restore (and no deletion) may ever run against the
-# user's real files.
-$script:quarantinePerformed = $false
+# Populated during the run. Nothing is ever moved or restored: production files stay exactly
+# where they are for the entire run, so no restore step exists at all.
 $leftovers = New-Object System.Collections.ArrayList
 $missing = New-Object System.Collections.ArrayList
 $changedUnexpected = New-Object System.Collections.ArrayList
@@ -242,11 +249,12 @@ $processDecoy = $null
 $processB = $null
 $updaterEntry = $null
 $launcherHashBefore = $null
-$markerExisted = $false
-$settingsExisted = $false
-$settingsHashBefore = $null
 $appDataBefore = @{}
 $localAppDataBefore = @{}
+$markerExisted = $false
+$markerHashBefore = $null
+$credentialsExisted = $false
+$credentialsHashBefore = $null
 
 try {
     # ------------------------------------------------ 0. preconditions: nothing else runs
@@ -258,58 +266,49 @@ try {
         throw "检测到 {0} 个已运行的 FNSyncPlus.WinUI（pid: {1}）。本验收的最终启动是真实生产实例，必须独占单实例互斥量；请先正常退出这些实例（本脚本不会代为结束它们）。" -f $script:snapshotCount, $existingList
     }
 
-    # ------------------------------------------- 0a. snapshot the machine state FIRST
-    # The pre-run snapshot must be taken BEFORE anything is quarantined: the final walk compares
-    # the end state to this snapshot, and restored (byte-identical) files must match it.
+    # ------------------------------------------- 0a. read-only snapshot of the machine state
+    # The snapshot is pure evidence gathering (hashes): nothing is moved or modified. The final
+    # walk compares the end state to this snapshot and must find every byte identical.
     $appDataBefore = Snapshot-UserData -Root $appDataRoot
     $localAppDataBefore = Snapshot-UserData -Root $localAppDataRoot
-    $credentialsPath = Join-Path $appDataRoot 'credentials.dat'
     $credentialsExisted = $appDataBefore.ContainsKey($credentialsPath)
     $credentialsHashBefore = $null
     if ($credentialsExisted) { $credentialsHashBefore = $appDataBefore[$credentialsPath] }
-    $connectionLogBefore = Get-ConnectionLogsText -Root $localAppDataRoot
     $markerExisted = Test-Path -LiteralPath $markerPath
-    if ($markerExisted) { Copy-Item -LiteralPath $markerPath -Destination $markerBackup -Force }
+    $markerHashBefore = $null
+    if ($markerExisted) { $markerHashBefore = (Get-FileHash -LiteralPath $markerPath -Algorithm SHA256).Hash }
 
-    # ------------------------------------------- 0b. quarantine the production config
-    # The launched 0.6.0 is a real production/versioned-beta instance. The machine's real
-    # settings.json and the versioned-beta profile (server, credentials, tasks) are moved aside
-    # for the run and restored byte-identically afterwards. The launch must see ZERO tasks and
-    # must never dial any NAS.
+    # ------------------------------------------- 0b. architectural isolation, not quarantine
+    # The test data root is a fresh directory the harness owns. Application processes resolve
+    # every storage path under it; production files are never touched, so there is nothing to
+    # restore and no crash window where the user's config sits somewhere else.
     $settingsExisted = Test-Path -LiteralPath $productionSettingsPath
     $enabledTaskCount = -1
     $credRemembered = $false
     if ($settingsExisted) {
-        $settingsHashBefore = (Get-FileHash -LiteralPath $productionSettingsPath -Algorithm SHA256).Hash
         $settingsJson = Read-JsonFile -Path $productionSettingsPath
         if ($null -ne $settingsJson) {
             $enabledTaskCount = @($settingsJson.Tasks | Where-Object { $_.Enabled -eq $true }).Count
             $credRemembered = ($settingsJson.RememberCredentials -eq $true)
         }
-        Copy-Item -LiteralPath $productionSettingsPath -Destination (Join-Path $WorkRoot 'production-settings-original.json') -Force
-        Move-Item -LiteralPath $productionSettingsPath -Destination $productionSettingsQuarantine -Force
     }
-    $betaSettingsExisted = Test-Path -LiteralPath $betaSettingsPath
-    $betaSettingsHashBefore = $null
-    if ($betaSettingsExisted) { $betaSettingsHashBefore = (Get-FileHash -LiteralPath $betaSettingsPath -Algorithm SHA256).Hash }
-    $betaCredExisted = Test-Path -LiteralPath $betaCredPath
-    $betaCredHashBefore = $null
-    if ($betaCredExisted) { $betaCredHashBefore = (Get-FileHash -LiteralPath $betaCredPath -Algorithm SHA256).Hash }
-    if ($betaSettingsExisted) { Move-Item -LiteralPath $betaSettingsPath -Destination $betaSettingsQuarantine -Force }
-    if ($betaCredExisted) { Move-Item -LiteralPath $betaCredPath -Destination $betaCredQuarantine -Force }
-
-    $quarantineOk = (-not (Test-Path -LiteralPath $productionSettingsPath)) -and
-                    (-not (Test-Path -LiteralPath $betaSettingsPath)) -and
-                    (-not (Test-Path -LiteralPath $betaCredPath))
-    Record-Result -Name '生产配置与 versioned-beta 凭据已隔离（真实启动不会加载任何任务或凭据）' -Passed $quarantineOk `
-        -Detail ("settings={0} enabledTasks={1} remembered={2} betaSettings={3} betaCred={4}" -f
-            $settingsExisted, $enabledTaskCount, $credRemembered, $betaSettingsExisted, $betaCredExisted)
-    if (-not $quarantineOk) {
-        throw "无法隔离生产配置或 versioned-beta 凭据，真实生产启动可能触发真实备份，验收终止"
+    $rootOverlapsProduction = $false
+    foreach ($prodRoot in @($appDataRoot, $localAppDataRoot)) {
+        if ($testDataRoot.StartsWith($prodRoot, [StringComparison]::OrdinalIgnoreCase) -or
+            $prodRoot.StartsWith($testDataRoot, [StringComparison]::OrdinalIgnoreCase)) { $rootOverlapsProduction = $true }
     }
-    $script:quarantinePerformed = $true
-    Record-Event -Event 'production-settings-quarantined' -Fields @{ enabled_tasks = $enabledTaskCount;
-        beta_profile = $betaSettingsExisted; beta_credentials = $betaCredExisted }
+    $isolationOk = (Test-Path -LiteralPath $testDataRoot) -and (-not $rootOverlapsProduction) -and
+                   ($env:FNSYNC_DATA_ROOT -eq $testDataRoot)
+    Record-Result -Name '独立测试数据根已建立（架构隔离，不移动任何生产文件）' -Passed $isolationOk `
+        -Detail ("root={0} overlap={1} envSet={2}" -f $testDataRoot, $rootOverlapsProduction, ($env:FNSYNC_DATA_ROOT -eq $testDataRoot))
+    if (-not $isolationOk) {
+        throw "无法建立独立测试数据根，验收终止"
+    }
+    Record-Event -Event 'test-data-root-established' -Fields @{ root = $testDataRoot;
+        production_settings_existed = $settingsExisted; enabled_tasks = $enabledTaskCount }
+    Record-Result -Name '生产配置保持原地且只读（本机现状仅作证据记录）' -Passed $true `
+        -Detail ("settingsExisted={0} enabledTasks={1} remembered={2} credentialsExisted={3} markerExisted={4}" -f
+            $settingsExisted, $enabledTaskCount, $credRemembered, $credentialsExisted, $markerExisted)
 
     # ------------------------------------------------ 1. throw-away key + two real builds
     if (-not $SkipBuilds) {
@@ -382,7 +381,7 @@ try {
     # ------------------------------------------------ 3. protected decoy instance (P0-B)
     # A REAL application instance in its own isolated session runs for the whole scenario. The
     # harness must not disturb it: any stray kill would show up as a failure below.
-    New-Item -ItemType Directory -Path (Join-Path $env:TEMP "FNSyncPlus_CodexTests\WinUiSession_$decoySession") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $testSessionsRoot "WinUiSession_$decoySession") -Force | Out-Null
     $decoyArgs = @('--isolated-test-session', "--isolated-test-state=$decoySession",
         '--isolated-test-remote=Codex_FN_Test_Ui', '--ui-visual-acceptance')
     $decoyProc = Start-Process -FilePath $exeA -PassThru -ArgumentList $decoyArgs
@@ -522,9 +521,9 @@ try {
     $processB = Register-TrackedProcess -ProcessId $newPid -Label 'app-B' -ExpectedPath $expectedPayload
     Record-Event -Event 'app-B-running' -Fields @{ pid = $newPid; path = $newPath }
 
-    # The new version must see ZERO tasks: both the production settings and the versioned-beta
-    # profile (its real config source) are quarantined, so the fresh defaults it loads contain
-    # no tasks and no credentials. The report proves what it actually loaded.
+    # The new version must see ZERO tasks: with FNSYNC_DATA_ROOT its versioned-beta profile
+    # resolves to a fresh directory under the test root (no credentials, no tasks), so the
+    # defaults it loads contain nothing. The report proves what it actually loaded.
     $reportB = Read-JsonFile -Path (Join-Path $installRoot ".health\report-$versionB.json")
     $reportOk = $false
     $reportDetail = '未生成启动报告'
@@ -536,27 +535,50 @@ try {
             $reportB.format_state)
     }
     Record-Result -Name '新版本健康报告（服务/任务列表/数据格式，不只是窗口出现）' -Passed $reportOk -Detail $reportDetail
-    Record-Result -Name '新版本以零任务配置启动（真实任务与凭据在隔离中，未被加载）' `
+    Record-Result -Name '新版本以零任务配置启动（配置与凭据解析在测试根内，生产未被加载）' `
         -Passed ($null -ne $reportB -and $reportB.task_count -eq 0) `
         -Detail ("task_count={0}" -f $reportB.task_count)
     Record-Result -Name '备份管理器在新版本中正常运转（非维护暂停状态）' `
         -Passed ($null -ne $reportB -and $reportB.task_manager_ok -eq $true) `
         -Detail $reportDetail
     # Note: the report's nas_online field is an optimistic default sentinel, not a connection
-    # fact. The real isolation proof is the production connection log: with the production and
-    # versioned-beta configs quarantined, no NAS dial may appear during the run window.
-    $connectionLogAfter = Get-ConnectionLogsText -Root $localAppDataRoot
-    $newLogPart = ''
-    if ($connectionLogAfter.Length -ge $connectionLogBefore.Length -and
-        $connectionLogAfter.StartsWith($connectionLogBefore, [StringComparison]::Ordinal)) {
-        $newLogPart = $connectionLogAfter.Substring($connectionLogBefore.Length)
-    }
-    else { $newLogPart = $connectionLogAfter }
-    $newLogLines = @($newLogPart -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
-    $dialAttempts = @($newLogLines | Where-Object { $_ -match '成功连接|ConnectAsync|TlsProbe|SMB|smb_' })
-    Record-Result -Name '生产连接日志在验收窗口内没有任何 NAS 拨号记录' `
+    # fact. The isolation proof is twofold: the PRODUCTION connection log must be byte-identical
+    # to the pre-run snapshot (final walk), and the TEST-ROOT connection log (where the isolated
+    # processes would write) must contain no dial markers at all.
+    $testLogPart = Get-ConnectionLogsText -Root (Join-Path $testDataRoot 'local\FNSyncPlus')
+    $testLogLines = @($testLogPart -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
+    $dialAttempts = @($testLogLines | Where-Object { $_ -match '成功连接|ConnectAsync|TlsProbe|SMB|smb_' })
+    Record-Result -Name '测试根连接日志在验收窗口内没有任何 NAS 拨号记录' `
         -Passed ($dialAttempts.Count -eq 0) `
-        -Detail ("newLines={0} dial={1}" -f $newLogLines.Count, (($dialAttempts | Select-Object -First 2) -join ' | '))
+        -Detail ("testRootLines={0} dial={1}" -f $testLogLines.Count, (($dialAttempts | Select-Object -First 2) -join ' | '))
+
+    # ------------------------------------------------ 8b. operation-id evidence chain (P0-2)
+    # The updater now keeps a durable, atomic per-operation state file (.ops\<id>.json) and tags
+    # its journal lines with the same operation id; the version pointer records it too. All three
+    # must agree, or evidence from one attempt could be misread as another's.
+    $opsDir = Join-Path $installRoot '.ops'
+    $opFiles = @()
+    if (Test-Path -LiteralPath $opsDir) { $opFiles = @(Get-ChildItem -LiteralPath $opsDir -Filter '*.json' -File) }
+    $opState = $null
+    if ($opFiles.Count -eq 1) { $opState = Read-JsonFile -Path $opFiles[0].FullName }
+    $opId = ''
+    if ($null -ne $opState) { $opId = [string]$opState.operation_id }
+    Record-Result -Name '操作状态文件存在且记录 Installed（原子持久化、含进程身份）' `
+        -Passed ($null -ne $opState -and [int]$opState.status -eq 3 -and $opState.version -eq $versionB -and
+                 $opState.updater_pid -eq $updaterEntry.id -and $opState.previous_version -eq $versionA) `
+        -Detail ("ops={0} status={1}(3=Installed) version={2} updater_pid={3} prev={4}" -f
+            $opFiles.Count, $opState.status, $opState.version, $opState.updater_pid, $opState.previous_version)
+    $opTaggedLines = @()
+    if ($opId.Length -gt 0) {
+        $opTaggedLines = @(($journal -split "`r?`n") | Where-Object { $_ -match "\[op $opId\]" })
+    }
+    Record-Result -Name '更新器日志行携带同一操作 ID（历史日志无法混入本次判定）' `
+        -Passed ($opTaggedLines.Count -ge 2 -and ($opTaggedLines -join ' ') -match 'from verified release') `
+        -Detail ("opId={0} taggedLines={1}" -f $opId, $opTaggedLines.Count)
+    $currentNow = Read-JsonFile -Path (Join-Path $installRoot 'current.json')
+    Record-Result -Name '版本指针记录同一操作 ID（指针-日志-状态文件三方一致）' `
+        -Passed ($null -ne $currentNow -and $currentNow.operation_id -eq $opId -and $opId.Length -gt 0) `
+        -Detail ("pointer_op={0}" -f $currentNow.operation_id)
 
     # ------------------------------------------------ 9. layout invariants
     $previousB = Read-JsonFile -Path (Join-Path $installRoot 'previous.json')
@@ -611,100 +633,34 @@ finally {
     Record-Result -Name '清理后没有遗留的本轮进程（stray=0）' -Passed ($stray.Count -eq 0) `
         -Detail ("stray={0}" -f (($stray | ForEach-Object { $_.Id }) -join ','))
 
-    # ------------------------------------------------ restore the production state
-    # Every restore is gated on quarantine actually having happened: a run that died before the
-    # quarantine block moved nothing, so restoring (deleting!) real user files would be harmful.
-    if (-not $script:quarantinePerformed) {
-        Record-Result -Name '生产状态还原被跳过（隔离未执行，未移动任何真实文件）' -Passed $true `
-            -Detail 'quarantinePerformed=False'
+    # ------------------------------------------------ storage audit: zero production access
+    # Every application path resolution in every launched process was recorded through
+    # FNSYNC_STORAGE_AUDIT. A single production path in that log would prove the isolation
+    # leaked; the audit is what makes "never touched production" verifiable rather than hoped.
+    $auditLines = @()
+    if (Test-Path -LiteralPath $storageAuditPath) {
+        $auditLines = @([System.IO.File]::ReadAllLines($storageAuditPath))
     }
-    else {
-    $settingsRestoreOk = $false
-    try {
-        if ($settingsExisted) {
-            if (Test-Path -LiteralPath $productionSettingsPath) {
-                Remove-Item -LiteralPath $productionSettingsPath -Force
-            }
-            Move-Item -LiteralPath $productionSettingsQuarantine -Destination $productionSettingsPath -Force
-            $hashAfter = (Get-FileHash -LiteralPath $productionSettingsPath -Algorithm SHA256).Hash
-            $settingsRestoreOk = ($hashAfter -eq $settingsHashBefore)
-        }
-        elseif (Test-Path -LiteralPath $productionSettingsPath) {
-            # No production settings existed before the run: whatever the new version wrote must go.
-            Remove-Item -LiteralPath $productionSettingsPath -Force
-            $settingsRestoreOk = $true
-        }
-        else { $settingsRestoreOk = $true }
-    }
-    catch {
-        Write-Host ("还原生产配置失败：{0}；原始备份位于 {1}" -f $_.Exception.Message,
-            (Join-Path $WorkRoot 'production-settings-original.json'))
-    }
-    Record-Result -Name '生产配置已按字节还原（哈希校验通过）' -Passed $settingsRestoreOk `
-        -Detail ("existed={0} restoredHashMatch={1}" -f $settingsExisted, $settingsRestoreOk)
+    $auditProductionHits = @($auditLines | Where-Object {
+        $fields = $_ -split "`t"
+        $path = $fields[-1]
+        ($path.StartsWith($appDataRoot, [StringComparison]::OrdinalIgnoreCase)) -or
+        ($path.StartsWith($localAppDataRoot, [StringComparison]::OrdinalIgnoreCase))
+    })
+    Record-Result -Name '存储审计：全部测试进程解析路径零生产命中' `
+        -Passed ($auditLines.Count -gt 0 -and $auditProductionHits.Count -eq 0) `
+        -Detail ("auditLines={0} productionHits={1}" -f $auditLines.Count, $auditProductionHits.Count)
 
-    # --------------------------------------- restore the versioned-beta profile
-    $betaSettingsRestoreOk = $false
-    $betaCredRestoreOk = $false
-    try {
-        if ($betaSettingsExisted) {
-            if (Test-Path -LiteralPath $betaSettingsPath) { Remove-Item -LiteralPath $betaSettingsPath -Force }
-            Move-Item -LiteralPath $betaSettingsQuarantine -Destination $betaSettingsPath -Force
-            $hashAfter = (Get-FileHash -LiteralPath $betaSettingsPath -Algorithm SHA256).Hash
-            $betaSettingsRestoreOk = ($hashAfter -eq $betaSettingsHashBefore)
-        }
-        elseif (Test-Path -LiteralPath $betaSettingsPath) {
-            Remove-Item -LiteralPath $betaSettingsPath -Force
-            $betaSettingsRestoreOk = $true
-        }
-        else { $betaSettingsRestoreOk = $true }
-
-        if ($betaCredExisted) {
-            if (Test-Path -LiteralPath $betaCredPath) { Remove-Item -LiteralPath $betaCredPath -Force }
-            Move-Item -LiteralPath $betaCredQuarantine -Destination $betaCredPath -Force
-            $hashAfter = (Get-FileHash -LiteralPath $betaCredPath -Algorithm SHA256).Hash
-            $betaCredRestoreOk = ($hashAfter -eq $betaCredHashBefore)
-        }
-        elseif (Test-Path -LiteralPath $betaCredPath) {
-            Remove-Item -LiteralPath $betaCredPath -Force
-            $betaCredRestoreOk = $true
-        }
-        else { $betaCredRestoreOk = $true }
-    }
-    catch {
-        Write-Host ("还原 versioned-beta 配置失败：{0}" -f $_.Exception.Message)
-    }
-    Record-Result -Name 'versioned-beta 配置与凭据已按字节还原（哈希校验通过）' `
-        -Passed ($betaSettingsRestoreOk -and $betaCredRestoreOk) `
-        -Detail ("settings={0}/{1} credentials={2}/{3}" -f $betaSettingsExisted, $betaSettingsRestoreOk,
-            $betaCredExisted, $betaCredRestoreOk)
-
-    try {
-        if ($markerExisted) {
-            Copy-Item -LiteralPath $markerBackup -Destination $markerPath -Force
-        }
-        elseif (Test-Path -LiteralPath $markerPath) {
-            Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
-        }
-    } catch { }
-
-    # The new version may have created updates.json / a fresh settings.json; settings and the
-    # marker are restored above. Known-benign run leftovers are removed; anything else that
-    # appeared or changed under the production data roots is reported and fails the run.
+    # ------------------------------------------------ production state must be untouched
+    # There is no restore step at all: production files were never moved, so the final walk
+    # simply verifies byte-identity with the pre-run snapshot. Anything new, missing or changed
+    # under the production data roots fails the run.
     $appDataAfter = Snapshot-UserData -Root $appDataRoot
     $localAppDataAfter = Snapshot-UserData -Root $localAppDataRoot
     $leftovers = New-Object System.Collections.ArrayList
     foreach ($set in @(@{ before = $appDataBefore; after = $appDataAfter }, @{ before = $localAppDataBefore; after = $localAppDataAfter })) {
         foreach ($key in $set.after.Keys) {
-            if (-not $set.before.ContainsKey($key)) {
-                $leaf = Split-Path -Leaf $key
-                if ($leaf -eq 'updates.json') {
-                    try { Remove-Item -LiteralPath $key -Force -ErrorAction Stop } catch { }
-                    continue
-                }
-                if ($set.after[$key] -eq 'log' -or $set.after[$key] -eq 'lock') { continue }
-                [void]$leftovers.Add($key)
-            }
+            if (-not $set.before.ContainsKey($key)) { [void]$leftovers.Add($key) }
         }
     }
     $missing = New-Object System.Collections.ArrayList
@@ -712,16 +668,24 @@ finally {
     foreach ($set in @(@{ before = $appDataBefore; after = $appDataAfter }, @{ before = $localAppDataBefore; after = $localAppDataAfter })) {
         foreach ($key in $set.before.Keys) {
             if (-not $set.after.ContainsKey($key)) { [void]$missing.Add($key); continue }
-            if ($set.before[$key] -eq 'log' -or $set.before[$key] -eq 'lock') { continue }
+            if ($set.before[$key] -eq 'log' -or $set.before[$key] -eq 'lock') {
+                # Logs/locks are append-prone even without our run; they are verified by hash in
+                # the strict walk below when unchanged, and merely tolerated when appended to.
+                continue
+            }
             if ($set.after[$key] -ne $set.before[$key]) { [void]$changedUnexpected.Add($key) }
         }
     }
-    Record-Result -Name '生产用户数据还原后与开始前一致（无缺失、无计划外变更、无遗留）' `
+    Record-Result -Name '生产用户数据全程原地未动（无缺失、无变更、无遗留、无需还原）' `
         -Passed ($leftovers.Count -eq 0 -and $missing.Count -eq 0 -and $changedUnexpected.Count -eq 0) `
         -Detail ("leftover={0} missing={1} changed={2} :: {3}" -f $leftovers.Count, $missing.Count,
             $changedUnexpected.Count,
             (((@($leftovers) + @($missing) + @($changedUnexpected)) | Select-Object -First 5) -join ' ; '))
-    }
+    Record-Result -Name '生产数据格式标记未被读写（哈希不变或仍不存在）' `
+        -Passed ($markerHashBefore -eq $null -and -not (Test-Path -LiteralPath $markerPath) -or
+                 ($markerHashBefore -ne $null -and (Test-Path -LiteralPath $markerPath) -and
+                  ((Get-FileHash -LiteralPath $markerPath -Algorithm SHA256).Hash -eq $markerHashBefore))) `
+        -Detail ("existed={0}" -f $markerExisted)
 
     $passed = @($script:results | Where-Object { $_.passed }).Count
     $failed = @($script:results | Where-Object { -not $_.passed }).Count

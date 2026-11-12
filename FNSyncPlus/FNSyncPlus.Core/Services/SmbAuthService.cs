@@ -1044,8 +1044,7 @@ namespace FNSyncPlus.Core.Services
 
         private static string GetCredentialStoragePath()
         {
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            string folder = Path.Combine(appData, "FNSyncPlus");
+            string folder = AppStorageRoot.RoamingAppDataDir();
             if (!Directory.Exists(folder))
             {
                 Directory.CreateDirectory(folder);

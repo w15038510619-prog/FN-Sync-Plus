@@ -63,6 +63,11 @@ namespace FNSyncPlus.WinUI
                     instanceName += ".Isolated." +
                         (stateArg != null ? stateArg["--isolated-test-state=".Length..] : "Unbounded");
                 }
+                // An isolated test DATA ROOT (FNSYNC_DATA_ROOT) additionally isolates the
+                // versioned-beta profile's instance identity: a test-root beta session must
+                // never take, signal or block the production single-instance mutex.
+                string? rootSuffix = AppStorageRoot.SingleInstanceSuffix();
+                if (rootSuffix != null) instanceName += rootSuffix;
                 _singleInstance = new SingleInstanceCoordinator(instanceName);
                 if (!_singleInstance.IsPrimary)
                 {
@@ -312,8 +317,7 @@ namespace FNSyncPlus.WinUI
         /// </summary>
         private static bool EnsureDataFormatCompatible()
         {
-            string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "FNSyncPlus", "data-format.json");
+            string path = Path.Combine(AppStorageRoot.LocalAppDataDir(), "data-format.json");
             var guard = new DataFormatGuard(path, SupportedDataFormat,
                 message => LogService.Default.LogConnection("WARN", "[data-format] " + message));
             if (guard.TryClaim(UpdateService.CurrentVersion.ToString(), out string error)) return true;
@@ -387,8 +391,7 @@ namespace FNSyncPlus.WinUI
             bool formatOk = false;
             try
             {
-                string marker = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "FNSyncPlus", "data-format.json");
+                string marker = Path.Combine(AppStorageRoot.LocalAppDataDir(), "data-format.json");
                 var probe = new DataFormatGuard(marker, SupportedDataFormat).Probe();
                 report["config_readable"] = probe.State == FormatMarkerState.Valid;
                 report["data_format"] = probe.Format;
@@ -431,8 +434,8 @@ namespace FNSyncPlus.WinUI
             {
                 bool isolated = Array.Exists(Environment.GetCommandLineArgs(), arg => arg.Equals("--isolated-test-session", StringComparison.Ordinal));
                 string logDir = isolated
-                    ? AppServices.IsolatedLogsDirectory ?? Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", "startup-crashes")
-                    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "logs");
+                    ? AppServices.IsolatedLogsDirectory ?? Path.Combine(AppStorageRoot.TestSessionsRoot(), "startup-crashes")
+                    : Path.Combine(AppStorageRoot.LocalAppDataDir(), "logs");
                 Directory.CreateDirectory(logDir);
 
                 string logFile = Path.Combine(logDir, $"crash_{DateTime.Now:yyyyMMdd}.log");

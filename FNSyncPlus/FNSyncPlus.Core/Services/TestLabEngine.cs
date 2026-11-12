@@ -73,8 +73,7 @@ namespace FNSyncPlus.Core.Services
         private readonly SmbAuthService _smbService;
 
         public static string TestLabBaseDir => Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "FNSyncPlus",
+            AppStorageRoot.LocalAppDataDir(),
             "TestLab");
 
         public static string TestSourceDir => Path.Combine(TestLabBaseDir, "Source");

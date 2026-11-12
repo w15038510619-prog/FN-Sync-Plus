@@ -634,7 +634,7 @@ public sealed class LegacyTaskMigrationInspector
     }
 
     private static string GetMigrationIntentDirectory() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "migration-journal");
+        AppStorageRoot.LocalAppDataDir(), "migration-journal");
 
     /// <summary>Merges fields into the existing intent record; never drops earlier evidence.</summary>
     private static async Task UpdateIntentAsync(string path, IReadOnlyDictionary<string, object?> fields, CancellationToken token)

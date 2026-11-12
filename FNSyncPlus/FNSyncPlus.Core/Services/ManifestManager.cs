@@ -56,9 +56,8 @@ namespace FNSyncPlus.Core.Services
         /// </summary>
         public static string GetLocalCachePath(string targetFolder)
         {
-            string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             string safeDir = PathHelper.RemoveLongPathPrefix(targetFolder).Trim().Replace('/', '_').Replace('\\', '_').Replace(':', '_');
-            return Path.Combine(localApp, "FNSyncPlus", "manifest_cache", safeDir, "manifest.json");
+            return Path.Combine(AppStorageRoot.LocalAppDataDir(), "manifest_cache", safeDir, "manifest.json");
         }
 
         public static string GetMetadataDirectory(string targetRootDirectory)
