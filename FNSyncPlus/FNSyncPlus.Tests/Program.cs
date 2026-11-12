@@ -113,6 +113,45 @@ namespace FNSyncPlus.Tests
                 }
             }
 
+            if (args.Contains("--handoff-process-tests"))
+            {
+                string root = Path.Combine(Path.GetTempPath(), "FNSync_handoff_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var cases = new List<UpdateSuiteCase>();
+                    cases.AddRange(await new UpdateHandoffLifecycleTestSuite().RunAsync(Path.Combine(root, "lifecycle")));
+                    foreach (var item in cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    int failed = cases.Count(c => !c.Passed);
+                    Console.WriteLine($"更新交接专项测试：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                    return failed == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch (IOException) { }
+                }
+            }
+
+            if (args.Contains("--ui-isolation-tests"))
+            {
+                string? resultPath = Array.Find(args, arg => arg.StartsWith("--ui-result=", StringComparison.Ordinal));
+                if (resultPath != null) resultPath = resultPath["--ui-result=".Length..];
+                string root = Path.Combine(Path.GetTempPath(), "FNSync_uiiso_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var cases = await new UiIsolationTestSuite().RunAsync(root, resultPath);
+                    foreach (var item in cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    int failed = cases.Count(c => !c.Passed);
+                    Console.WriteLine($"UI 隔离专项测试：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                    return failed == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch (IOException) { }
+                }
+            }
+
             if (args.Contains("--stress-tests"))
             {
                 string stressRoot = Path.Combine(Path.GetTempPath(), "FNSync_stress_" + Guid.NewGuid().ToString("N"));

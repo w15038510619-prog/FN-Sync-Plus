@@ -78,7 +78,11 @@ namespace FNSyncPlus.Core.Services
         private string? EphemeralIsolatedLogDirectory { get; set; }
 
         public static AppSettings CreateInMemory() => new AppSettings { IsInMemoryOnly = true };
-        public static AppSettings CreateUnboundedIsolatedSession() => new AppSettings { IsInMemoryOnly = true, RequiresIsolatedTestBoundary = true };
+        // A fresh isolated session has no stored credentials to remember. Defaulting this to
+        // true made a brand-new session claim remembered credentials it never saved; whether a
+        // shared test credential file exists is decided by the host (AppServices), explicitly.
+        public static AppSettings CreateUnboundedIsolatedSession() =>
+            new AppSettings { IsInMemoryOnly = true, RequiresIsolatedTestBoundary = true, RememberCredentials = false };
         public static AppSettings CreateForTest(string testFilePath) => new AppSettings { CustomConfigPath = testFilePath };
 
         public string GetIsolatedLogDirectory()
@@ -162,7 +166,11 @@ namespace FNSyncPlus.Core.Services
             string folder = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", $"WinUiSession_{id:N}");
             Directory.CreateDirectory(folder);
             string path = Path.Combine(folder, "settings.json");
-            var settings = File.Exists(path) ? FromJson(File.ReadAllText(path)) : new AppSettings();
+            // A brand-new session has never saved credentials, so it must not claim to remember
+            // any; a stored file may opt in explicitly. The host (AppServices) decides whether a
+            // shared test credential file applies, and the pure visual mode never reads any.
+            var settings = File.Exists(path) ? FromJson(File.ReadAllText(path))
+                : new AppSettings { RememberCredentials = false };
             settings.IsInMemoryOnly = true;
             settings.IsolatedSessionPath = path;
             return settings;
