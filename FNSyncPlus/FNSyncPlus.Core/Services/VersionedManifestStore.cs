@@ -28,6 +28,7 @@ public sealed class VersionedManifestStore
 
     private static string DirectoryPath(string target)
     {
+        if (string.IsNullOrWhiteSpace(target)) return VersionDirectory;
         if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("版本化清单目标必须是安全的相对路径", nameof(target));
         return $"{PathHelper.NormalizeRelPath(target)}/{VersionDirectory}";
     }

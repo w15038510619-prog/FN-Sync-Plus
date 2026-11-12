@@ -116,22 +116,20 @@ namespace FNSyncPlus.Core.Services
         private async Task<DiscoveredBackupPackage?> DiscoverProviderPackageAsync(INasStorageProvider provider,
             string path, string name, CancellationToken token)
         {
-            if (!string.IsNullOrEmpty(path))
+            string normalized = PathHelper.NormalizeRelPath(path);
+            string metaPath = string.IsNullOrEmpty(normalized) ? ".fnsync" : $"{normalized}/.fnsync";
+            var metaDirectory = await provider.GetItemAsync(metaPath, token).ConfigureAwait(false);
+            if (metaDirectory != null && !metaDirectory.IsDirectory) throw new InvalidDataException("备份元数据路径不是目录");
+            var versionDirectory = metaDirectory == null ? null :
+                await provider.GetItemAsync($"{metaPath}/manifest-versions", token).ConfigureAwait(false);
+            if (versionDirectory != null)
             {
-                string metaPath = $"{path.TrimEnd('/', '\\')}/.fnsync";
-                var metaDirectory = await provider.GetItemAsync(metaPath, token).ConfigureAwait(false);
-                if (metaDirectory != null && !metaDirectory.IsDirectory) throw new InvalidDataException("备份元数据路径不是目录");
-                var versionDirectory = metaDirectory == null ? null :
-                    await provider.GetItemAsync($"{metaPath}/manifest-versions", token).ConfigureAwait(false);
-                if (versionDirectory != null)
-                {
-                    if (!versionDirectory.IsDirectory) throw new InvalidDataException("版本化清单路径不是目录");
-                    var inspection = await new VersionedManifestStore().InspectForRestoreAsync(provider, path, token).ConfigureAwait(false);
-                    var snapshot = inspection.Snapshot ?? throw new InvalidDataException("存在版本化清单目录，但没有有效提交");
-                    var package = PackageFromManifest(name, path, snapshot.Manifest, snapshot.Id);
-                    package.HasDamagedVersionRecords = inspection.HasInvalidRecords;
-                    return package;
-                }
+                if (!versionDirectory.IsDirectory) throw new InvalidDataException("版本化清单路径不是目录");
+                var inspection = await new VersionedManifestStore().InspectForRestoreAsync(provider, path, token).ConfigureAwait(false);
+                var snapshot = inspection.Snapshot ?? throw new InvalidDataException("存在版本化清单目录，但没有有效提交");
+                var package = PackageFromManifest(name, path, snapshot.Manifest, snapshot.Id);
+                package.HasDamagedVersionRecords = inspection.HasInvalidRecords;
+                return package;
             }
             var manifest = await _manifestManager.LoadManifestAsync(provider, path, token).ConfigureAwait(false);
             return manifest.IsNew ? null : PackageFromManifest(name, path, manifest);
@@ -172,9 +170,21 @@ namespace FNSyncPlus.Core.Services
                 // 1. 检查根目录本身是否就是一个备份包
                 string rootMeta = Path.Combine(longRoot, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName);
                 string legacyRootMeta = Path.Combine(longRoot, Manifest.LegacyManifestFileName);
+                string rootVersionDir = Path.Combine(longRoot, Manifest.MetadataDirName, "manifest-versions");
                 try
                 {
-                    if (ManifestFilePresent(rootMeta) || ManifestFilePresent(legacyRootMeta))
+                    if (Directory.Exists(rootVersionDir))
+                    {
+                        var provider = new SmbStorageProvider(rootUncPath: nasBackupRootUnc);
+                        var inspection = await new VersionedManifestStore().InspectForRestoreAsync(provider, "", cancellationToken).ConfigureAwait(false);
+                        if (inspection.Snapshot != null)
+                        {
+                            var package = PackageFromManifest(rootDi.Name, nasBackupRootUnc, inspection.Snapshot.Manifest, inspection.Snapshot.Id);
+                            package.HasDamagedVersionRecords = inspection.HasInvalidRecords;
+                            result.Add(package);
+                        }
+                    }
+                    else if (ManifestFilePresent(rootMeta) || ManifestFilePresent(legacyRootMeta))
                     {
                         var m = await _manifestManager.LoadManifestAsync(nasBackupRootUnc, cancellationToken);
                         if (!m.IsNew)
@@ -211,10 +221,22 @@ namespace FNSyncPlus.Core.Services
                         string subUnc = PathHelper.RemoveLongPathPrefix(sub.FullName);
                         string subMeta = Path.Combine(sub.FullName, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName);
                         string legacySubMeta = Path.Combine(sub.FullName, Manifest.LegacyManifestFileName);
+                        string subVersionDir = Path.Combine(sub.FullName, Manifest.MetadataDirName, "manifest-versions");
 
                         try
                         {
-                            if (ManifestFilePresent(subMeta) || ManifestFilePresent(legacySubMeta))
+                            if (Directory.Exists(subVersionDir))
+                            {
+                                var provider = new SmbStorageProvider(rootUncPath: subUnc);
+                                var inspection = await new VersionedManifestStore().InspectForRestoreAsync(provider, "", cancellationToken).ConfigureAwait(false);
+                                if (inspection.Snapshot != null)
+                                {
+                                    var package = PackageFromManifest(sub.Name, subUnc, inspection.Snapshot.Manifest, inspection.Snapshot.Id);
+                                    package.HasDamagedVersionRecords = inspection.HasInvalidRecords;
+                                    result.Add(package);
+                                }
+                            }
+                            else if (ManifestFilePresent(subMeta) || ManifestFilePresent(legacySubMeta))
                             {
                                 var m = await _manifestManager.LoadManifestAsync(subUnc, cancellationToken);
                                 result.Add(new DiscoveredBackupPackage

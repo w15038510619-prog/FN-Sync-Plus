@@ -155,6 +155,19 @@ namespace FNSyncPlus.Tests
                 }
             }
 
+            if (args.Contains("--independent-recovery-tests"))
+            {
+                string root = Path.Combine(Path.GetTempPath(), "FNSync_recovery_" + Guid.NewGuid().ToString("N"));
+                var cases = await new IndependentRecoveryTestSuite().RunAsync(root);
+                foreach (var item in cases)
+                    Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                int failed = cases.Count(c => !c.Passed);
+                Console.WriteLine($"独立环境恢复专项测试：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                Console.WriteLine($"环境等级：{IndependentRecoveryTestSuite.EnvironmentLevel}");
+                Console.WriteLine($"恢复证据目录：{root}");
+                return failed == 0 ? 0 : 1;
+            }
+
             if (args.Contains("--handoff-process-tests"))
             {
                 string root = Path.Combine(Path.GetTempPath(), "FNSync_handoff_" + Guid.NewGuid().ToString("N"));
