@@ -240,8 +240,33 @@ public sealed class DataFormatGuard
                 writer.Flush();
                 stream.Flush(flushToDisk: true);
             }
-            if (File.Exists(_path)) File.Replace(temp, _path, null);
-            else File.Move(temp, _path);
+            bool replaced = false;
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    if (File.Exists(_path))
+                    {
+                        try { File.Replace(temp, _path, null); }
+                        catch (IOException) { File.Move(temp, _path, overwrite: true); }
+                    }
+                    else
+                    {
+                        File.Move(temp, _path);
+                    }
+                    replaced = true;
+                    break;
+                }
+                catch (IOException) when (attempt < 4)
+                {
+                    Thread.Sleep(50);
+                }
+            }
+            if (!replaced)
+            {
+                error = "无法替换配置格式标记文件";
+                return false;
+            }
 
             // Confirm what actually landed: a silently truncated write must not be reported as ok.
             var probe = Probe();

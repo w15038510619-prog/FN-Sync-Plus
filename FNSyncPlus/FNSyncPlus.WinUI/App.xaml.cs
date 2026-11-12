@@ -154,10 +154,12 @@ namespace FNSyncPlus.WinUI
                     catch (Exception ex) { LogCrashException(ex, "App.SingleInstanceDispatch"); }
                 });
                 if (AppServices.IsUiVisualAcceptance ||
-                    Array.Exists(cmdArgs, arg => arg.StartsWith("--update-handoff-probe=", StringComparison.Ordinal)))
+                    Array.Exists(cmdArgs, arg => arg.StartsWith("--update-handoff-probe=", StringComparison.Ordinal)) ||
+                    Array.Exists(cmdArgs, arg => arg.StartsWith("--update-https-probe=", StringComparison.Ordinal)))
                 {
-                    // Pure visual acceptance / update-handoff probe: never read any saved
-                    // credentials and never dial any NAS, not even the isolated test-session ones.
+                    // Pure visual acceptance / update-handoff probe / HTTPS update probe: never
+                    // read any saved credentials and never dial any NAS, not even the isolated
+                    // test-session ones.
                     System.Diagnostics.Debug.WriteLine("测试会话：跳过隔离会话自动连接");
                 }
                 else if (AppServices.IsIsolatedTestSession || AppServices.IsVersionedBetaSession)
@@ -195,6 +197,20 @@ namespace FNSyncPlus.WinUI
                 {
                     string descriptorPath = handoffArg["--update-handoff-probe=".Length..].Trim('"');
                     RunHandoffProbe(descriptorPath);
+                }
+
+                // HTTPS update probe (test harness only, isolated sessions only): runs the REAL
+                // check -> download -> (with --update-https-install) install sequence against the
+                // manifest URL configured in updates.json, recording every step. This is the
+                // production UpdateService code path; only the server is the isolated Kestrel
+                // acceptance server, and only the harness supplies the report path.
+                string? httpsArg = Array.Find(cmdArgs, arg => arg.StartsWith("--update-https-probe=", StringComparison.OrdinalIgnoreCase));
+                if (httpsArg != null && AppServices.IsIsolatedTestSession)
+                {
+                    string reportPath = httpsArg["--update-https-probe=".Length..].Trim('"');
+                    bool installRequested = Array.Exists(cmdArgs,
+                        arg => arg.Equals("--update-https-install", StringComparison.OrdinalIgnoreCase));
+                    RunHttpsUpdateProbe(reportPath, installRequested);
                 }
             }
             catch (Exception ex)
@@ -277,6 +293,103 @@ namespace FNSyncPlus.WinUI
                     }
                     catch { }
                     LogCrashException(ex, "App.HandoffProbe");
+                }
+            });
+        }
+
+        /// <summary>
+        /// Drives the real HTTPS update flow (check, download, optional install handoff) and writes
+        /// every outcome — URL, version, signature algorithm, SHA-256, PIDs, lease state — to the
+        /// probe report so the HTTPS acceptance can quote facts. Never enabled in production.
+        /// </summary>
+        private static void RunHttpsUpdateProbe(string reportPath, bool installRequested)
+        {
+            _ = System.Threading.Tasks.Task.Run(async () =>
+            {
+                var payload = new Dictionary<string, object?>
+                {
+                    ["probe"] = "https-update",
+                    ["app_pid"] = Environment.ProcessId,
+                    ["attempted_at"] = DateTimeOffset.UtcNow,
+                    ["install_requested"] = installRequested,
+                };
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(reportPath))!);
+                    var service = AppServices.GetService<UpdateService>();
+                    payload["manifest_url"] = service.Settings.ManifestUrl;
+                    payload["channel"] = service.CurrentChannelName;
+                    payload["support_message"] = service.SupportMessage;
+                    payload["can_check"] = service.CanCheck;
+                    payload["can_install"] = service.CanInstall;
+
+                    var check = await service.CheckAsync().ConfigureAwait(false);
+                    payload["has_update"] = check.HasUpdate;
+                    payload["version"] = check.Version;
+                    payload["notes"] = check.Notes;
+                    payload["check_error"] = check.Error;
+                    if (!check.HasUpdate || check.Release == null)
+                    {
+                        WriteProbeReport(reportPath, payload);
+                        return;
+                    }
+                    payload["signature_algorithm"] = "ECDSA P-256 / SHA-256";
+                    payload["release_url"] = check.Release.PackageUrl;
+                    payload["release_sha256"] = check.Release.Sha256;
+                    payload["release_size"] = check.Release.Size;
+
+                    var (download, downloaded) = await service.DownloadAsync(check.Release).ConfigureAwait(false);
+                    payload["download_ok"] = download.Ok;
+                    payload["download_error"] = download.Error;
+                    payload["download_path"] = download.FilePath;
+                    if (download.Ok && File.Exists(download.FilePath))
+                    {
+                        payload["download_size"] = new FileInfo(download.FilePath).Length;
+                        payload["download_sha256"] = Convert.ToHexString(
+                            System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(download.FilePath)));
+                    }
+                    if (!download.Ok || downloaded == null || !installRequested)
+                    {
+                        WriteProbeReport(reportPath, payload);
+                        return;
+                    }
+
+                    var session = await service.BeginInstallAsync(downloaded, TimeSpan.FromMinutes(2)).ConfigureAwait(false);
+                    payload["prepared"] = session.Plan.Ready;
+                    payload["prepare_error"] = session.Readiness.Reason;
+                    payload["operation_id"] = session.OperationId;
+                    payload["target_version"] = session.Release?.Version;
+                    payload["session_state"] = session.State.ToString();
+                    payload["lease_held_after_prepare"] = session.HoldsQueue;
+                    if (!session.Plan.Ready)
+                    {
+                        WriteProbeReport(reportPath, payload);
+                        return;
+                    }
+
+                    if (!service.TryStartUpdater(session, TimeSpan.FromMinutes(2), out string startError))
+                    {
+                        payload["updater_started"] = false;
+                        payload["updater_error"] = startError;
+                        payload["session_state"] = session.State.ToString();
+                        WriteProbeReport(reportPath, payload);
+                        return;
+                    }
+                    payload["updater_started"] = true;
+                    payload["updater_pid"] = session.UpdaterProcessId;
+                    bool delivered = AppServices.GetService<FNSyncPlus.Core.Updates.IApplicationShutdownCoordinator>()
+                        .RequestShutdown("HTTPS 更新探针：程序将退出并安装更新");
+                    payload["shutdown_delivered"] = delivered;
+                    if (delivered) session.MarkShutdownRequested();
+                    payload["session_state"] = session.State.ToString();
+                    payload["lease_held_before_exit"] = session.HoldsQueue;
+                    WriteProbeReport(reportPath, payload);
+                }
+                catch (Exception ex)
+                {
+                    payload["error"] = $"{ex.GetType().Name}: {ex.Message}";
+                    try { WriteProbeReport(reportPath, payload); } catch { }
+                    LogCrashException(ex, "App.HttpsUpdateProbe");
                 }
             });
         }

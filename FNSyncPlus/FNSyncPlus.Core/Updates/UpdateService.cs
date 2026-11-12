@@ -46,7 +46,7 @@ public sealed class UpdateService
         System.Net.Http.HttpMessageHandler? httpHandler = null)
     {
         _http = httpHandler == null
-            ? new HttpClient { Timeout = TimeSpan.FromSeconds(30) }
+            ? new HttpClient(CreatePlatformHandler()) { Timeout = TimeSpan.FromSeconds(30) }
             : new HttpClient(httpHandler) { Timeout = TimeSpan.FromSeconds(30) };
         Settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _settingsPath = settingsPath ?? throw new ArgumentNullException(nameof(settingsPath));
@@ -78,6 +78,39 @@ public sealed class UpdateService
                 saveConfiguration: SaveOrThrowAsync,
                 log: Log);
         }
+    }
+
+    /// <summary>
+    /// Production handler with full platform certificate validation. The single, narrow exception
+    /// is the isolated-acceptance pin: only when this process runs under an overridden test data
+    /// root (FNSYNC_DATA_ROOT) AND FNSYNC_UPDATE_TEST_CERT_PIN names the exact thumbprint of the
+    /// throw-away Kestrel certificate does a self-signed certificate pass — and then only that one
+    /// certificate. Production sessions never have a test root, so the pin can never weaken real
+    /// validation; a valid chain always passes on its own merits first.
+    /// </summary>
+    private static System.Net.Http.HttpMessageHandler CreatePlatformHandler()
+    {
+        var handler = new System.Net.Http.HttpClientHandler();
+        string? pin = TestUpdateServerPin();
+        if (pin != null)
+        {
+            handler.ServerCertificateCustomValidationCallback = (_, certificate, _, errors) =>
+            {
+                if (errors == System.Net.Security.SslPolicyErrors.None) return true;
+                return certificate != null &&
+                       string.Equals(certificate.Thumbprint, pin, StringComparison.OrdinalIgnoreCase);
+            };
+        }
+        return handler;
+    }
+
+    /// <summary>The acceptance-only update-server certificate pin, or null in every real session.
+    /// Internal so the HTTPS acceptance suite can assert the gating itself.</summary>
+    internal static string? TestUpdateServerPin()
+    {
+        if (!Services.AppStorageRoot.IsIsolatedTestRoot) return null;
+        string? pin = Environment.GetEnvironmentVariable("FNSYNC_UPDATE_TEST_CERT_PIN");
+        return string.IsNullOrWhiteSpace(pin) ? null : pin.Trim();
     }
 
     public UpdateSettings Settings { get; }
