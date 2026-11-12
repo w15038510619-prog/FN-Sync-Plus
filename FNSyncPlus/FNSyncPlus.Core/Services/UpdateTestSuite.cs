@@ -33,6 +33,11 @@ public sealed record UpdateSuiteReport(IReadOnlyList<UpdateSuiteCase> Cases, int
 /// </summary>
 public sealed class UpdateTestSuite
 {
+    // Bound once per run so helper assertions describe the same package the suite built.
+    private string _packagePath = "";
+    private string _packageHash = "";
+    private byte[] _packageBytes = Array.Empty<byte>();
+
     public async Task<UpdateSuiteReport> RunAsync(string workspace, CancellationToken token = default)
     {
         if (string.IsNullOrWhiteSpace(workspace)) throw new ArgumentException("测试工作目录不能为空", nameof(workspace));
@@ -65,6 +70,9 @@ public sealed class UpdateTestSuite
         string packagePath = Path.Combine(packageDir, "FN-Sync-Plus-0.5.0-x64.zip");
         await File.WriteAllBytesAsync(packagePath, package, token);
         string packageHash = Convert.ToHexString(SHA256.HashData(package));
+        _packagePath = packagePath;
+        _packageHash = packageHash;
+        _packageBytes = package;
 
         using var server = new LoopbackHttpsServer(token);
         string baseUrl = server.BaseUrl;
@@ -176,8 +184,8 @@ public sealed class UpdateTestSuite
             Publish(BuildManifest());
             string downloadDir = Path.Combine(workspace, "download-ok");
             using var client = new UpdateClient(verifier, Settings(baseUrl), server.CreateClient());
-            var download = await client.DownloadAsync(new Version(0, 4, 0), identity, downloadDir, token: token)
-                .ConfigureAwait(false);
+            var check = await client.CheckAsync(new Version(0, 4, 0), identity, token).ConfigureAwait(false);
+            var download = await client.DownloadAsync(check.Release!, downloadDir, token: token).ConfigureAwait(false);
             bool match = download.Ok && File.Exists(download.FilePath) &&
                          Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(download.FilePath, token))) == packageHash;
             return (match, download.Error);
@@ -191,8 +199,8 @@ public sealed class UpdateTestSuite
             server.Set("/pkg.zip", tampered);   // after Publish: it also sets /pkg.zip
             string downloadDir = Path.Combine(workspace, "download-bad");
             using var client = new UpdateClient(verifier, Settings(baseUrl), server.CreateClient());
-            var download = await client.DownloadAsync(new Version(0, 4, 0), identity, downloadDir, token: token)
-                .ConfigureAwait(false);
+            var check = await client.CheckAsync(new Version(0, 4, 0), identity, token).ConfigureAwait(false);
+            var download = await client.DownloadAsync(check.Release!, downloadDir, token: token).ConfigureAwait(false);
             bool cleaned = !File.Exists(download.FilePath + ".partial");
             server.Set("/pkg.zip", package);
             return (!download.Ok && cleaned && download.Error.Contains("SHA-256", StringComparison.Ordinal), download.Error);
@@ -208,8 +216,8 @@ public sealed class UpdateTestSuite
             await File.WriteAllBytesAsync(target + ".partial", package[..half], token);
             server.SawRangeRequest = false;
             using var client = new UpdateClient(verifier, Settings(baseUrl), server.CreateClient());
-            var download = await client.DownloadAsync(new Version(0, 4, 0), identity, downloadDir, token: token)
-                .ConfigureAwait(false);
+            var check = await client.CheckAsync(new Version(0, 4, 0), identity, token).ConfigureAwait(false);
+            var download = await client.DownloadAsync(check.Release!, downloadDir, token: token).ConfigureAwait(false);
             bool ok = download.Ok && server.SawRangeRequest &&
                       Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(download.FilePath, token))) == packageHash;
             return (ok, $"ok={download.Ok} range={server.SawRangeRequest} {download.Error}");
@@ -273,10 +281,10 @@ public sealed class UpdateTestSuite
         await Case("正常安装切换指针、写入日志并保留旧版本目录", async () =>
         {
             string root = Path.Combine(workspace, "layout-ok");
-            var layout = new VersionedInstallLayout(root);
+            var layout = new VersionedInstallLayout(root, Path.Combine(workspace, $"marker-{Path.GetFileName(root)}.json"));
             await InstallSeedAsync(layout, "0.4.0", token);
             var installer = new UpdateInstaller(layout, _ => Task.FromResult(true));
-            var outcome = await installer.ApplyAsync(packagePath, "0.5.0", packageHash, Path.Combine(workspace, "work-ok"), token)
+            var outcome = await installer.ApplyAsync(Release("0.5.0"), Path.Combine(workspace, "work-ok"), token)
                 .ConfigureAwait(false);
             bool ok = outcome.Ok && layout.ActiveVersion == "0.5.0" && layout.PreviousVersion == "0.4.0" &&
                       Directory.Exists(layout.VersionDirectory("0.4.0")) && Directory.Exists(layout.VersionDirectory("0.5.0")) &&
@@ -287,10 +295,10 @@ public sealed class UpdateTestSuite
         await Case("启动验证失败时回滚指针但保留失败目录以便排查", async () =>
         {
             string root = Path.Combine(workspace, "layout-rollback");
-            var layout = new VersionedInstallLayout(root);
+            var layout = new VersionedInstallLayout(root, Path.Combine(workspace, $"marker-{Path.GetFileName(root)}.json"));
             await InstallSeedAsync(layout, "0.4.0", token);
             var installer = new UpdateInstaller(layout, _ => Task.FromResult(false));
-            var outcome = await installer.ApplyAsync(packagePath, "0.5.0", packageHash, Path.Combine(workspace, "work-rb"), token)
+            var outcome = await installer.ApplyAsync(Release("0.5.0"), Path.Combine(workspace, "work-rb"), token)
                 .ConfigureAwait(false);
             bool ok = !outcome.Ok && outcome.RolledBack && layout.ActiveVersion == "0.4.0" &&
                       Directory.Exists(layout.VersionDirectory("0.5.0"));
@@ -300,21 +308,21 @@ public sealed class UpdateTestSuite
         await Case("更新包哈希与清单不一致时拒绝安装", async () =>
         {
             string root = Path.Combine(workspace, "layout-hash");
-            var layout = new VersionedInstallLayout(root);
+            var layout = new VersionedInstallLayout(root, Path.Combine(workspace, $"marker-{Path.GetFileName(root)}.json"));
             await InstallSeedAsync(layout, "0.4.0", token);
             var installer = new UpdateInstaller(layout, _ => Task.FromResult(true));
-            var outcome = await installer.ApplyAsync(packagePath, "0.5.0", new string('B', 64), Path.Combine(workspace, "work-hash"), token)
-                .ConfigureAwait(false);
+            var outcome = await installer.ApplyAsync(Release("0.5.0") with { Sha256 = new string('B', 64) },
+                Path.Combine(workspace, "work-hash"), token).ConfigureAwait(false);
             return (!outcome.Ok && layout.ActiveVersion == "0.4.0", outcome.Error);
         });
 
         await Case("同一版本目录已存在时拒绝覆盖", async () =>
         {
             string root = Path.Combine(workspace, "layout-dup");
-            var layout = new VersionedInstallLayout(root);
+            var layout = new VersionedInstallLayout(root, Path.Combine(workspace, $"marker-{Path.GetFileName(root)}.json"));
             await InstallSeedAsync(layout, "0.4.0", token);
             var installer = new UpdateInstaller(layout, _ => Task.FromResult(true));
-            var outcome = await installer.ApplyAsync(packagePath, "0.4.0", packageHash, Path.Combine(workspace, "work-dup"), token)
+            var outcome = await installer.ApplyAsync(Release("0.4.0"), Path.Combine(workspace, "work-dup"), token)
                 .ConfigureAwait(false);
             return (!outcome.Ok && outcome.Error.Contains("已安装", StringComparison.Ordinal), outcome.Error);
         });
@@ -322,10 +330,10 @@ public sealed class UpdateTestSuite
         await Case("数据格式比旧版本新时禁止降级", async () =>
         {
             string root = Path.Combine(workspace, "layout-downgrade");
-            var layout = new VersionedInstallLayout(root);
+            var layout = new VersionedInstallLayout(root, Path.Combine(workspace, $"marker-{Path.GetFileName(root)}.json"));
             await InstallSeedAsync(layout, "0.4.0", token);
             var installer = new UpdateInstaller(layout, _ => Task.FromResult(true));
-            await installer.ApplyAsync(packagePath, "0.5.0", packageHash, Path.Combine(workspace, "work-dg"), token)
+            await installer.ApplyAsync(Release("0.5.0"), Path.Combine(workspace, "work-dg"), token)
                 .ConfigureAwait(false);
             bool refused = !installer.TryRollback(currentDataFormat: 3, oldestSupportedFormat: 2, out string reason);
             bool allowed = installer.TryRollback(currentDataFormat: 2, oldestSupportedFormat: 2, out _);
@@ -345,31 +353,39 @@ public sealed class UpdateTestSuite
                 error));
         });
 
-        await Case("备份进行中时安装被推迟而不是终止备份", async () =>
+        await Case("备份进行中时安装等待任务结束后才继续", async () =>
         {
-            bool running = true, blocked = false;
-            var gate = new BackupActivityGate(() => running, () => false, () => blocked = true, () => blocked,
-                () => Task.CompletedTask);
-            var task = gate.WaitForSafeInstallAsync(TimeSpan.FromMilliseconds(400), token);
+            bool running = true;
+            MaintenanceLease? granted = null;
+            var gate = new BackupActivityGate(() => running, () => running, () => false,
+                () => granted = NewLease(), () => Task.CompletedTask);
+            var attempt = gate.TryAcquireAsync(TimeSpan.FromMilliseconds(400), token);
             await Task.Delay(120, token);
             running = false;
-            var readiness = await task.ConfigureAwait(false);
-            return (blocked && readiness.Decision == InstallDecision.Proceed, readiness.Reason);
+            var result = await attempt.ConfigureAwait(false);
+            bool held = result.Granted && result.Lease is { IsReleased: false };
+            result.Lease?.Release();
+            return (held, result.Readiness.Reason);
         });
 
-        await Case("存在不明确的提交或锁时拒绝安装", async () =>
+        await Case("存在不明确的提交或锁时拒绝安装且不留维护状态", async () =>
         {
-            var gate = new BackupActivityGate(() => false, () => true, () => true, () => true, () => Task.CompletedTask);
-            var readiness = await gate.WaitForSafeInstallAsync(TimeSpan.FromSeconds(1), token).ConfigureAwait(false);
+            bool holdTaken = false;
+            var gate = new BackupActivityGate(() => false, () => false, () => true,
+                () => { holdTaken = true; return NewLease(); }, () => Task.CompletedTask);
+            var attempt = await gate.TryAcquireAsync(TimeSpan.FromSeconds(1), token).ConfigureAwait(false);
             bool inspect = gate.Inspect().Decision == InstallDecision.Refuse;
-            return (readiness.Decision == InstallDecision.Refuse && inspect, readiness.Reason);
+            return (!attempt.Granted && !holdTaken && attempt.Lease == null && inspect, attempt.Readiness.Reason);
         });
 
-        await Case("等待备份结束超时后推迟安装", async () =>
+        await Case("等待备份结束超时后推迟安装并归还租约", async () =>
         {
-            var gate = new BackupActivityGate(() => true, () => false, () => true, () => true, () => Task.CompletedTask);
-            var readiness = await gate.WaitForSafeInstallAsync(TimeSpan.FromMilliseconds(200), token).ConfigureAwait(false);
-            return (readiness.Decision == InstallDecision.Defer, readiness.Reason);
+            MaintenanceLease? issued = null;
+            var gate = new BackupActivityGate(() => true, () => true, () => false,
+                () => issued = NewLease(), () => Task.CompletedTask);
+            var attempt = await gate.TryAcquireAsync(TimeSpan.FromMilliseconds(200), token).ConfigureAwait(false);
+            return (attempt.Readiness.Decision == InstallDecision.Defer && attempt.Lease == null &&
+                    issued is { IsReleased: true }, attempt.Readiness.Reason);
         });
 
         await Case("健康标记早于本次启动尝试时不算成功", () =>
@@ -402,6 +418,12 @@ public sealed class UpdateTestSuite
 
         return new UpdateSuiteReport(cases, cases.Count(c => c.Passed), cases.Count(c => !c.Passed), clock.Elapsed);
     }
+
+    private MaintenanceLease NewLease() => new(Guid.NewGuid().ToString("N"), "测试", _ => { });
+
+    /// <summary>A verified release bound to the package built by this run.</summary>
+    private VerifiedRelease Release(string version) => new("", version, UpdateChannel.Stable, _packageHash,
+        _packageBytes.Length, "", _packagePath, "lab", 5);
 
     private static UpdateSettings Settings(string baseUrl) => new()
     {
@@ -464,6 +486,23 @@ internal sealed class LoopbackHttpsServer : IDisposable
     public string BaseUrl { get; }
     public bool SawRangeRequest { get; set; }
 
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _hits = new(StringComparer.Ordinal);
+    private int _inFlight;
+    private int _maxInFlight;
+
+    /// <summary>Requests served for a route; lets tests assert "never downloaded".</summary>
+    public int Hits(string path) => _hits.TryGetValue(path, out int count) ? count : 0;
+
+    /// <summary>Highest number of simultaneously served requests; used to prove checks do not overlap.</summary>
+    public int MaxConcurrentRequests => Volatile.Read(ref _maxInFlight);
+
+    public void ResetCounters()
+    {
+        _hits.Clear();
+        Volatile.Write(ref _maxInFlight, Volatile.Read(ref _inFlight));
+        SawRangeRequest = false;
+    }
+
     public void Set(string path, byte[] content)
     {
         lock (_sync) _routes[path] = content;
@@ -474,15 +513,14 @@ internal sealed class LoopbackHttpsServer : IDisposable
         lock (_sync) return _routes.TryGetValue(path, out var content) ? content : Array.Empty<byte>();
     }
 
-    public HttpClient CreateClient()
+    public HttpClient CreateClient() => new(CreateHandler());
+
+    /// <summary>Handler that trusts only this run's certificate; used to build services under test.</summary>
+    public HttpMessageHandler CreateHandler() => new HttpClientHandler
     {
-        var handler = new HttpClientHandler
-        {
-            ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
-                certificate != null && certificate.Thumbprint == _certificate.Thumbprint
-        };
-        return new HttpClient(handler);
-    }
+        ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
+            certificate != null && certificate.Thumbprint == _certificate.Thumbprint
+    };
 
     private async Task AcceptLoopAsync(CancellationToken token)
     {
@@ -509,29 +547,20 @@ internal sealed class LoopbackHttpsServer : IDisposable
                 string request = await ReadHeadersAsync(ssl, token).ConfigureAwait(false);
                 string first = request.Split("\r\n")[0];
                 string path = first.Split(' ')[1].Split('?')[0];
-                long from = 0;
-                bool range = false;
-                foreach (string line in request.Split("\r\n"))
+                _hits.AddOrUpdate(path, 1, (_, current) => current + 1);
+                int inFlight = Interlocked.Increment(ref _inFlight);
+                int observed = Volatile.Read(ref _maxInFlight);
+                while (inFlight > observed)
                 {
-                    if (!line.StartsWith("Range:", StringComparison.OrdinalIgnoreCase)) continue;
-                    string value = line["Range:".Length..].Trim();
-                    if (value.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
-                    {
-                        string spec = value["bytes=".Length..].Split('-')[0];
-                        if (long.TryParse(spec, out long parsed)) { from = parsed; range = true; }
-                    }
+                    int previous = Interlocked.CompareExchange(ref _maxInFlight, inFlight, observed);
+                    if (previous == observed) break;
+                    observed = previous;
                 }
-                if (range) SawRangeRequest = true;
-                byte[] body = Get(path);
-                if (body.Length == 0)
+                try
                 {
-                    await WriteAsync(ssl, 404, "Not Found", Array.Empty<byte>(), null, token).ConfigureAwait(false);
-                    return;
+                    await ServeAsync(ssl, path, request, token).ConfigureAwait(false);
                 }
-                byte[] payload = range && from < body.Length ? body[(int)from..] : body;
-                string? contentRange = range && from < body.Length ? $"bytes {from}-{body.Length - 1}/{body.Length}" : null;
-                await WriteAsync(ssl, range && from < body.Length ? 206 : 200, "OK", payload, contentRange, token)
-                    .ConfigureAwait(false);
+                finally { Interlocked.Decrement(ref _inFlight); }
             }
             catch (Exception ex) when (ex is IOException or System.Security.Authentication.AuthenticationException or SocketException)
             {
@@ -539,6 +568,33 @@ internal sealed class LoopbackHttpsServer : IDisposable
             }
             catch (OperationCanceledException) { }
         }
+    }
+
+    private async Task ServeAsync(Stream ssl, string path, string request, CancellationToken token)
+    {
+        long from = 0;
+        bool range = false;
+        foreach (string line in request.Split("\r\n"))
+        {
+            if (!line.StartsWith("Range:", StringComparison.OrdinalIgnoreCase)) continue;
+            string value = line["Range:".Length..].Trim();
+            if (value.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
+            {
+                string spec = value["bytes=".Length..].Split('-')[0];
+                if (long.TryParse(spec, out long parsed)) { from = parsed; range = true; }
+            }
+        }
+        if (range) SawRangeRequest = true;
+        byte[] body = Get(path);
+        if (body.Length == 0)
+        {
+            await WriteAsync(ssl, 404, "Not Found", Array.Empty<byte>(), null, token).ConfigureAwait(false);
+            return;
+        }
+        byte[] payload = range && from < body.Length ? body[(int)from..] : body;
+        string? contentRange = range && from < body.Length ? $"bytes {from}-{body.Length - 1}/{body.Length}" : null;
+        await WriteAsync(ssl, range && from < body.Length ? 206 : 200, "OK", payload, contentRange, token)
+            .ConfigureAwait(false);
     }
 
     private static async Task<string> ReadHeadersAsync(Stream stream, CancellationToken token)

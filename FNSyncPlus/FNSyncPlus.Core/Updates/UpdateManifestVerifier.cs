@@ -34,6 +34,12 @@ public sealed record UpdateVerificationResult(bool Ok, string Error, Version? Ve
     public static UpdateVerificationResult Fail(string error) => new(false, error, null, null);
 }
 
+/// <summary>Verification outcome carrying the full signed manifest.</summary>
+public sealed record ReleaseVerification(bool Ok, string Error, UpdateManifest? Manifest, UpdateChannel Channel)
+{
+    public static ReleaseVerification Fail(string error) => new(false, error, null, UpdateChannel.Stable);
+}
+
 /// <summary>
 /// Verifies update manifests with an ECDSA P-256 public key pinned in the client. The signature is
 /// over the manifest serialized WITHOUT the signature field, using deterministic key ordering.
@@ -58,68 +64,88 @@ public sealed class UpdateManifestVerifier
         return new UpdateManifestVerifier(ecdsa.ExportSubjectPublicKeyInfo());
     }
 
+    /// <summary>
+    /// Verifies the manifest and returns only the verdict plus the policy-derived fields.
+    /// Callers that need the full signed payload (to bind a package to it) use
+    /// <see cref="VerifyRelease"/> instead.
+    /// </summary>
     public UpdateVerificationResult Verify(string manifestJson, ClientUpdateIdentity client, UpdateChannel requestedChannel,
         Version? currentVersion, DateTimeOffset now)
     {
-        if (string.IsNullOrWhiteSpace(manifestJson)) return UpdateVerificationResult.Fail("更新清单为空");
+        var release = VerifyRelease(manifestJson, client, requestedChannel, currentVersion, now);
+        if (!release.Ok) return UpdateVerificationResult.Fail(release.Error);
+        return new UpdateVerificationResult(true, "", Version.Parse(release.Manifest!.Version), release.Channel);
+    }
+
+    /// <summary>
+    /// Full verification. Everything an installer needs — product, version, channel, arch, size,
+    /// package hash and URL — comes from the manifest whose signature was just checked, so the
+    /// caller can bind a download to exactly this release instead of trusting loose values.
+    /// </summary>
+    public ReleaseVerification VerifyRelease(string manifestJson, ClientUpdateIdentity client, UpdateChannel requestedChannel,
+        Version? currentVersion, DateTimeOffset now)
+    {
+        if (string.IsNullOrWhiteSpace(manifestJson)) return ReleaseVerification.Fail("更新清单为空");
         UpdateManifest? manifest;
         byte[] body;
         string signature;
         try
         {
             using var doc = JsonDocument.Parse(manifestJson);
-            if (doc.RootElement.ValueKind != JsonValueKind.Object) return UpdateVerificationResult.Fail("更新清单根节点必须是对象");
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return ReleaseVerification.Fail("更新清单根节点必须是对象");
             if (!doc.RootElement.TryGetProperty("signature", out var signatureElement) || signatureElement.ValueKind != JsonValueKind.String)
-                return UpdateVerificationResult.Fail("更新清单缺少签名");
+                return ReleaseVerification.Fail("更新清单缺少签名");
             signature = signatureElement.GetString() ?? "";
             body = CanonicalBytes(doc.RootElement);
             manifest = JsonSerializer.Deserialize<UpdateManifest>(manifestJson);
         }
-        catch (JsonException ex) { return UpdateVerificationResult.Fail($"更新清单 JSON 无效: {ex.Message}"); }
-        if (manifest == null) return UpdateVerificationResult.Fail("更新清单为空");
+        catch (JsonException ex) { return ReleaseVerification.Fail($"更新清单 JSON 无效: {ex.Message}"); }
+        if (manifest == null) return ReleaseVerification.Fail("更新清单为空");
 
         byte[] signatureBytes;
         try { signatureBytes = Convert.FromBase64String(signature); }
-        catch (FormatException) { return UpdateVerificationResult.Fail("签名不是有效的 Base64"); }
+        catch (FormatException) { return ReleaseVerification.Fail("签名不是有效的 Base64"); }
+        if (signatureBytes.Length == 0) return ReleaseVerification.Fail("更新清单缺少签名");
         using (var ecdsa = ECDsa.Create())
         {
             try
             {
                 ecdsa.ImportSubjectPublicKeyInfo(_publicKeySpki, out _);
                 if (!ecdsa.VerifyData(body, signatureBytes, HashAlgorithmName.SHA256))
-                    return UpdateVerificationResult.Fail("更新清单签名校验失败，拒绝使用");
+                    return ReleaseVerification.Fail("更新清单签名校验失败，拒绝使用");
             }
-            catch (CryptographicException) { return UpdateVerificationResult.Fail("内置更新公钥无效，拒绝使用"); }
+            catch (CryptographicException) { return ReleaseVerification.Fail("内置更新公钥无效，拒绝使用"); }
         }
 
         // Signature passed; now apply release policy.
-        if (manifest.Schema != 1) return UpdateVerificationResult.Fail($"不支持的清单架构 {manifest.Schema}");
+        if (manifest.Schema != 1) return ReleaseVerification.Fail($"不支持的清单架构 {manifest.Schema}");
         if (!string.Equals(manifest.Product, "FN Sync Plus", StringComparison.Ordinal))
-            return UpdateVerificationResult.Fail("更新清单产品标识不匹配");
+            return ReleaseVerification.Fail("更新清单产品标识不匹配");
         if (!string.Equals(manifest.Arch, "x64", StringComparison.OrdinalIgnoreCase))
-            return UpdateVerificationResult.Fail("更新包架构不匹配");
-        if (!Version.TryParse(manifest.Version, out var version)) return UpdateVerificationResult.Fail("版本号无效");
-        if (!Version.TryParse(manifest.MinVersion, out var minVersion)) return UpdateVerificationResult.Fail("最低兼容版本无效");
-        if (!Version.TryParse(manifest.MinCompatibleClient, out var minClient)) return UpdateVerificationResult.Fail("最低客户端版本无效");
+            return ReleaseVerification.Fail("更新包架构不匹配");
+        if (!Version.TryParse(manifest.Version, out var version)) return ReleaseVerification.Fail("版本号无效");
+        if (!Version.TryParse(manifest.MinVersion, out _)) return ReleaseVerification.Fail("最低兼容版本无效");
+        if (!Version.TryParse(manifest.MinCompatibleClient, out var minClient)) return ReleaseVerification.Fail("最低客户端版本无效");
         if (currentVersion != null && version <= currentVersion)
-            return UpdateVerificationResult.Fail("更新清单不是更高版本，拒绝降级或重复安装");
+            return ReleaseVerification.Fail("更新清单不是更高版本，拒绝降级或重复安装");
         if (currentVersion != null && currentVersion < minClient)
-            return UpdateVerificationResult.Fail("当前客户端过旧，不能通过自动更新升级，请手动安装");
+            return ReleaseVerification.Fail("当前客户端过旧，不能通过自动更新升级，请手动安装");
         if (!ChannelMatches(manifest.Channel, requestedChannel))
-            return UpdateVerificationResult.Fail($"通道不匹配：清单为 {manifest.Channel}，请求为 {requestedChannel}");
-        if (manifest.Size <= 0) return UpdateVerificationResult.Fail("更新包大小无效");
+            return ReleaseVerification.Fail($"通道不匹配：清单为 {manifest.Channel}，请求为 {requestedChannel}");
+        if (manifest.Size <= 0) return ReleaseVerification.Fail("更新包大小无效");
         if (manifest.Sha256 is not { Length: 64 } || !manifest.Sha256.All(Uri.IsHexDigit))
-            return UpdateVerificationResult.Fail("更新包 SHA-256 格式无效");
+            return ReleaseVerification.Fail("更新包 SHA-256 格式无效");
         if (!Uri.TryCreate(manifest.Url, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
-            return UpdateVerificationResult.Fail("更新包地址必须是 HTTPS");
+            return ReleaseVerification.Fail("更新包地址必须是 HTTPS");
         if (manifest.ReleasedAt > now.AddHours(24))
-            return UpdateVerificationResult.Fail("更新清单发布时间异常");
+            return ReleaseVerification.Fail("更新清单发布时间异常");
         if (manifest.Audience.Count > 0 && !manifest.Audience.Contains(client.MachineGroup, StringComparer.OrdinalIgnoreCase) &&
             !manifest.Audience.Contains("*", StringComparer.Ordinal))
-            return UpdateVerificationResult.Fail("该发布批次不面向当前客户端");
+            return ReleaseVerification.Fail("该发布批次不面向当前客户端");
         if (client.ReleaseBatch < manifest.Batch)
-            return UpdateVerificationResult.Fail("该发布批次尚未覆盖当前客户端");
-        return new UpdateVerificationResult(true, "", version, ChannelMatches(manifest.Channel, UpdateChannel.Beta) ? UpdateChannel.Beta : UpdateChannel.Stable);
+            return ReleaseVerification.Fail("该发布批次尚未覆盖当前客户端");
+        var channel = ChannelMatches(manifest.Channel, UpdateChannel.Beta) ? UpdateChannel.Beta : UpdateChannel.Stable;
+        return new ReleaseVerification(true, "", manifest, channel);
     }
 
     /// <summary>

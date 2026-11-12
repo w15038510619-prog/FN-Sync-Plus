@@ -19,6 +19,32 @@ public sealed class UpdateInstaller
         _launchVerification = launchVerification ?? throw new ArgumentNullException(nameof(launchVerification));
     }
 
+    /// <summary>
+    /// Installs a release that was already verified against the pinned signing key. The local file
+    /// is re-bound to the signed size and hash here, so a package swapped between download and
+    /// install is rejected before anything is extracted.
+    /// </summary>
+    public async Task<ApplyOutcome> ApplyAsync(VerifiedRelease release, string workDirectory,
+        CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(release);
+        if (string.IsNullOrWhiteSpace(release.LocalPackagePath))
+            return new ApplyOutcome(false, release.Version, "更新包路径为空", false, "");
+        long size;
+        try { size = new FileInfo(release.LocalPackagePath).Length; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return new ApplyOutcome(false, release.Version, $"无法读取更新包：{ex.Message}", false, "");
+        }
+        if (size != release.Size)
+        {
+            _layout.Journal($"refused {release.Version}: size mismatch (expected {release.Size}, got {size})");
+            return new ApplyOutcome(false, release.Version, "更新包大小与已签名清单不一致，拒绝安装", false, "");
+        }
+        return await ApplyAsync(release.LocalPackagePath, release.Version, release.Sha256, workDirectory, token)
+            .ConfigureAwait(false);
+    }
+
     public async Task<ApplyOutcome> ApplyAsync(string packagePath, string version, string expectedSha256,
         string workDirectory, CancellationToken token = default)
     {

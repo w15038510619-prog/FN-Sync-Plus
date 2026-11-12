@@ -11,12 +11,17 @@ namespace FNSyncPlus.Updater;
 ///
 /// Modes
 ///   (default)            launch the version pointed at by current.json and verify it becomes usable
-///   --apply              install a downloaded package after the running app has exited, then launch
+///   --apply --release    install a signed release after the running app has exited, then launch
 ///   --rollback           switch the pointer back to the previous version and launch it
 ///   --status             print the current/previous version as JSON and exit
 ///
+/// The updater is a separate process and therefore cannot rely on the UI having validated
+/// anything. It verifies the signed manifest itself, derives the version/hash/size from that
+/// signature, and refuses anything it cannot bind to the pinned public key. A command-line
+/// <c>--sha256</c> is deliberately NOT accepted: a hash that the caller supplies proves nothing.
+///
 /// Exit codes: 0 launched (possibly after rollback), 2 usage error, 3 no usable version,
-/// 4 the running app did not stop in time, 5 install failed.
+/// 4 the running app did not stop in time, 5 install failed, 6 release verification failed.
 /// </summary>
 internal static class Program
 {
@@ -25,6 +30,7 @@ internal static class Program
     private const int ExitNoVersion = 3;
     private const int ExitAppStillRunning = 4;
     private const int ExitInstallFailed = 5;
+    private const int ExitReleaseRejected = 6;
 
     private static int Main(string[] args)
     {
@@ -33,13 +39,20 @@ internal static class Program
         var layout = new VersionedInstallLayout(root);
         var health = new LaunchHealthTracker(root);
 
+        if (options.RejectedArguments)
+        {
+            layout.Journal("refused: --sha256/--version are not accepted, only a signed --release descriptor");
+            Console.WriteLine("REFUSED 不再接受命令行 --sha256 / --version：它们不是可信来源。请传入 --release <release.json>。");
+            return ExitUsage;
+        }
+
         try
         {
             return options.Mode switch
             {
                 "status" => PrintStatus(layout),
                 "apply" => Apply(options, layout, health),
-                "rollback" => Rollback(layout, health),
+                "rollback" => Rollback(options, layout, health),
                 "launch" => LaunchActive(layout, health, allowRollback: true),
                 _ => Usage($"未知的操作：{options.Mode}")
             };
@@ -66,31 +79,63 @@ internal static class Program
 
     private static int Apply(Options options, VersionedInstallLayout layout, LaunchHealthTracker health)
     {
-        if (string.IsNullOrWhiteSpace(options.Package) || string.IsNullOrWhiteSpace(options.Version) ||
-            string.IsNullOrWhiteSpace(options.Sha256))
-            return Usage("--apply 需要 --package、--version 和 --sha256");
+        if (string.IsNullOrWhiteSpace(options.ReleasePath))
+        {
+            layout.Journal("apply refused: no --release descriptor");
+            Console.WriteLine("REFUSED 独立更新器只接受签名发布描述（--release），不接受命令行哈希。");
+            return ExitUsage;
+        }
 
         // 1. Wait for the app that requested the update to stop on its own. Never kill it: an
         //    in-flight backup commit must be allowed to finish or fail safely.
         if (options.WaitProcessId is int pid && !WaitForExit(pid, options.WaitSeconds))
         {
-            layout.Journal($"apply {options.Version}: app pid {pid} still running after {options.WaitSeconds}s, aborting");
+            layout.Journal($"apply: app pid {pid} still running after {options.WaitSeconds}s, aborting");
             return ExitAppStillRunning;
         }
 
+        var descriptor = ReleaseDescriptor.TryLoad(options.ReleasePath);
+        if (descriptor == null)
+        {
+            layout.Journal("apply refused: release descriptor missing or malformed");
+            Console.WriteLine("REFUSED 发布描述缺失或格式无效。");
+            return ExitReleaseRejected;
+        }
+
+        var verifier = PinnedUpdateKey.TryCreateVerifier(out string keyError);
+        if (verifier == null)
+        {
+            layout.Journal($"apply refused: no pinned update key ({keyError})");
+            Console.WriteLine($"REFUSED {keyError}");
+            return ExitReleaseRejected;
+        }
+
+        // 2. Re-verify the signed manifest. Everything below is derived from it, never from the
+        //    caller's claims. ReleaseHandoff also refuses when the installed version is unknown,
+        //    because "cannot prove it is an upgrade" must not silently allow a downgrade.
+        var handoff = ReleaseHandoff.Verify(descriptor, verifier, CurrentVersion(layout), layout.Root, DateTimeOffset.UtcNow);
+        if (!handoff.Ok)
+        {
+            layout.Journal($"apply refused: {handoff.Error}");
+            Console.WriteLine($"REFUSED {handoff.Error}");
+            return ExitReleaseRejected;
+        }
+        var release = handoff.Release!;
+        layout.Journal($"apply {release.Version} from verified release (sha {release.ShortSha})");
         var installer = new UpdateInstaller(layout,
-            token => VerifyLaunch(layout, health, options.Version!, options.HealthTimeoutSeconds, token));
-        var outcome = installer.ApplyAsync(options.Package!, options.Version!, options.Sha256!,
-            options.WorkDirectory ?? Path.Combine(layout.Root, ".update-work"), CancellationToken.None)
-            .GetAwaiter().GetResult();
+            token => VerifyLaunch(layout, health, release.Version, options.HealthTimeoutSeconds, token));
+        var outcome = installer.ApplyAsync(release, options.WorkDirectory ?? Path.Combine(layout.Root, ".update-work"),
+            CancellationToken.None).GetAwaiter().GetResult();
 
         if (!outcome.Ok)
         {
-            layout.Journal($"apply {options.Version} failed: {outcome.Error}");
+            layout.Journal($"apply {release.Version} failed: {outcome.Error}");
             Console.WriteLine($"APPLY-FAILED {outcome.Error}");
             // Put the user back into a working program instead of leaving them with nothing.
             if (options.NoLaunch) return ExitInstallFailed;
-            int relaunch = LaunchVersion(layout, health, layout.ActiveVersion!, allowRollback: false);
+            string? active = layout.ActiveVersion;
+            if (active == null) return ExitNoVersion;
+            int relaunch = LaunchVersion(layout, health, active, allowRollback: false);
             return relaunch == ExitOk ? ExitInstallFailed : relaunch;
         }
 
@@ -99,14 +144,21 @@ internal static class Program
         return LaunchActive(layout, health, allowRollback: true);
     }
 
-    private static int Rollback(VersionedInstallLayout layout, LaunchHealthTracker health)
+    /// <summary>Version currently installed, used as the "must be newer" baseline. Unknown means the
+    /// dowstream rule cannot be evaluated, which is treated as a refusal.</summary>
+    private static Version? CurrentVersion(VersionedInstallLayout layout) =>
+        Version.TryParse(layout.ActiveVersion, out var version) ? version : null;
+
+    private static int Rollback(Options options, VersionedInstallLayout layout, LaunchHealthTracker health)
     {
-        if (!layout.RestorePointer())
+        if (!layout.TryRestorePointer(out string reason))
         {
-            layout.Journal("rollback requested but no previous version exists");
+            layout.Journal($"rollback refused: {reason}");
+            Console.WriteLine($"ROLLBACK-REFUSED {reason}");
             return ExitNoVersion;
         }
         layout.Journal("manual rollback completed");
+        if (options.NoLaunch) return ExitOk;
         return LaunchActive(layout, health, allowRollback: false);
     }
 
@@ -125,8 +177,10 @@ internal static class Program
         if (allowRollback && layout.PreviousVersion is { } previous)
         {
             layout.Journal($"launch of {active} failed, rolling back to {previous}");
-            if (layout.RestorePointer())
+            if (layout.TryRestorePointer(out string reason))
                 return LaunchVersion(layout, health, previous, allowRollback: false);
+            layout.Journal($"automatic rollback refused: {reason}");
+            Console.WriteLine($"ROLLBACK-REFUSED {reason}");
         }
         return result;
     }
@@ -216,7 +270,8 @@ internal static class Program
     private static int Usage(string message)
     {
         Console.WriteLine(message);
-        Console.WriteLine("用法: FNSyncPlus.Updater [--layout <安装根目录>] [launch | status | rollback | apply --package <zip> --version <v> --sha256 <hash> [--wait-pid <pid>] [--no-launch]]");
+        Console.WriteLine("用法: FNSyncPlus.Updater [--layout <安装根目录>] [launch | status | rollback | " +
+                          "apply --release <release.json> [--wait-pid <pid>] [--wait-seconds <s>] [--no-launch]]");
         return ExitUsage;
     }
 
@@ -224,14 +279,13 @@ internal static class Program
     {
         public string Mode { get; private set; } = "launch";
         public string? LayoutRoot { get; private set; }
-        public string? Package { get; private set; }
-        public string? Version { get; private set; }
-        public string? Sha256 { get; private set; }
+        public string? ReleasePath { get; private set; }
         public string? WorkDirectory { get; private set; }
         public int? WaitProcessId { get; private set; }
         public int WaitSeconds { get; private set; } = 120;
         public int HealthTimeoutSeconds { get; private set; } = 25;
         public bool NoLaunch { get; private set; }
+        public bool RejectedArguments { get; private set; }
 
         public static Options Parse(string[] args)
         {
@@ -241,9 +295,7 @@ internal static class Program
                 switch (args[i])
                 {
                     case "--layout": options.LayoutRoot = Next(args, ref i); break;
-                    case "--package": options.Package = Next(args, ref i); break;
-                    case "--version": options.Version = Next(args, ref i); break;
-                    case "--sha256": options.Sha256 = Next(args, ref i); break;
+                    case "--release": options.ReleasePath = Next(args, ref i); break;
                     case "--work-dir": options.WorkDirectory = Next(args, ref i); break;
                     case "--wait-pid":
                         if (int.TryParse(Next(args, ref i), out int pid)) options.WaitProcessId = pid;
@@ -255,6 +307,9 @@ internal static class Program
                         if (int.TryParse(Next(args, ref i), out int health)) options.HealthTimeoutSeconds = health;
                         break;
                     case "--no-launch": options.NoLaunch = true; break;
+                    // A caller-supplied hash or version can never be trusted; keep parsing them only
+                    // so a stale shortcut is rejected loudly instead of silently ignored.
+                    case "--sha256": case "--version": options.RejectedArguments = true; Next(args, ref i); break;
                     case "status": case "--status": options.Mode = "status"; break;
                     case "apply": case "--apply": options.Mode = "apply"; break;
                     case "rollback": case "--rollback": options.Mode = "rollback"; break;

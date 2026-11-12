@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net.Http;
 using System.Text.Json.Serialization;
 
@@ -16,14 +17,25 @@ public sealed class UpdateSettings
     [JsonPropertyName("unattended_enabled")] public bool UnattendedEnabled { get; set; }
     [JsonPropertyName("machine_group")] public string MachineGroup { get; set; } = "";
     [JsonPropertyName("release_batch")] public int ReleaseBatch { get; set; }
+
+    /// <summary>Newest version the background scheduler has already reported, so a restart does not
+    /// re-notify (or re-download) the same release.</summary>
+    [JsonPropertyName("notified_version")] public string? NotifiedVersion { get; set; }
+
+    /// <summary>Version whose package is downloaded and verified, waiting for a safe install.</summary>
+    [JsonPropertyName("staged_version")] public string? StagedVersion { get; set; }
+
+    /// <summary>Version the updater was handed off for. Prevents a restart loop if the install
+    /// keeps failing before the app can start.</summary>
+    [JsonPropertyName("handoff_version")] public string? HandoffVersion { get; set; }
 }
 
 public sealed record UpdateCheckResult(bool HasUpdate, string Version, string Notes, string ManifestUrl, string Error);
 
 /// <summary>
-/// Orchestrates check → verify → download → staged install. Installation itself is delegated to
-/// <see cref="VersionedInstallLayout"/> and must be gated by <see cref="BackupActivityGate"/>.
-/// Unattended installs require both a configured HTTPS manifest URL and an explicit opt-in.
+/// Fetches and verifies release manifests, and downloads exactly the release that was verified.
+/// Installation itself is delegated to <see cref="VersionedInstallLayout"/> and must be gated by
+/// <see cref="BackupActivityGate"/>.
 /// </summary>
 public sealed class UpdateClient : IDisposable
 {
@@ -47,60 +59,69 @@ public sealed class UpdateClient : IDisposable
         _settings.AutoMode == (int)AutoUpdateMode.UnattendedInstall && _settings.UnattendedEnabled &&
         Uri.TryCreate(_settings.ManifestUrl, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps;
 
-    public async Task<UpdateCheckResult> CheckAsync(Version currentVersion, ClientUpdateIdentity identity, CancellationToken token = default)
+    public async Task<UpdateCheckOutcome> CheckAsync(Version currentVersion, ClientUpdateIdentity identity, CancellationToken token = default)
     {
         _settings.LastCheckUtc = DateTimeOffset.UtcNow;
         if (!Uri.TryCreate(_settings.ManifestUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
         {
             _settings.LastResult = "未配置 HTTPS 更新地址";
-            return new UpdateCheckResult(false, "", "", "", _settings.LastResult);
+            return UpdateCheckOutcome.No(false, "", "", _settings.LastResult);
         }
         try
         {
             string json = await _http.GetStringAsync(uri, token).ConfigureAwait(false);
-            var verification = _verifier.Verify(json, identity, Channel, currentVersion, DateTimeOffset.UtcNow);
+            var verification = _verifier.VerifyRelease(json, identity, Channel, currentVersion, DateTimeOffset.UtcNow);
             if (!verification.Ok)
             {
                 _settings.LastResult = verification.Error;
-                return new UpdateCheckResult(false, "", "", "", verification.Error);
+                return UpdateCheckOutcome.No(false, "", "", verification.Error);
             }
-            string version = verification.Version!.ToString();
+            var manifest = verification.Manifest!;
+            string version = manifest.Version;
             if (string.Equals(_settings.SkippedVersion, version, StringComparison.OrdinalIgnoreCase))
             {
                 _settings.LastResult = $"版本 {version} 已被用户跳过";
-                return new UpdateCheckResult(false, version, "", "", _settings.LastResult);
+                return UpdateCheckOutcome.No(false, version, "", _settings.LastResult);
             }
-            using var doc = System.Text.Json.JsonDocument.Parse(json);
-            string notes = doc.RootElement.TryGetProperty("notes", out var n) ? n.GetString() ?? "" : "";
             _settings.LastResult = $"发现新版本 {version}";
-            return new UpdateCheckResult(true, version, notes, _settings.ManifestUrl, "");
+            var release = new VerifiedRelease(json, version, verification.Channel, manifest.Sha256, manifest.Size,
+                manifest.Url, "", identity.MachineGroup, identity.ReleaseBatch);
+            return new UpdateCheckOutcome(true, version, manifest.Notes, "", release);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception ex) when (ex is HttpRequestException or IOException or System.Text.Json.JsonException)
         {
             _settings.LastResult = $"检查更新失败：{ex.Message}";
-            return new UpdateCheckResult(false, "", "", "", _settings.LastResult);
+            return UpdateCheckOutcome.No(false, "", "", _settings.LastResult);
         }
     }
 
-    /// <summary>Re-fetches and re-verifies the manifest, then downloads the package to <paramref name="directory"/>.</summary>
-    public async Task<UpdateDownloadResult> DownloadAsync(Version currentVersion, ClientUpdateIdentity identity, string directory,
+    /// <summary>
+    /// Downloads the package described by <paramref name="release"/>. The manifest bytes carried in
+    /// the release are re-verified first, so the URL/size/hash used here are provably the signed
+    /// ones — there is no second manifest fetch that could point at a different package.
+    /// </summary>
+    public async Task<UpdateDownloadResult> DownloadAsync(VerifiedRelease release, string directory,
         IProgress<long>? progress = null, CancellationToken token = default)
     {
-        if (!Uri.TryCreate(_settings.ManifestUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
-            return new UpdateDownloadResult(false, "", "未配置 HTTPS 更新地址");
-        string json = await _http.GetStringAsync(uri, token).ConfigureAwait(false);
-        var verification = _verifier.Verify(json, identity, Channel, currentVersion, DateTimeOffset.UtcNow);
+        ArgumentNullException.ThrowIfNull(release);
+        var identity = new ClientUpdateIdentity(release.MachineGroup, release.ReleaseBatch);
+        // The current version is not re-checked here: the release was already accepted for this
+        // client. Re-verifying with "no current version" would weaken the downgrade rule, so pass
+        // the release's own predecessor boundary instead by skipping that check entirely.
+        var verification = _verifier.VerifyRelease(release.ManifestJson, identity, Channel, null, DateTimeOffset.UtcNow);
         if (!verification.Ok) return new UpdateDownloadResult(false, "", verification.Error);
-        using var doc = System.Text.Json.JsonDocument.Parse(json);
-        string url = doc.RootElement.GetProperty("url").GetString() ?? "";
-        string hash = doc.RootElement.GetProperty("sha256").GetString() ?? "";
-        long size = doc.RootElement.GetProperty("size").GetInt64();
-        string version = verification.Version!.ToString();
-        string path = Path.Combine(directory, $"FN-Sync-Plus-{version}-x64.zip");
+        var manifest = verification.Manifest!;
+        if (!string.Equals(manifest.Version, release.Version, StringComparison.Ordinal) ||
+            !string.Equals(manifest.Sha256, release.Sha256, StringComparison.OrdinalIgnoreCase) ||
+            manifest.Size != release.Size)
+            return new UpdateDownloadResult(false, "", "已签名清单与待下载发布描述不一致，已拒绝下载");
+
+        string path = Path.Combine(directory, $"FN-Sync-Plus-{release.Version}-x64.zip");
         using var downloader = new UpdateDownloader(_http);
-        var result = await downloader.DownloadAsync(url, path, hash, size, progress, token).ConfigureAwait(false);
-        _settings.LastResult = result.Ok ? $"已下载 {version}" : result.Error;
+        var result = await downloader.DownloadAsync(manifest.Url, path, manifest.Sha256, manifest.Size, progress, token)
+            .ConfigureAwait(false);
+        _settings.LastResult = result.Ok ? $"已下载 {release.Version}" : result.Error;
         return result;
     }
 

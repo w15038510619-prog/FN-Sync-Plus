@@ -120,7 +120,7 @@ public static class UpdatePackageExtractor
         return directories.Length == 1 && files.Length == 0 ? directories[0] : staging;
     }
 
-    internal static string HashFile(string path)
+    public static string HashFile(string path)
     {
         using var stream = File.OpenRead(path);
         return Convert.ToHexString(SHA256.HashData(stream));

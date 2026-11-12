@@ -24,13 +24,23 @@ public sealed class VersionedInstallLayout
         [JsonPropertyName("directory")] public string Directory { get; set; } = "";
         [JsonPropertyName("installed_at")] public DateTimeOffset InstalledAt { get; set; }
         [JsonPropertyName("payload_sha256")] public string PayloadSha256 { get; set; } = "";
+
+        /// <summary>Data format the installed binaries can read. 0 means the payload did not
+        /// declare it, which makes a rollback to it unsafe in a production install.</summary>
+        [JsonPropertyName("supported_data_format")] public int SupportedDataFormat { get; set; }
     }
 
     public string Root { get; }
-    public VersionedInstallLayout(string root)
+
+    /// <summary>Local data-format marker. Injected by tests; defaults to the per-user location.</summary>
+    public string DataFormatMarkerPath { get; }
+
+    public VersionedInstallLayout(string root, string? dataFormatMarkerPath = null)
     {
         if (string.IsNullOrWhiteSpace(root)) throw new ArgumentException("安装根目录不能为空", nameof(root));
         Root = Path.GetFullPath(root);
+        DataFormatMarkerPath = dataFormatMarkerPath ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "data-format.json");
     }
 
     /// <summary>
@@ -62,7 +72,28 @@ public sealed class VersionedInstallLayout
         {
             if (!File.Exists(path)) return null;
             var pointer = JsonSerializer.Deserialize<Pointer>(File.ReadAllText(path));
-            if (pointer == null || string.IsNullOrWhiteSpace(pointer.Version) || !Directory.Exists(pointer.Directory)) return null;
+            if (pointer == null || string.IsNullOrWhiteSpace(pointer.Version)) return null;
+            if (Directory.Exists(pointer.Directory)) return pointer;
+
+            // The pointer records an absolute directory, which is only valid on the machine that
+            // produced it. An installer, a ZIP extracted elsewhere or a changed drive letter all
+            // leave a pointer that points at a path this machine does not have. Re-anchor it to
+            // this root instead of reporting "no version": reporting null used to make the launcher
+            // refuse to start anything even though app-<version> was right next to it.
+            string reanchored = VersionDirectory(pointer.Version);
+            if (!Directory.Exists(reanchored)) return null;
+            string stale = pointer.Directory;
+            pointer.Directory = reanchored;
+            try
+            {
+                WritePointerAtomic(path, pointer);
+                Journal($"{Path.GetFileName(path)} re-anchored from {stale} to {reanchored}");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Read-only install root: keep working, just do not persist the repair.
+                Journal($"pointer re-anchor could not be saved: {ex.Message}");
+            }
             return pointer;
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException) { return null; }
@@ -90,7 +121,12 @@ public sealed class VersionedInstallLayout
             string payloadHash = await HashDirectoryAsync(staging, token).ConfigureAwait(false);
             if (Directory.Exists(target)) throw new IOException("版本目录在准备期间出现，拒绝覆盖");
             Directory.Move(staging, target);
-            var pointer = new Pointer { Version = version, Directory = target, InstalledAt = DateTimeOffset.UtcNow, PayloadSha256 = payloadHash };
+            var metadata = AppBuildMetadata.TryRead(staging) ?? AppBuildMetadata.TryRead(payloadDirectory);
+            var pointer = new Pointer
+            {
+                Version = version, Directory = target, InstalledAt = DateTimeOffset.UtcNow, PayloadSha256 = payloadHash,
+                SupportedDataFormat = metadata?.SupportedDataFormat ?? 0
+            };
             var previous = ReadPointer(CurrentPath);
             WritePointerAtomic(PreviousPath, previous);
             WritePointerAtomic(CurrentPath, pointer);
@@ -122,13 +158,63 @@ public sealed class VersionedInstallLayout
         }
     }
 
-    /// <summary>Restores the previous pointer; used by a failed launch or manual rollback.</summary>
-    public bool RestorePointer()
+    /// <summary>
+    /// Restores the previous pointer after checking that the target version can read the data that
+    /// is already on disk. Binaries roll back, data formats do not: if the on-disk format is newer
+    /// than the previous build understands, or cannot be determined, the pointer stays put and the
+    /// caller is told why.
+    /// </summary>
+    public bool RestorePointer() => TryRestorePointer(out _);
+
+    public bool TryRestorePointer(out string reason)
     {
         var previous = ReadPointer(PreviousPath);
-        if (previous == null) return false;
+        if (previous == null)
+        {
+            reason = "没有可回滚的上一版本";
+            return false;
+        }
+        if (!CanRollbackTo(previous, out reason)) return false;
         WritePointerAtomic(CurrentPath, previous);
         Journal($"rolled back to {previous.Version}");
+        reason = $"已回滚到 {previous.Version}";
+        return true;
+    }
+
+    /// <summary>
+    /// True when <paramref name="target"/> may read the current on-disk data. A marker that is
+    /// missing counts as format 0 (first run), which any version can handle.
+    /// </summary>
+    public bool CanRollbackToVersion(string version, out string reason)
+    {
+        string directory = VersionDirectory(version);
+        int supported = AppBuildMetadata.TryRead(directory)?.SupportedDataFormat ?? 0;
+        return CanRollbackTo(new Pointer { Version = version, Directory = directory, SupportedDataFormat = supported }, out reason);
+    }
+
+    private bool CanRollbackTo(Pointer previous, out string reason)
+    {
+        var marker = new DataFormatGuard(DataFormatMarkerPath, int.MaxValue).Probe();
+        if (marker.State is FormatMarkerState.Corrupt or FormatMarkerState.Unreadable or FormatMarkerState.Unsupported)
+        {
+            reason = $"无法确认本机数据格式（{marker.Detail}），已拒绝回滚并保留当前版本";
+            Journal($"rollback refused: marker {marker.State} ({marker.Detail})");
+            return false;
+        }
+        if (marker.State == FormatMarkerState.Valid && previous.SupportedDataFormat < 1)
+        {
+            reason = $"上一版本 {previous.Version} 未声明可读取的数据格式，无法确认回滚安全，已保留当前版本";
+            Journal($"rollback refused: {previous.Version} has no supported_data_format, on-disk format {marker.Format}");
+            return false;
+        }
+        if (marker.State == FormatMarkerState.Valid && previous.SupportedDataFormat < marker.Format)
+        {
+            reason = $"本机数据格式为 {marker.Format}，上一版本 {previous.Version} 只能读到 {previous.SupportedDataFormat}，" +
+                     "回滚可能写坏数据，已保留当前版本";
+            Journal($"rollback refused: on-disk format {marker.Format} > {previous.Version} supported {previous.SupportedDataFormat}");
+            return false;
+        }
+        reason = "";
         return true;
     }
 

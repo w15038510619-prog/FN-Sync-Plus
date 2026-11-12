@@ -46,6 +46,7 @@ namespace FNSyncPlus.Core.Services
         private readonly Task _queueWorkerTask;
 
         private volatile bool _maintenanceHold;
+        private string? _maintenanceOwnerId;   // guarded by _taskLifecycleLock
         private volatile bool _isNasOnline = true;
         private bool _nasStateInitialized;
         private bool _stopping;
@@ -652,6 +653,17 @@ namespace FNSyncPlus.Core.Services
             }
         }
 
+        /// <summary>
+        /// Wakes the queue worker without enqueueing work, so a released hold is noticed promptly
+        /// instead of after the polling interval.
+        /// </summary>
+        private void WakeQueueWorker()
+        {
+            try { _queueSignal.Release(); }
+            catch (ObjectDisposedException) { }
+            catch (SemaphoreFullException) { }
+        }
+
         private async Task ProcessQueueLoopAsync(CancellationToken token)
         {
             while (!token.IsCancellationRequested)
@@ -660,23 +672,50 @@ namespace FNSyncPlus.Core.Services
                 {
                     await _queueSignal.WaitAsync(token).ConfigureAwait(false);
 
-                    if (_maintenanceHold)
+                    // The hold is checked under the lifecycle lock, so a task can never slip past it
+                    // between the check and the registration below: either the hold is already set
+                    // (the item stays queued) or the task registers as running first and the gate
+                    // will wait for it.
+                    SyncTask? task;
+                    string? taskId;
+                    bool held;
+                    lock (_taskLifecycleLock)
                     {
-                        // An update is being installed: keep the queued work pending and do not
-                        // start anything new. Running tasks are not touched.
+                        held = _maintenanceHold;
+                        if (!held && _taskQueue.TryDequeue(out taskId))
+                        {
+                            task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+                            if (_stopping || task == null || _removingTasks.Contains(taskId) ||
+                                _recoverySessions.ContainsKey(taskId) || !task.Enabled || task.IsUserPaused ||
+                                task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing ||
+                                task.State == TaskSyncState.ConfigurationError)
+                            {
+                                continue;
+                            }
+                        }
+                        else if (!held)
+                        {
+                            continue;
+                        }
+                        else
+                        {
+                            task = null;
+                            taskId = null;
+                        }
+                    }
+
+                    if (held)
+                    {
+                        // An update is being installed: keep the queued work pending and do not start
+                        // anything new. Running tasks are not touched and are not waited for here.
                         _queueSignal.Release();
                         await Task.Delay(250, token).ConfigureAwait(false);
                         continue;
                     }
 
-                    if (_taskQueue.TryDequeue(out string? taskId))
                     {
-                        SyncTask? task;
-                        lock (_taskLifecycleLock)
-                        {
-                            task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-                            if (_stopping || task == null || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId) || !task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing || task.State == TaskSyncState.ConfigurationError) continue;
-                        }
+
+                        if (task == null || taskId == null) continue;
 
                         // 等待获取全局并发信号量槽位
                         await _concurrencySemaphore.WaitAsync(token).ConfigureAwait(false);
@@ -685,6 +724,16 @@ namespace FNSyncPlus.Core.Services
                         TaskCompletionSource completion;
                         lock (_taskLifecycleLock)
                         {
+                            if (_maintenanceHold)
+                            {
+                                // The hold was taken while this item was waiting for a concurrency
+                                // slot. Put it back rather than dropping it, so the pending backup
+                                // runs once the update has finished or has been abandoned.
+                                _concurrencySemaphore.Release();
+                                if (!_taskQueue.Contains(taskId)) _taskQueue.Enqueue(taskId);
+                                _queueSignal.Release();
+                                continue;
+                            }
                             if (_stopping || !_settings.Tasks.Contains(task) || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId) ||
                                 _runningCompletions.ContainsKey(taskId) || !task.Enabled || task.IsUserPaused ||
                                 task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing ||
@@ -1511,23 +1560,83 @@ namespace FNSyncPlus.Core.Services
         }
 
         /// <summary>
-        /// Stops the queue from starting new backups. Used while an update is being installed so a
-        /// fresh task cannot begin in the middle of the pointer swap. Running tasks are never
-        /// interrupted: they are allowed to finish on their own.
+        /// Stops the queue from starting new backups and returns an owned lease. Used while an update
+        /// is being installed so a fresh task cannot begin in the middle of the pointer swap.
+        ///
+        /// The hold is taken under the same lock the queue worker uses to register a running task,
+        /// so after this method returns the set of running tasks is fixed: either a task registered
+        /// before the hold (the caller waits for it) or it is refused the next time round (see
+        /// <see cref="ProcessQueueLoopAsync"/>). Running tasks are never interrupted.
+        ///
+        /// Returns false when another caller already holds the lease: a maintenance hold is never
+        /// stolen, because the existing owner is the one responsible for releasing it.
         /// </summary>
-        public void EnterMaintenanceHold()
+        public bool TryEnterMaintenanceHold(out MaintenanceLease lease, string reason = "准备安装更新")
         {
-            _maintenanceHold = true;
+            lock (_taskLifecycleLock)
+            {
+                if (_maintenanceOwnerId != null)
+                {
+                    lease = null!;
+                    return false;
+                }
+                string id = Guid.NewGuid().ToString("N");
+                _maintenanceOwnerId = id;
+                _maintenanceHold = true;
+                lease = new MaintenanceLease(id, reason, ReleaseMaintenanceLease);
+            }
             _logService.LogTask(new TaskLogEntry
             {
                 TaskId = "system", Level = "INFO", Stage = "UPDATE",
-                Message = "已进入更新维护状态，暂停启动新的备份任务"
+                Message = $"已进入更新维护状态（租约 {lease.Id[..8]}）：{reason}；暂停启动新的备份任务"
             });
+            return true;
         }
 
-        public void ExitMaintenanceHold() => _maintenanceHold = false;
+        /// <summary>
+        /// Clears the hold only when <paramref name="lease"/> is the current owner. A stale lease
+        /// (for example one that survived across a shutdown) is ignored instead of clearing a newer
+        /// hold taken by a different code path.
+        /// </summary>
+        private void ReleaseMaintenanceLease(MaintenanceLease lease)
+        {
+            bool released;
+            lock (_taskLifecycleLock)
+            {
+                released = _maintenanceOwnerId == lease.Id;
+                if (released)
+                {
+                    _maintenanceOwnerId = null;
+                    _maintenanceHold = false;
+                }
+            }
+            if (!released) return;
+            _logService.LogTask(new TaskLogEntry
+            {
+                TaskId = "system", Level = "INFO", Stage = "UPDATE",
+                Message = $"已退出更新维护状态（租约 {lease.Id[..8]}），恢复启动新的备份任务"
+            });
+            // Wake the queue worker so it re-reads the hold flag instead of waiting for a new signal.
+            WakeQueueWorker();
+        }
 
         public bool IsMaintenanceHoldActive => _maintenanceHold;
+
+        /// <summary>Number of leases that believe they hold the queue. Used by tests.</summary>
+        internal bool HasMaintenanceOwner
+        {
+            get { lock (_taskLifecycleLock) return _maintenanceOwnerId != null; }
+        }
+
+        /// <summary>
+        /// True when a task is actively executing. Queued-but-held work is deliberately excluded:
+        /// while the maintenance hold is active, queued items cannot start, so waiting for them
+        /// would make a safe install window impossible to reach.
+        /// </summary>
+        public bool HasRunningWork
+        {
+            get { lock (_taskLifecycleLock) return _runningCompletions.Count > 0; }
+        }
 
         /// <summary>True when any task is scanning, syncing, queued or still completing.</summary>
         public bool HasRunningOrQueuedWork
