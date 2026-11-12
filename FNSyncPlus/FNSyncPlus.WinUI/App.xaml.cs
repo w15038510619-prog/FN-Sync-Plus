@@ -47,7 +47,23 @@ namespace FNSyncPlus.WinUI
         {
             try
             {
-                _singleInstance = new SingleInstanceCoordinator(SingleInstanceCoordinator.DesktopInstanceName);
+                // Isolated test sessions get their OWN single-instance identity (per session id)
+                // so a test instance and a real, possibly production instance can coexist on the
+                // same machine: an acceptance run must never be able to wake up or exclude the
+                // user's real instance, and vice versa. Production keeps the legacy name so the
+                // old WPF build still excludes this one.
+                string instanceName = SingleInstanceCoordinator.DesktopInstanceName;
+                string[] launchArgs = Environment.GetCommandLineArgs();
+                string? stateArg = Array.Find(launchArgs,
+                    arg => arg.StartsWith("--isolated-test-state=", StringComparison.Ordinal));
+                bool isolatedLaunch = Array.Exists(launchArgs,
+                    arg => arg.Equals("--isolated-test-session", StringComparison.Ordinal));
+                if (isolatedLaunch)
+                {
+                    instanceName += ".Isolated." +
+                        (stateArg != null ? stateArg["--isolated-test-state=".Length..] : "Unbounded");
+                }
+                _singleInstance = new SingleInstanceCoordinator(instanceName);
                 if (!_singleInstance.IsPrimary)
                 {
                     bool notified = _singleInstance.NotifyExisting(TimeSpan.FromSeconds(5));
@@ -58,8 +74,22 @@ namespace FNSyncPlus.WinUI
                     return;
                 }
 
-                // 数据格式守卫：更高版本写入的配置不允许旧程序再写入
-                if (!EnsureDataFormatCompatible()) return;
+                // 数据格式守卫：更高版本写入的配置不允许旧程序再写入。
+                // 纯视觉验收模式连生产格式标记也不读不写——该模式必须零接触真实数据。
+                // (Parsed here from raw args because the guard runs before AppServices.Initialize.)
+                string[] startupArgs = Environment.GetCommandLineArgs();
+                bool isolatedArg = Array.Exists(startupArgs, arg => arg.Equals("--isolated-test-session", StringComparison.Ordinal));
+                bool uiVisualMode = isolatedArg &&
+                    Array.Exists(startupArgs, arg => arg.Equals("--ui-visual-acceptance", StringComparison.Ordinal));
+                // Test sessions that must not touch production data at all: the pure visual run
+                // and the update-handoff probe (which installs into its own sandbox layout).
+                bool offlineTestMode = uiVisualMode ||
+                    (isolatedArg && Array.Exists(startupArgs, arg => arg.StartsWith("--update-handoff-probe=", StringComparison.Ordinal)));
+                if (offlineTestMode)
+                {
+                    System.Diagnostics.Debug.WriteLine("测试会话：跳过生产数据格式标记检查");
+                }
+                else if (!EnsureDataFormatCompatible()) return;
 
                 // 初始化依赖注入容器与底层 Core 业务引擎
                 AppServices.Initialize();
@@ -118,10 +148,49 @@ namespace FNSyncPlus.WinUI
                     }
                     catch (Exception ex) { LogCrashException(ex, "App.SingleInstanceDispatch"); }
                 });
-                if (AppServices.IsIsolatedTestSession || AppServices.IsVersionedBetaSession)
+                if (AppServices.IsUiVisualAcceptance ||
+                    Array.Exists(cmdArgs, arg => arg.StartsWith("--update-handoff-probe=", StringComparison.Ordinal)))
+                {
+                    // Pure visual acceptance / update-handoff probe: never read any saved
+                    // credentials and never dial any NAS, not even the isolated test-session ones.
+                    System.Diagnostics.Debug.WriteLine("测试会话：跳过隔离会话自动连接");
+                }
+                else if (AppServices.IsIsolatedTestSession || AppServices.IsVersionedBetaSession)
                     _ = AppServices.ConnectIsolatedSessionAsync();
                 if (Array.Exists(cmdArgs, arg => arg.Equals("--minimize", StringComparison.OrdinalIgnoreCase)))
                     win.HideToTray();
+
+                // Update-exit probe (test harness only, isolated sessions only): proves the REAL
+                // application exits through the REAL shutdown coordinator and safe-exit sequence,
+                // the same path an unattended update handoff takes. Never enabled in production.
+                string? probeArg = Array.Find(cmdArgs, arg => arg.StartsWith("--update-exit-probe=", StringComparison.OrdinalIgnoreCase));
+                if (probeArg != null && AppServices.IsIsolatedTestSession &&
+                    int.TryParse(probeArg["--update-exit-probe=".Length..], out int probeDelay) && probeDelay > 0)
+                {
+                    _ = System.Threading.Tasks.Task.Delay(TimeSpan.FromSeconds(Math.Min(probeDelay, 120)))
+                        .ContinueWith(_ => win.DispatcherQueue.TryEnqueue(() =>
+                        {
+                            try
+                            {
+                                AppServices.GetService<FNSyncPlus.Core.Updates.IApplicationShutdownCoordinator>()
+                                    .RequestShutdown("更新交接退出探针：验证程序按更新流程安全退出");
+                            }
+                            catch (Exception ex) { LogCrashException(ex, "App.UpdateExitProbe"); }
+                        }));
+                }
+
+                // Handoff probe (test harness only, isolated sessions only): performs a REAL
+                // update handoff from a pre-signed descriptor — verify, take the maintenance
+                // lease, start the real updater, request a safe exit — and records the PIDs and
+                // lease state for the acceptance report. This is the same code path the
+                // unattended scheduler drives; only the release discovery is supplied by the
+                // harness instead of an HTTPS feed.
+                string? handoffArg = Array.Find(cmdArgs, arg => arg.StartsWith("--update-handoff-probe=", StringComparison.OrdinalIgnoreCase));
+                if (handoffArg != null && AppServices.IsIsolatedTestSession)
+                {
+                    string descriptorPath = handoffArg["--update-handoff-probe=".Length..].Trim('"');
+                    RunHandoffProbe(descriptorPath);
+                }
             }
             catch (Exception ex)
             {
@@ -129,6 +198,90 @@ namespace FNSyncPlus.WinUI
                 ShowStartupMessage("软件启动失败或无法确认是否已经运行。请检查系统托盘和日志后重试。");
                 Exit();
             }
+        }
+
+        /// <summary>
+        /// Runs one real handoff and writes its state (PIDs, lease ownership, exit request) to
+        /// handoff-probe.json so the acceptance report can quote facts instead of assumptions.
+        /// Every step is the production path; only the release comes from the harness.
+        /// </summary>
+        private static void RunHandoffProbe(string descriptorPath)
+        {
+            _ = System.Threading.Tasks.Task.Run(async () =>
+            {
+                var payload = new Dictionary<string, object?>
+                {
+                    ["app_pid"] = Environment.ProcessId,
+                    ["descriptor"] = descriptorPath,
+                    ["attempted_at"] = DateTimeOffset.UtcNow,
+                };
+                try
+                {
+                    var settings = AppServices.GetService<AppSettings>();
+                    var service = AppServices.GetService<UpdateService>();
+                    string directory = settings.IsolatedSessionPath != null
+                        ? Path.GetDirectoryName(settings.IsolatedSessionPath)!
+                        : Path.GetTempPath();
+                    string reportPath = Path.Combine(directory, "handoff-probe.json");
+
+                    var (session, error) = await service.BeginHandoffFromDescriptorAsync(
+                        descriptorPath, TimeSpan.FromMinutes(2)).ConfigureAwait(false);
+                    payload["prepared"] = session?.Plan.Ready == true;
+                    payload["prepare_error"] = error;
+                    if (session == null || !session.Plan.Ready)
+                    {
+                        payload["session_state"] = session?.State.ToString();
+                        WriteProbeReport(reportPath, payload);
+                        return;
+                    }
+                    payload["session_state"] = session.State.ToString();
+                    payload["lease_held_after_prepare"] = session.HoldsQueue;
+                    payload["target_version"] = session.Release?.Version;
+
+                    if (!service.TryStartUpdater(session, TimeSpan.FromMinutes(2), out string startError))
+                    {
+                        payload["updater_started"] = false;
+                        payload["updater_error"] = startError;
+                        payload["session_state"] = session.State.ToString();
+                        payload["lease_released_after_failure"] = !session.HoldsQueue;
+                        WriteProbeReport(reportPath, payload);
+                        return;
+                    }
+                    payload["updater_started"] = true;
+                    payload["updater_pid"] = session.UpdaterProcessId;
+                    payload["session_state"] = session.State.ToString();
+                    payload["lease_held_after_start"] = session.HoldsQueue;
+
+                    bool delivered = AppServices.GetService<FNSyncPlus.Core.Updates.IApplicationShutdownCoordinator>()
+                        .RequestShutdown("更新交接探针：程序将退出并安装更新");
+                    payload["shutdown_delivered"] = delivered;
+                    if (delivered) session.MarkShutdownRequested();
+                    payload["session_state"] = session.State.ToString();
+                    payload["lease_held_before_exit"] = session.HoldsQueue;
+                    WriteProbeReport(reportPath, payload);
+                }
+                catch (Exception ex)
+                {
+                    payload["error"] = $"{ex.GetType().Name}: {ex.Message}";
+                    try
+                    {
+                        var settings = AppServices.GetService<AppSettings>();
+                        string directory = settings.IsolatedSessionPath != null
+                            ? Path.GetDirectoryName(settings.IsolatedSessionPath)! : Path.GetTempPath();
+                        WriteProbeReport(Path.Combine(directory, "handoff-probe.json"), payload);
+                    }
+                    catch { }
+                    LogCrashException(ex, "App.HandoffProbe");
+                }
+            });
+        }
+
+        private static void WriteProbeReport(string path, Dictionary<string, object?> payload)
+        {
+            string temp = path + ".tmp";
+            File.WriteAllText(temp, System.Text.Json.JsonSerializer.Serialize(payload,
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp, path);
         }
 
         /// <summary>
