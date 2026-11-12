@@ -72,6 +72,76 @@ namespace FNSyncPlus.Tests
                 return _failed == 0 ? 0 : 1;
             }
 
+            if (args.Contains("--account-isolation"))
+            {
+                string isolationRoot = Path.Combine(Path.GetTempPath(), "FNSync_account_suite_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var cases = (await new AccountIsolationTestSuite().RunAsync(Path.Combine(isolationRoot, "accounts"))).ToList();
+                    foreach (var item in cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    int failed = cases.Count(c => !c.Passed);
+                    Console.WriteLine($"多账号隔离验收：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                    return failed == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(isolationRoot)) Directory.Delete(isolationRoot, true); } catch (IOException) { }
+                }
+            }
+
+            if (args.Contains("--p0-tests"))
+            {
+                string p0Root = Path.Combine(Path.GetTempPath(), "FNSync_p0_suite_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var cases = new List<UpdateSuiteCase>();
+                    cases.AddRange(await new MaintenanceLifecycleTestSuite().RunAsync(Path.Combine(p0Root, "maintenance")));
+                    cases.AddRange(await new ReleaseTrustTestSuite().RunAsync(Path.Combine(p0Root, "trust")));
+                    cases.AddRange(await new DataFormatTestSuite().RunAsync(Path.Combine(p0Root, "format")));
+                    cases.AddRange(await new UpdateSchedulerTestSuite().RunAsync(Path.Combine(p0Root, "scheduler")));
+                    cases.AddRange(await new LayoutRelocationTestSuite().RunAsync(Path.Combine(p0Root, "relocation")));
+                    foreach (var item in cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    int failed = cases.Count(c => !c.Passed);
+                    Console.WriteLine($"P0 整改专项测试：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                    return failed == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(p0Root)) Directory.Delete(p0Root, true); } catch (IOException) { }
+                }
+            }
+
+            if (args.Contains("--stress-tests"))
+            {
+                string stressRoot = Path.Combine(Path.GetTempPath(), "FNSync_stress_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    Directory.CreateDirectory(stressRoot);
+                    string nasRoot = Path.Combine(stressRoot, "nas");
+                    Directory.CreateDirectory(nasRoot);
+                    int fileCount = 3000;
+                    foreach (var arg in args)
+                        if (arg.StartsWith("--files=", StringComparison.Ordinal) &&
+                            int.TryParse(arg["--files=".Length..], out int parsed) && parsed > 0) fileCount = parsed;
+                    // The backup engine needs an exclusive-directory capable provider; production uses
+                    // the fnOS personal-space API, the local provider below mirrors that contract.
+                    var provider = new FaultInjectingProvider(nasRoot) { ClaimFnOs = true };
+                    var measurement = await new StressAndFaultTestSuite().RunStressAsync(provider, stressRoot, fileCount);
+                    Console.WriteLine($"压力复测：{measurement.Scenario}");
+                    Console.WriteLine($"  文件数={measurement.Files} 源大小={measurement.SourceBytes / 1024.0 / 1024.0:F1}MB");
+                    Console.WriteLine($"  首次备份={measurement.InitialSeconds:F1}s 无变化={measurement.UnchangedSeconds:F1}s 增量={measurement.IncrementalSeconds:F2}s");
+                    Console.WriteLine($"  增量上传={measurement.IncrementalUploadedBytes}B 峰值工作集={measurement.PeakWorkingSetBytes / 1024.0 / 1024.0:F0}MB 失败={measurement.Failures}");
+                    Console.WriteLine($"  备注：{measurement.Notes}");
+                    return measurement.Failures == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(stressRoot)) Directory.Delete(stressRoot, true); } catch (IOException) { }
+                }
+            }
+
             if (args.Contains("--capacity-tests"))
             {
                 string capacityRoot = Path.Combine(Path.GetTempPath(), "FNSync_capacity_suite_" + Guid.NewGuid().ToString("N"));
@@ -2068,6 +2138,18 @@ namespace FNSyncPlus.Tests
                 var updateReport = await new UpdateTestSuite().RunAsync(Path.Combine(root, "update-tests"));
                 foreach (var updateCase in updateReport.Cases)
                     Assert(updateCase.Passed, updateCase.Name, updateCase.Detail);
+
+                // ==================== P0 整改专项（维护状态 / 签名链 / 数据格式 / 调度） ====================
+                foreach (var p0Case in await new MaintenanceLifecycleTestSuite().RunAsync(Path.Combine(root, "p0-maintenance")))
+                    Assert(p0Case.Passed, p0Case.Name, p0Case.Detail);
+                foreach (var trustCase in await new ReleaseTrustTestSuite().RunAsync(Path.Combine(root, "p0-trust")))
+                    Assert(trustCase.Passed, trustCase.Name, trustCase.Detail);
+                foreach (var formatCase in await new DataFormatTestSuite().RunAsync(Path.Combine(root, "p0-format")))
+                    Assert(formatCase.Passed, formatCase.Name, formatCase.Detail);
+                foreach (var schedulerCase in await new UpdateSchedulerTestSuite().RunAsync(Path.Combine(root, "p0-scheduler")))
+                    Assert(schedulerCase.Passed, schedulerCase.Name, schedulerCase.Detail);
+                foreach (var relocationCase in await new LayoutRelocationTestSuite().RunAsync(Path.Combine(root, "p0-relocation")))
+                    Assert(relocationCase.Passed, relocationCase.Name, relocationCase.Detail);
 
                 // ==================== 容量与保留策略（阶段 3） ====================
                 var capacityReport = await new CapacityTestSuite().RunAsync(Path.Combine(root, "capacity-tests"));

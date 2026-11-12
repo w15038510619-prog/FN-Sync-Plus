@@ -256,6 +256,9 @@
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                         <TextBlock Text="{x:Bind ViewModel.InstallBlockedReason, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
                                    Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <!-- P0-2：后台调度是真实运行的，这里显示它最近一次的动作，避免"设置项存在但没有调度" -->
+                        <TextBlock Text="{x:Bind ViewModel.AutoCheckStatus, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                     </StackPanel>
                 </Border>
 

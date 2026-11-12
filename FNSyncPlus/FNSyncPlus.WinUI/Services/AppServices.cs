@@ -103,8 +103,14 @@ namespace FNSyncPlus.WinUI.Services
                 ? Path.Combine(settings.GetIsolatedLogDirectory(), "updates.json")
                 : Path.Combine(localAppData, "FNSyncPlus", "updates.json");
             var updateSettings = UpdateService.LoadSettings(updateSettingsPath);
-            var updateService = new UpdateService(updateSettings, updateSettingsPath, AppContext.BaseDirectory, taskManager);
+            var updateLog = (Action<string>)(message => LogService.Default.LogConnection("INFO", "[update] " + message));
+            var updateService = new UpdateService(updateSettings, updateSettingsPath, AppContext.BaseDirectory, taskManager, updateLog);
             services.AddSingleton(updateService);
+
+            // Background checks: one loop, so checks never overlap. Not started in isolated test
+            // sessions, where no network access is allowed.
+            var updateScheduler = new UpdateScheduler(updateService, log: updateLog);
+            services.AddSingleton(updateScheduler);
 
             // 3. ViewModels
             services.AddSingleton<MainViewModel>();

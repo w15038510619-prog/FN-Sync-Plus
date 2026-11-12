@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
@@ -90,7 +91,21 @@ namespace FNSyncPlus.WinUI
                 Helpers.UIThreadHelper.Initialize(win.DispatcherQueue);
 
                 win.Activate();
+                bool healthProbe = Array.Exists(cmdArgs,
+                    arg => arg.Equals("--update-health-check", StringComparison.OrdinalIgnoreCase));
                 MarkLaunchedHealthy();
+                StartBackgroundUpdateChecks(cmdArgs);
+                if (healthProbe)
+                {
+                    // The updater starts this process only to learn whether the new payload really
+                    // becomes usable. Report first, then leave: a probe that stays alive would race
+                    // the real launch for the single-instance mutex.
+                    win.DispatcherQueue.TryEnqueue(() =>
+                    {
+                        try { Exit(); }
+                        catch (Exception ex) { LogCrashException(ex, "App.HealthProbeExit"); }
+                    });
+                }
                 _singleInstance.StartListening(() =>
                 {
                     try
@@ -116,6 +131,25 @@ namespace FNSyncPlus.WinUI
             }
         }
 
+        /// <summary>
+        /// Starts the periodic update check. Never blocks startup: the first check is delayed, and a
+        /// broken feed only logs. Skipped for the updater's health probe (a short-lived process that
+        /// must not start network work) and for isolated test sessions.
+        /// </summary>
+        private static void StartBackgroundUpdateChecks(string[] cmdArgs)
+        {
+            try
+            {
+                if (AppServices.IsIsolatedTestSession) return;
+                if (Array.Exists(cmdArgs, arg => arg.Equals("--update-health-check", StringComparison.OrdinalIgnoreCase))) return;
+                AppServices.GetService<UpdateScheduler>().Start();
+            }
+            catch (Exception ex)
+            {
+                LogCrashException(ex, "App.StartBackgroundUpdateChecks");
+            }
+        }
+
         /// <summary>Configuration format this build understands. Bump only with a migration.</summary>
         private const int SupportedDataFormat = 1;
 
@@ -127,7 +161,8 @@ namespace FNSyncPlus.WinUI
         {
             string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "FNSyncPlus", "data-format.json");
-            var guard = new DataFormatGuard(path, SupportedDataFormat);
+            var guard = new DataFormatGuard(path, SupportedDataFormat,
+                message => LogService.Default.LogConnection("WARN", "[data-format] " + message));
             if (guard.TryClaim(UpdateService.CurrentVersion.ToString(), out string error)) return true;
             LogCrashException(new InvalidOperationException(error), "App.DataFormatGuard");
             ShowStartupMessage(error);
@@ -136,7 +171,9 @@ namespace FNSyncPlus.WinUI
 
         /// <summary>
         /// Tells the updater that this version really became usable. Only a managed installation
-        /// (app-{version} under a root with current.json) takes part in the update protocol.
+        /// (app-{version} under a root with current.json) takes part in the update protocol, and the
+        /// health marker is written only when the startup report says services actually came up:
+        /// "the window appeared" is not evidence that backups can run.
         /// </summary>
         private static void MarkLaunchedHealthy()
         {
@@ -145,13 +182,83 @@ namespace FNSyncPlus.WinUI
                 string? root = VersionedInstallLayout.TryFindRootFromAppDirectory(AppContext.BaseDirectory);
                 if (root == null) return;
                 var layout = new VersionedInstallLayout(root);
-                if (layout.ActiveVersion is { } version)
-                    new LaunchHealthTracker(root).MarkHealthy(version, Environment.ProcessId);
+                if (layout.ActiveVersion is not { } version) return;
+                bool usable = WriteLaunchReport(root, version);
+                if (!usable)
+                {
+                    LogCrashException(new InvalidOperationException("启动报告未通过可用性检查，不写入健康标记"),
+                        "App.MarkLaunchedHealthy");
+                    return;
+                }
+                new LaunchHealthTracker(root).MarkHealthy(version, Environment.ProcessId);
             }
             catch (Exception ex)
             {
                 LogCrashException(ex, "App.MarkLaunchedHealthy");
             }
+        }
+
+        /// <summary>
+        /// Records what actually worked at startup, not just "the window appeared". Returns whether
+        /// the build is genuinely usable: services came up, the task list is readable and the local
+        /// data format is readable. NAS connectivity is reported separately because "the program
+        /// started" is not "backups work again".
+        /// </summary>
+        private static bool WriteLaunchReport(string root, string version)
+        {
+            var report = new Dictionary<string, object?>
+            {
+                ["version"] = version,
+                ["pid"] = Environment.ProcessId,
+                ["started_at"] = DateTimeOffset.UtcNow,
+                ["supported_data_format"] = SupportedDataFormat
+            };
+            bool servicesOk = false;
+            try
+            {
+                var manager = AppServices.GetService<TaskManager>();
+                var tasks = manager.Tasks;
+                report["services_initialized"] = true;
+                report["task_manager_ok"] = tasks != null;
+                report["nas_online"] = manager.IsNasOnline;
+                report["task_count"] = tasks?.Count ?? 0;
+                servicesOk = tasks != null;
+            }
+            catch (Exception ex)
+            {
+                report["services_initialized"] = false;
+                report["task_manager_ok"] = false;
+                report["nas_online"] = false;
+                report["services_error"] = ex.Message;
+            }
+            bool formatOk = false;
+            try
+            {
+                string marker = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "FNSyncPlus", "data-format.json");
+                var probe = new DataFormatGuard(marker, SupportedDataFormat).Probe();
+                report["config_readable"] = probe.State == FormatMarkerState.Valid;
+                report["data_format"] = probe.Format;
+                report["format_compatible"] = probe.State == FormatMarkerState.Valid && probe.Format <= SupportedDataFormat;
+                report["format_state"] = probe.State.ToString();
+                formatOk = probe.State == FormatMarkerState.Valid && probe.Format <= SupportedDataFormat;
+            }
+            catch (Exception ex)
+            {
+                report["config_readable"] = false;
+                report["format_compatible"] = false;
+                report["format_error"] = ex.Message;
+            }
+            report["usable"] = servicesOk && formatOk;
+
+            string directory = Path.Combine(root, ".health");
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, $"report-{version}.json");
+            string temp = path + ".tmp";
+            File.WriteAllText(temp, System.Text.Json.JsonSerializer.Serialize(report,
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp, path);
+            return servicesOk && formatOk;
         }
 
         internal void ReleaseSingleInstance()

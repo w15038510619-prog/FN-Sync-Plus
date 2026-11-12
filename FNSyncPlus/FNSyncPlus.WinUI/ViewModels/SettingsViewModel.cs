@@ -18,6 +18,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private readonly AppSettings _settings;
         private readonly NasConnectionService _connectionService;
         private readonly UpdateService _updates;
+        private readonly UpdateScheduler? _scheduler;
         private readonly BackupCapacityAnalyzer _capacity = new();
         private CancellationTokenSource? _updateCts;
 
@@ -100,6 +101,19 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         public bool CanCheckUpdate => _updates.CanCheck;
 
+        [ObservableProperty]
+        private string _autoCheckStatus = "后台自动检查尚未开始。";
+
+        private void OnSchedulerChanged(UpdateSchedulerEvent evt)
+        {
+            // Raised from a background thread; marshal before touching bound properties.
+            Helpers.UIThreadHelper.RunOnUIThread(() =>
+            {
+                AutoCheckStatus = $"{evt.Message}（{DateTime.Now:HH:mm}）";
+                if (evt.Kind is "available" or "ready" or "error") UpdateStatus = evt.Message;
+            });
+        }
+
         public bool CanRunCapacity => CapacityTasks.Count > 0 && !IsCapacityBusy;
 
         /// <summary>Unattended install only makes sense for the unattended mode.</summary>
@@ -111,11 +125,18 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         partial void OnCapacityTaskIndexChanged(int value) => OnPropertyChanged(nameof(CanRunCapacity));
 
-        public SettingsViewModel(AppSettings settings, NasConnectionService connectionService, UpdateService updates)
+        public SettingsViewModel(AppSettings settings, NasConnectionService connectionService, UpdateService updates,
+            UpdateScheduler? scheduler = null)
         {
             _settings = settings;
             _connectionService = connectionService;
             _updates = updates;
+            _scheduler = scheduler;
+            if (_scheduler != null)
+            {
+                _scheduler.Changed += OnSchedulerChanged;
+                if (_scheduler.IsRunning) AutoCheckStatus = _scheduler.Status;
+            }
 
             _startWithWindows = CanConfigureStartup && settings.StartWithWindows;
             _minimizeToTray = settings.MinimizeToTray;
@@ -279,8 +300,11 @@ namespace FNSyncPlus.WinUI.ViewModels
                     DownloadProgress = bytes / 1024d / 1024d;
                     UpdateStatus = $"正在下载更新包：{DownloadProgress:F1} MiB";
                 });
-                var result = await _updates.DownloadAsync(progress, _updateCts.Token).ConfigureAwait(true);
-                UpdateStatus = result.Ok ? $"更新包已下载并校验通过：{Path.GetFileName(result.FilePath)}" : result.Error;
+                var (result, _) = await _updates.DownloadAsync(check.Release!, progress, _updateCts.Token)
+                    .ConfigureAwait(true);
+                UpdateStatus = result.Ok
+                    ? $"更新包已下载并校验通过：{Path.GetFileName(result.FilePath)}（SHA-256 与签名清单一致）"
+                    : result.Error;
             }
             catch (OperationCanceledException)
             {
@@ -318,24 +342,24 @@ namespace FNSyncPlus.WinUI.ViewModels
                     UpdateStatus = check.Error.Length > 0 ? check.Error : "没有可安装的新版本。";
                     return;
                 }
-                var download = await _updates.DownloadAsync(null).ConfigureAwait(true);
-                if (!download.Ok) { UpdateStatus = download.Error; return; }
-                string sha = FNSyncPlus.Core.Utils.HashHelper.ComputeFileSha256(download.FilePath);
-                var (readiness, plan) = await _updates.PrepareInstallAsync(check.Version, download.FilePath, sha,
-                    TimeSpan.FromMinutes(10)).ConfigureAwait(true);
-                if (!plan.Ready)
+                var (download, verified) = await _updates.DownloadAsync(check.Release!).ConfigureAwait(true);
+                if (!download.Ok || verified == null) { UpdateStatus = download.Error; return; }
+
+                // The session either owns the maintenance lease or has already released it; there is
+                // no path here that leaves backups paused without an install in progress.
+                using var session = await _updates.BeginInstallAsync(verified, TimeSpan.FromMinutes(10))
+                    .ConfigureAwait(true);
+                if (!session.Plan.Ready)
                 {
-                    UpdateStatus = readiness.Reason;
+                    UpdateStatus = session.Readiness.Reason;
                     return;
                 }
                 UpdateStatus = "正在启动更新器，程序即将退出并在更新后自动重启…";
-                Process.Start(new ProcessStartInfo
+                if (!_updates.TryStartUpdater(session, TimeSpan.FromMinutes(2), out string startError))
                 {
-                    FileName = plan.Executable,
-                    Arguments = plan.Arguments,
-                    UseShellExecute = false,
-                    WorkingDirectory = _updates.InstallRoot ?? AppContext.BaseDirectory
-                });
+                    UpdateStatus = startError;
+                    return;
+                }
                 Microsoft.UI.Xaml.Application.Current.Exit();
             }
             catch (Exception ex)
