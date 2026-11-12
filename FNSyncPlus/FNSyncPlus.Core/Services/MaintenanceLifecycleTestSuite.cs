@@ -167,20 +167,23 @@ public sealed class MaintenanceLifecycleTestSuite
             return (notStarted && ran, $"notStarted={notStarted} state={queued.State} ran={ran}");
         });
 
-        await Case("交接完成前不释放租约，主程序未退出时看门狗恢复备份", async () =>
+        await Case("交接后不靠时间释放租约，监督确认放弃后才恢复备份", async () =>
         {
             using var harness = new ManagerHarness(Path.Combine(workspace, "hold-watchdog"));
             harness.Manager.TryEnterMaintenanceHold(out MaintenanceLease lease, "测试");
             var session = new UpdateInstallSession(new InstallReadiness(InstallDecision.Proceed, "ok"),
                 new UpdateInstallPlan(true, "x", "y", "ok"), null, lease, null);
-            session.CommitHandOff(TimeSpan.FromMilliseconds(300));
+            session.CommitHandOff(null);
             bool heldDuringHandoff = session.HoldsQueue && harness.Manager.IsMaintenanceHoldActive;
+            // A timer alone must never resume backups while the updater may still be installing.
             await Task.Delay(900, token);
-            bool releasedByWatchdog = !harness.Manager.IsMaintenanceHoldActive && session.HoldReleased;
+            bool stillHeldAfterWait = session.HoldsQueue && harness.Manager.IsMaintenanceHoldActive;
+            // The supervised release path — the watchdog proving the updater gave up — resumes work.
+            bool released = session.ConfirmHandoffAbandoned("监督测试：更新器已确认放弃");
             var after = harness.StartQueuedTask();
             bool recovered = await harness.WaitForCompletionAsync(after, TimeSpan.FromSeconds(10));
-            return (heldDuringHandoff && releasedByWatchdog && recovered,
-                $"held={heldDuringHandoff} watchdog={releasedByWatchdog} recovered={recovered}");
+            return (heldDuringHandoff && stillHeldAfterWait && released && recovered,
+                $"held={heldDuringHandoff} 900ms后仍持有={stillHeldAfterWait} supervisedRelease={released} recovered={recovered}");
         });
 
         await Case("更新器文件缺失时安装会话不持有租约，备份继续", async () =>

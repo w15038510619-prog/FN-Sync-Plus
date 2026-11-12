@@ -206,9 +206,12 @@ public sealed class UpdateService
     }
 
     /// <summary>
-    /// Starts the updater and marks the session as handed off. If the process cannot start, the
-    /// session is aborted so backups resume immediately.
+    /// Starts the updater, hands the session over and attaches the supervision that guards the
+    /// maintenance lease from this point on. If the process cannot start, the session is aborted
+    /// so backups resume immediately.
     /// </summary>
+    /// <param name="abandonAfter">How long the supervision waits before it first checks on the
+    /// updater (the window the main program is expected to exit within).</param>
     public bool TryStartUpdater(UpdateInstallSession session, TimeSpan? abandonAfter, out string error)
     {
         ArgumentNullException.ThrowIfNull(session);
@@ -229,6 +232,27 @@ public sealed class UpdateService
                 error = "更新器进程未能启动，已恢复备份任务";
                 return false;
             }
+            session.RecordUpdaterProcess(process.Id);
+
+            // Supervise the real process: the lease is released only when the watchdog proves
+            // the updater gave up. The journal baseline excludes everything written before this
+            // handoff, so historical lines cannot be mistaken for this attempt's outcome.
+            string journalPath = _layout?.JournalPath ?? "";
+            long journalBaseline = 0L;
+            try { if (File.Exists(journalPath)) journalBaseline = new FileInfo(journalPath).Length; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            var watchdog = new ProcessHandoffWatchdog(
+                updaterStillRunning: () =>
+                {
+                    try { return !process.HasExited; }
+                    catch (Exception) { return false; } // handle gone: treat as exited
+                },
+                journalTail: () => ReadJournalTail(journalPath, journalBaseline),
+                onConfirmedAbandon: reason => session.ConfirmHandoffAbandoned(reason),
+                log: Log,
+                initialDelay: abandonAfter ?? TimeSpan.FromMinutes(2));
+            session.CommitHandOff(watchdog);
+            return true;
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
         {
@@ -236,12 +260,43 @@ public sealed class UpdateService
             error = $"更新器启动失败，已恢复备份任务：{ex.Message}";
             return false;
         }
-        session.CommitHandOff(abandonAfter ?? TimeSpan.FromMinutes(2));
-        return true;
+    }
+
+    private static string ReadJournalTail(string journalPath, long baseline)
+    {
+        if (string.IsNullOrEmpty(journalPath) || !File.Exists(journalPath) || baseline < 0) return "";
+        using var stream = new FileStream(journalPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        if (stream.Length <= baseline) return "";
+        stream.Seek(baseline, SeekOrigin.Begin);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
     }
 
     public string DescriptorPath(string version) =>
         Path.Combine(_layout?.Root ?? Path.GetTempPath(), ".pending", $"release-{version}.json");
+
+    /// <summary>
+    /// Acceptance seam: starts a REAL handoff from an already-signed descriptor on disk,
+    /// re-verifying it with the exact rules the standalone updater applies (pinned key, version
+    /// newer than installed, package inside the install root, size and hash from the signed
+    /// manifest). The caller then starts the updater and requests the application exit through
+    /// the lifecycle coordinator — the same sequence the unattended scheduler uses.
+    ///
+    /// Only reachable from the isolated-session handoff probe; production always goes through
+    /// CheckAsync/DownloadAsync, so a caller can never inject its own release.
+    /// </summary>
+    public async Task<(UpdateInstallSession? Session, string Error)> BeginHandoffFromDescriptorAsync(
+        string descriptorPath, TimeSpan budget, CancellationToken token = default)
+    {
+        if (_verifier == null || _layout == null || _gate == null) return (null, SupportMessage);
+        var descriptor = ReleaseDescriptor.TryLoad(descriptorPath);
+        if (descriptor == null) return (null, "发布描述缺失或格式无效");
+        var verdict = ReleaseHandoff.Verify(descriptor, _verifier, CurrentVersion, _layout.Root, DateTimeOffset.UtcNow);
+        if (!verdict.Ok || verdict.Release == null) return (null, verdict.Error);
+        var verified = verdict.Release with { LocalPackagePath = descriptor.PackagePath };
+        var session = await BeginInstallAsync(verified, budget, token).ConfigureAwait(false);
+        return session.Plan.Ready ? (session, "") : (session, session.Readiness.Reason);
+    }
 
     /// <summary>Returns an already downloaded, still-valid package for the release, if any.</summary>
     public bool TryFindVerifiedPackage(VerifiedRelease release, out string path)
