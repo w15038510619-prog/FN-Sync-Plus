@@ -10,6 +10,7 @@ using CommunityToolkit.Mvvm.Input;
 using FNSyncPlus.Core.Models;
 using FNSyncPlus.Core.Services;
 using FNSyncPlus.Core.Updates;
+using FNSyncPlus.WinUI.Services;
 
 namespace FNSyncPlus.WinUI.ViewModels
 {
@@ -154,6 +155,15 @@ namespace FNSyncPlus.WinUI.ViewModels
             _currentVersionText = $"当前版本 {UpdateService.CurrentVersion}（{_updates.CurrentChannelName} 通道）";
             _updateFeedUrl = update.ManifestUrl;
             _updateChannelIndex = string.Equals(update.Channel, "beta", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+
+            // Pure visual acceptance only: show a SIMULATED update state so the settings page
+            // screenshots cover the "new version ready" card without any network access. The
+            // simulated state is clearly labelled and never triggers a real check or download.
+            if (AppServices.IsUiVisualAcceptance)
+            {
+                UpdateStatus = "纯视觉验收模拟：发现新版本 9.9.9，已下载并校验（模拟数据，不联网，不会安装）";
+                AutoCheckStatus = "纯视觉验收模拟：后台检查已停止（离线模式）";
+            }
             _updateModeIndex = update.AutoMode is >= 0 and <= 2 ? update.AutoMode : 0;
             _unattendedEnabled = update.UnattendedEnabled;
             _updateSupportMessage = _updates.SupportMessage;
@@ -360,7 +370,22 @@ namespace FNSyncPlus.WinUI.ViewModels
                     UpdateStatus = startError;
                     return;
                 }
-                Microsoft.UI.Xaml.Application.Current.Exit();
+
+                // Same exit path as the unattended scheduler: the coordinator marshals to the UI
+                // thread and runs the safe-exit sequence (stop tasks, flush logs, real close —
+                // never a hide-to-tray). The session keeps its lease; the watchdog guards it.
+                var shutdown = AppServices.GetService<FNSyncPlus.Core.Updates.IApplicationShutdownCoordinator>();
+                if (!shutdown.RequestShutdown("正在安装更新，程序将自动退出并在更新完成后重启…"))
+                {
+                    // Delivering the request failed. The updater will wait for its timeout and
+                    // give up; the handoff watchdog confirms that and resumes backups. Tell the
+                    // user instead of pretending the install is proceeding.
+                    UpdateStatus = "已启动更新器，但无法请求程序退出；稍后更新器将放弃本次安装并恢复备份。";
+                }
+                else
+                {
+                    session.MarkShutdownRequested();
+                }
             }
             catch (Exception ex)
             {

@@ -64,6 +64,7 @@ public sealed class UpdateScheduler : IDisposable
     private readonly UpdateSchedulerOptions _options;
     private readonly Action<string>? _log;
     private readonly IUpdateInstallLauncher _launcher;
+    private readonly IApplicationShutdownCoordinator? _shutdown;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private CancellationTokenSource? _cts;
     private Task? _loop;
@@ -71,13 +72,15 @@ public sealed class UpdateScheduler : IDisposable
     private int _disposed;
 
     public UpdateScheduler(UpdateService service, UpdateSchedulerOptions? options = null,
-        IUpdateInstallLauncher? launcher = null, Action<string>? log = null)
+        IUpdateInstallLauncher? launcher = null, Action<string>? log = null,
+        IApplicationShutdownCoordinator? shutdown = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _options = options ?? UpdateSchedulerOptions.Default;
         _options.Validate();
         _launcher = launcher ?? new ProcessInstallLauncher(service);
         _log = log;
+        _shutdown = shutdown;
     }
 
     /// <summary>Raised for UI refresh. Always invoked from a background thread.</summary>
@@ -259,6 +262,17 @@ public sealed class UpdateScheduler : IDisposable
                 return (true, new UpdateSchedulerEvent("ready", Status, check.Version));
             }
 
+            // Unattended installs must be able to end this process. Without a shutdown
+            // coordinator the updater would only ever wait for our pid until it times out, so
+            // refuse before taking the maintenance hold rather than guaranteeing that failure.
+            if (_shutdown == null)
+            {
+                Status = "无人值守安装缺少应用退出协调器，已跳过（未启动更新器，未暂停备份）";
+                _log?.Invoke(Status);
+                Report("error", Status, check.Version);
+                return (false, new UpdateSchedulerEvent("error", Status, check.Version));
+            }
+
             var session = await _service.BeginInstallAsync(staged.Release, _options.MaxBackoff, token).ConfigureAwait(false);
             using (session)
             {
@@ -280,9 +294,24 @@ public sealed class UpdateScheduler : IDisposable
                     return (false, new UpdateSchedulerEvent("error", error, check.Version));
                 }
 
-                // The session keeps the maintenance lease on purpose: the app is about to exit and
-                // the updater is waiting for that. Releasing it here would let a backup start
-                // during the pointer swap.
+                // The session keeps the maintenance lease on purpose: the updater is now waiting
+                // for this process to exit, and a new backup starting during the pointer swap is
+                // exactly what the hold exists to prevent. Its watchdog supervises the release.
+                // The one thing the handoff still needs is for us to actually leave: ask the
+                // application lifecycle to exit through the coordinator, the same path a manual
+                // install uses.
+                if (!_shutdown.RequestShutdown($"正在安装 {check.Version}，程序将自动退出并在更新完成后重启"))
+                {
+                    // The request could not be delivered. The updater will wait for wait-seconds
+                    // and then give up; the handoff watchdog confirms that and resumes backups.
+                    // Report honestly instead of pretending an install is in progress.
+                    FailedChecks++;
+                    Status = "已启动更新器，但无法向主程序请求退出；更新器将放弃本次安装并恢复备份";
+                    Report("error", Status, check.Version);
+                    return (false, new UpdateSchedulerEvent("error", Status, check.Version));
+                }
+                session.MarkShutdownRequested();
+
                 Status = $"正在安装 {check.Version}，程序将自动重启";
                 Report("installing", Status, check.Version);
                 return (true, new UpdateSchedulerEvent("installing", Status, check.Version));

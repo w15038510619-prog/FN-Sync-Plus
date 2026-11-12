@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
@@ -222,6 +223,19 @@ namespace FNSyncPlus.WinUI
             _ = RequestShutdownAsync();
         }
 
+        /// <summary>
+        /// Safe-exit entry point for an update handoff. Runs the same sequence as the exit menu —
+        /// stop new work, wait for running tasks, flush logs, then really close — and can never be
+        /// intercepted by hide-to-tray, because it does not go through AppWindow.Closing.
+        /// </summary>
+        internal void BeginUpdateShutdown(string reason)
+        {
+            if (_shutdownComplete) return;
+            try { AppTitleText.Text = reason; }
+            catch (Exception ex) { App.LogCrashException(ex, "MainWindow.BeginUpdateShutdown"); }
+            _ = RequestShutdownAsync();
+        }
+
         private async Task RequestShutdownAsync()
         {
             if (_shutdownComplete) return;
@@ -341,6 +355,41 @@ namespace FNSyncPlus.WinUI
             {
                 addPage.CheckAndTriggerAutoFolderPicker();
             }
+
+            // Visual acceptance only: report this page as ready once its content has actually
+            // loaded and one layout pass has run, so the harness screenshots a rendered page
+            // instead of a white frame or the previous view.
+            if (AppServices.IsUiVisualAcceptance) HookVisualPageReady(tag);
+        }
+
+        private void HookVisualPageReady(string tag)
+        {
+            if (ContentFrame.Content is not FrameworkElement page) return;
+            void Report() => DispatcherQueue.TryEnqueue(() => DispatcherQueue.TryEnqueue(() =>
+            {
+                try
+                {
+                    var manager = AppServices.GetService<TaskManager>();
+                    UiVisualSignal.ReportPageReady(tag, new Dictionary<string, object?>
+                    {
+                        ["task_count"] = manager.Tasks.Count,
+                        ["nas_online"] = manager.IsNasOnline,
+                    });
+                }
+                catch (Exception ex) { App.LogCrashException(ex, "MainWindow.VisualPageReady"); }
+            }));
+            if (page.IsLoaded)
+            {
+                Report();
+                return;
+            }
+            RoutedEventHandler? once = null;
+            once = (s, e) =>
+            {
+                page.Loaded -= once!;
+                Report();
+            };
+            page.Loaded += once;
         }
 
         /// <summary>Version shown in the title bar, taken from the running assembly plus its build suffix.</summary>

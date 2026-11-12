@@ -157,7 +157,7 @@ public sealed class UpdateSchedulerTestSuite
         });
 
         // ---- 模式 C ----
-        await Case("模式 C 在备份空闲时完成受控安装交接", async () =>
+        await Case("模式 C 完成交接并请求主程序安全退出，租约保持到监督机制接管", async () =>
         {
             Publish(Manifest());
             using var ctx = new SchedulerContext(workspace, "unattended", verifier, baseUrl, FastOptions(),
@@ -168,9 +168,17 @@ public sealed class UpdateSchedulerTestSuite
             var evt = await ctx.Scheduler.RunOnceAsync(token).ConfigureAwait(false);
             bool installed = evt.Kind == "installing" && ctx.Launcher.Calls == 1;
             bool heldDuringHandoff = ctx.Launcher.HoldSeenAtHandoff;
-            bool releasedAfter = !ctx.Manager.IsMaintenanceHoldActive;
-            return (installed && heldDuringHandoff && releasedAfter,
-                $"kind={evt.Kind} calls={ctx.Launcher.Calls} held={heldDuringHandoff} released={releasedAfter} {evt.Message}");
+            // The lease deliberately stays held: the updater is waiting for this process to
+            // exit, so backups must not resume while the pointer swap is pending. Only the
+            // supervised watchdog may release it later.
+            bool stillHeldAfterCycle = ctx.Manager.IsMaintenanceHoldActive;
+            // And the scheduler must have actually asked the application to exit — without
+            // this request the updater can only ever time out.
+            bool exitRequested = ctx.Shutdown.Reasons.Count == 1 &&
+                                 ctx.Shutdown.Reasons[0].Contains("自动退出");
+            return (installed && heldDuringHandoff && stillHeldAfterCycle && exitRequested,
+                $"kind={evt.Kind} calls={ctx.Launcher.Calls} held={heldDuringHandoff} " +
+                $"stillHeld={stillHeldAfterCycle} exitRequests={ctx.Shutdown.Reasons.Count} {evt.Message}");
         });
 
         await Case("备份运行期间模式 C 推迟安装并恢复备份", async () =>
@@ -202,6 +210,58 @@ public sealed class UpdateSchedulerTestSuite
             ctx.Save();
             var evt = await ctx.Scheduler.RunOnceAsync(token).ConfigureAwait(false);
             return (ctx.Launcher.Calls == 0 && evt.Kind == "ready", $"kind={evt.Kind} calls={ctx.Launcher.Calls}");
+        });
+
+        await Case("没有退出协调器时拒绝无人值守安装且不暂停备份", async () =>
+        {
+            Publish(Manifest());
+            using var ctx = new SchedulerContext(workspace, "unattended-nocoordinator", verifier, baseUrl,
+                FastOptions(), managedLayout: true);
+            ctx.Settings.AutoMode = (int)AutoUpdateMode.UnattendedInstall;
+            ctx.Settings.UnattendedEnabled = true;
+            ctx.Save();
+            // Simulate a deployment where the lifecycle coordinator is missing: the scheduler
+            // must refuse BEFORE taking the maintenance hold, not start an updater that can
+            // only ever time out.
+            var scheduler = new UpdateScheduler(ctx.Service, FastOptions(), ctx.Launcher);
+            var evt = await scheduler.RunOnceAsync(token).ConfigureAwait(false);
+            return (evt.Kind == "error" && ctx.Launcher.Calls == 0 && !ctx.Manager.IsMaintenanceHoldActive,
+                $"kind={evt.Kind} launches={ctx.Launcher.Calls} hold={ctx.Manager.IsMaintenanceHoldActive} {evt.Message}");
+        });
+
+        await Case("退出请求无法送达时如实报告且租约保持到监督机制接管", async () =>
+        {
+            Publish(Manifest());
+            using var ctx = new SchedulerContext(workspace, "unattended-nodeliver", verifier, baseUrl,
+                FastOptions(), managedLayout: true);
+            ctx.Settings.AutoMode = (int)AutoUpdateMode.UnattendedInstall;
+            ctx.Settings.UnattendedEnabled = true;
+            ctx.Save();
+            ctx.Shutdown.Deliver = false;
+            var evt = await ctx.Scheduler.RunOnceAsync(token).ConfigureAwait(false);
+            // The updater started and waits; delivery failed; the hold stays with the session
+            // (the watchdog owns it now). The status must say so instead of "installing".
+            bool honest = evt.Kind == "error" && evt.Message.Contains("无法向主程序请求退出");
+            bool stillHeld = ctx.Manager.IsMaintenanceHoldActive;
+            return (honest && stillHeld && ctx.Launcher.Calls == 1,
+                $"kind={evt.Kind} launches={ctx.Launcher.Calls} stillHeld={stillHeld} {evt.Message}");
+        });
+
+        await Case("连续两次检查不会重复创建更新器或重复请求退出", async () =>
+        {
+            Publish(Manifest());
+            using var ctx = new SchedulerContext(workspace, "unattended-twice", verifier, baseUrl,
+                FastOptions(), managedLayout: true);
+            ctx.Settings.AutoMode = (int)AutoUpdateMode.UnattendedInstall;
+            ctx.Settings.UnattendedEnabled = true;
+            ctx.Save();
+            var first = await ctx.Scheduler.RunOnceAsync(token).ConfigureAwait(false);
+            var second = await ctx.Scheduler.RunOnceAsync(token).ConfigureAwait(false);
+            bool once = ctx.Launcher.Calls == 1 && ctx.Shutdown.Reasons.Count == 1;
+            bool firstInstalled = first.Kind == "installing";
+            bool secondSkipped = second.Kind == "ready" && second.Message.Contains("手动安装");
+            return (once && firstInstalled && secondSkipped,
+                $"first={first.Kind} second={second.Kind} launches={ctx.Launcher.Calls} exits={ctx.Shutdown.Reasons.Count}");
         });
 
         await Case("同一版本交接失败后不会反复重试安装", async () =>
@@ -318,6 +378,20 @@ public sealed class UpdateSchedulerTestSuite
     }
 
     /// <summary>Fake launcher: records the call and whether the hold was visible at handoff time.</summary>
+    /// <summary>Stands in for the application lifecycle coordinator: records that the scheduler
+    /// really asked the program to exit, which is the whole point of the unattended handoff.</summary>
+    private sealed class RecordingShutdown : IApplicationShutdownCoordinator
+    {
+        public List<string> Reasons { get; } = new();
+        public bool Deliver { get; set; } = true;
+        public bool RequestShutdown(string reason)
+        {
+            if (!Deliver) return false;
+            Reasons.Add(reason);
+            return true;
+        }
+    }
+
     private sealed class RecordingLauncher : IUpdateInstallLauncher
     {
         private readonly Func<bool> _holdProbe;
@@ -386,7 +460,8 @@ public sealed class UpdateSchedulerTestSuite
             Service = new UpdateService(Settings, settingsPath, installRoot, Manager, null, verifier,
                 HandlerFactory?.Invoke());
             Launcher = new RecordingLauncher(() => Manager.IsMaintenanceHoldActive);
-            Scheduler = new UpdateScheduler(Service, options, Launcher);
+            Shutdown = new RecordingShutdown();
+            Scheduler = new UpdateScheduler(Service, options, Launcher, shutdown: Shutdown);
         }
 
         public UpdateSettings Settings { get; }
@@ -394,6 +469,7 @@ public sealed class UpdateSchedulerTestSuite
         public UpdateScheduler Scheduler { get; }
         public TaskManager Manager { get; }
         public RecordingLauncher Launcher { get; }
+        public RecordingShutdown Shutdown { get; }
 
         public void Save() => Service.Save();
 
