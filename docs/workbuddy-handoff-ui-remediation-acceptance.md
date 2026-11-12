@@ -123,7 +123,9 @@ WinUI 3 下滚轮注入（`mouse_event`/`WM_MOUSEWHEEL`/置顶+前台）实测**
   5. UiProbe 度量修复（ContentCoverage + PrintWindow 完整渲染）
   6. TasksPage.xaml 长任务名修复
   7. e2e 验收脚本 + CI 接线 + 本报告
-- PR #4 推送与 CI 运行结果：见 PR 检查状态（GitHub Actions `build` 工作流，两轮均须绿）。
+- PR #4 推送与 CI 实际运行结果：
+  - 代码提交（`02368d3…8c6446a`）触发 run **43155829841**：**success（7m28s，build-windows 全部步骤通过）**，含本轮新增的
+    `Run Update Handoff Process Tests`（11 项）与 `Run UI Isolation Tests`（3 项 CI 安全用例）两个步骤，凭据扫描步骤通过。
 
 ## 7. 剩余 BLOCKED（单机无法构成证据）
 
