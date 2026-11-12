@@ -45,6 +45,7 @@
 | 真实双版本升级回滚 | `tools/acceptance/ab-upgrade-acceptance.ps1` | **27 PASS / 0 FAIL** | `.acceptance/ab-20261111-175437/acceptance-result.json` |
 | Inno Setup 安装/升级/卸载/重装 | `tools/acceptance/installer-acceptance.ps1` | **13 PASS / 0 FAIL** | `.acceptance/installer-20261111-173643/installer-result.json` |
 | WinUI 外观（100% DPI，明/暗，最小窗口） | `tools/acceptance/ui-visual-acceptance.ps1` | **13 PASS / 0 FAIL**（含 4 张人工复核截图） | `.acceptance/ui-final/ui-acceptance-result.json` |
+| GitHub Actions（PR #4，run 43142664651） | 凭据扫描 + 上述三类入口 | **success**：凭据扫描 202 个文件通过；完整性 **541/0/0**；账号隔离 **13/0**；P0 **76/0**；离线 **328/0/4 SKIP** | Actions 运行日志 |
 
 四类入口互不包含：`--integrity-regressions` 不含 P0 专项用例；离线套件是另一批用例；三个 `.ps1` 是脚本化
 端到端验收，调用真实构建产物与真实 `ISCC.exe`，不是单元测试。因此 **76 + 541 + 333 这类加法没有意义**。
@@ -335,7 +336,29 @@ powershell -File tools\acceptance\ui-visual-acceptance.ps1 -Payload <app-x.y.z �
 
 ---
 
-## 15. 仍然 BLOCKED 的清单（不要当成已完成）
+## 15. 提交、推送与 CI
+
+本轮按修复内容分 5 次提交，全部推送到 PR #4（`workbuddy/enterprise-release-readiness` →
+`codex/fix-backup-integrity`），**未合并 `main`，未创建正式 Release，未改动生产清单**：
+
+| 提交 | 内容 |
+| --- | --- |
+| `c63d9ab` | P0-1 / P0-3 / P0-4 与更新器信任链、数据格式守卫（含 4 个测试套件） |
+| `6a0c158` | P0-2 后台调度、启动健康报告、主题与标题版本号修复 |
+| `6e3342b` | `build-release.ps1`、`FNSyncPlus.iss`、三套端到端验收工具、CI 步骤 |
+| `0a754d4` | 本文档与 `acceptance-status.md` 更新 |
+| `cbf40d3` | CI 触发条件补齐（PR 基分支是 `codex/**`，原来根本不会跑检查） |
+
+CI：run [43142664651](https://github.com/w15038510619-prog/FN-Sync-Plus/actions/runs/43142664651) 结论 **success**，
+本地与 CI 的完整性回归数字一致（541 / 0 / 0）。离线套件 CI 为 328 / 0 / 4 SKIP，本机为 333 / 0 / 3 SKIP，
+差异来自 CI runner 缺少本机才有的真实 NAS 环境，属已知差异，不是回归。
+
+> 推送过程中 GitHub 的 `github.com:443` 通道多次被网络代理以 `CONNECT tunnel failed 502` 拒绝，重试后才成功；
+> 如果复现时拉不到远程，先确认代理而不是仓库状态。
+
+---
+
+## 16. 仍然 BLOCKED 的清单（不要当成已完成）
 
 | 项 | 原因 | 需要什么才能解除 |
 | --- | --- | --- |
