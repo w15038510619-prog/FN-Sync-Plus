@@ -4,7 +4,7 @@ on:
   push:
     branches: [ "main", "master", "feature/**" ]
   pull_request:
-    branches: [ "main", "master", "feature/v2.1-multitask-and-modern-ui" ]
+    branches: [ "main", "master", "feature/**", "codex/**", "workbuddy/**" ]
   workflow_dispatch:
 
 jobs:
