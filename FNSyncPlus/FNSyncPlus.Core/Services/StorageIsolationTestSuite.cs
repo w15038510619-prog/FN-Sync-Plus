@@ -422,6 +422,148 @@ public sealed class StorageIsolationTestSuite
                 $"exit={guardExit}（42=按预期拒绝）");
         });
 
+        // ---- 防护补充：相对路径、驱动器相关、根目录、父目录、大小写与重解析点全面防护 ----
+        Case("相对路径被规范化前拦截拒绝", () =>
+        {
+            bool caught = false;
+            try { AppStorageRoot.ValidateRoot(@".\test-relative"); }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("完全限定")) { caught = true; }
+            return (caught, "未按预期拒绝相对路径");
+        });
+
+        Case("驱动器相对路径及根驱动器相关路径被拦截拒绝", () =>
+        {
+            bool caughtDriveRel = false;
+            try { AppStorageRoot.ValidateRoot(@"C:test-rel"); }
+            catch (InvalidOperationException) { caughtDriveRel = true; }
+
+            bool caughtSlash = false;
+            try { AppStorageRoot.ValidateRoot(@"\test-rel"); }
+            catch (InvalidOperationException) { caughtSlash = true; }
+
+            return (caughtDriveRel && caughtSlash, $"driveRel={caughtDriveRel} slashRoot={caughtSlash}");
+        });
+
+        Case("包含相对导航段（. 或 ..）的路径被拒绝", () =>
+        {
+            bool caughtNav = false;
+            try { AppStorageRoot.ValidateRoot(@"C:\test\..\test2"); }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("相对导航段")) { caughtNav = true; }
+            return (caughtNav, "未按预期拒绝包含相对段的路径");
+        });
+
+        Case("驱动器根目录或文件系统根目录被拒绝", () =>
+        {
+            bool caught = false;
+            try { AppStorageRoot.ValidateRoot(@"C:\"); }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("根目录")) { caught = true; }
+            return (caught, "未按预期拒绝驱动器根目录");
+        });
+
+        Case("生产 APPDATA 及 LOCALAPPDATA 目录自身被拒绝", () =>
+        {
+            bool caughtRoaming = false;
+            string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            try { AppStorageRoot.ValidateRoot(roaming); }
+            catch (InvalidOperationException) { caughtRoaming = true; }
+
+            bool caughtLocal = false;
+            string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            try { AppStorageRoot.ValidateRoot(local); }
+            catch (InvalidOperationException) { caughtLocal = true; }
+
+            return (caughtRoaming && caughtLocal, $"roaming={caughtRoaming} local={caughtLocal}");
+        });
+
+        Case("生产目录父目录（UserProfile 与 AppData）被拒绝", () =>
+        {
+            bool caughtProfile = false;
+            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            try { AppStorageRoot.ValidateRoot(profile); }
+            catch (InvalidOperationException) { caughtProfile = true; }
+
+            bool caughtAppDataParent = false;
+            string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            string? appDataParent = Directory.GetParent(roaming)?.FullName;
+            if (!string.IsNullOrEmpty(appDataParent))
+            {
+                try { AppStorageRoot.ValidateRoot(appDataParent); }
+                catch (InvalidOperationException) { caughtAppDataParent = true; }
+            }
+            else caughtAppDataParent = true;
+
+            return (caughtProfile && caughtAppDataParent, $"profile={caughtProfile} appDataParent={caughtAppDataParent}");
+        });
+
+        Case("路径大小写及末尾斜杠无法绕过检查", () =>
+        {
+            bool caughtLower = false;
+            string prod = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FNSyncPlus");
+            string lowerWithSlash = prod.ToLowerInvariant() + @"\";
+            try { AppStorageRoot.ValidateRoot(lowerWithSlash); }
+            catch (InvalidOperationException) { caughtLower = true; }
+            return (caughtLower, "未按预期拦截大小写及尾部斜杠变种");
+        });
+
+        Case("目录联接点指向生产数据目录时被拒绝", () =>
+        {
+            string linkDir = Path.Combine(workspace, "test-junction-to-prod");
+            string prod = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FNSyncPlus");
+            try
+            {
+                Directory.CreateDirectory(prod);
+                var psi = new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{linkDir}\" \"{prod}\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true
+                };
+                using var p = Process.Start(psi);
+                p?.WaitForExit();
+                if (!Directory.Exists(linkDir)) return (true, "环境不支持创建联接点，跳过");
+
+                bool caught = false;
+                try { AppStorageRoot.ValidateRoot(linkDir); }
+                catch (InvalidOperationException ex) when (ex.Message.Contains("重解析") || ex.Message.Contains("生产")) { caught = true; }
+                return (caught, "未能识别并拦截指向生产目录的联接点");
+            }
+            finally
+            {
+                try { if (Directory.Exists(linkDir)) Directory.Delete(linkDir); } catch { }
+            }
+        });
+
+        Case("隔离目录中的子目录重解析点指向生产配置被阻止", () =>
+        {
+            string parentDir = Path.Combine(workspace, "test-parent-with-bad-sub");
+            Directory.CreateDirectory(parentDir);
+            string subLink = Path.Combine(parentDir, "roaming-junction");
+            string prod = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FNSyncPlus");
+            try
+            {
+                Directory.CreateDirectory(prod);
+                var psi = new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{subLink}\" \"{prod}\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true
+                };
+                using var p = Process.Start(psi);
+                p?.WaitForExit();
+                if (!Directory.Exists(subLink)) return (true, "环境不支持创建联接点，跳过");
+
+                bool caught = false;
+                try { AppStorageRoot.ValidateRoot(parentDir); }
+                catch (InvalidOperationException ex) when (ex.Message.Contains("重解析点") || ex.Message.Contains("生产")) { caught = true; }
+                return (caught, "未能拦截子目录中指向生产目录的重解析点");
+            }
+            finally
+            {
+                try { if (Directory.Exists(subLink)) Directory.Delete(subLink); } catch { }
+                try { if (Directory.Exists(parentDir)) Directory.Delete(parentDir, true); } catch { }
+            }
+        });
+
         // ---- 环境变量继承（更新器/重启进程自动继承隔离）----
         string rootInherit = Path.Combine(workspace, "testdata-inherit");
         var (parentExit, _) = await RunChildToCompletion("inherit", rootInherit).ConfigureAwait(false);

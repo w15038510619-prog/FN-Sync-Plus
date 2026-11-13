@@ -212,6 +212,59 @@ public sealed class DataFormatTestSuite
             return (!upgraded && File.ReadAllText(path) == "not json" && guard.LastPreservedCopy != null, error);
         });
 
+        Case("写入后回读验证失败时自动回滚恢复原标记", () =>
+        {
+            string path = Fresh("rollback-on-verify-fail");
+            File.WriteAllText(path, "{\"format\":1,\"app_version\":\"0.4.0\"}");
+            var guard = new DataFormatGuard(path, supportedFormat: 2)
+            {
+                FaultInjectPostWriteVerifier = _ => false // 模拟回读或完整性校验未通过
+            };
+            bool upgraded = guard.TryUpgrade("0.5.0", 2, out string error);
+            var after = guard.Probe();
+            string content = File.ReadAllText(path);
+            bool rolledBack = !upgraded && after.State == FormatMarkerState.Valid && after.Format == 1 &&
+                              content.Contains("\"format\":1") && error.Contains("已恢复原格式标记");
+            return (rolledBack, $"upgraded={upgraded} formatAfter={after.Format} error={error}");
+        });
+
+        Case("锁文件被短暂独占占用时通过重试安全获取", () =>
+        {
+            string path = Fresh("lock-transient-retry");
+            File.WriteAllText(path, "{\"format\":1,\"app_version\":\"0.4.0\"}");
+            string lockPath = path + ".lock";
+            var blocker = new TaskCompletionSource<bool>();
+            var lockReleased = new TaskCompletionSource<bool>();
+
+            var backgroundLock = Task.Run(() =>
+            {
+                using var fs = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                blocker.SetResult(true);
+                Thread.Sleep(150); // 持有锁 150 毫秒
+                lockReleased.SetResult(true);
+            });
+
+            blocker.Task.Wait(2000);
+            var guard = new DataFormatGuard(path, supportedFormat: 2);
+            bool upgraded = guard.TryUpgrade("0.5.0", 2, out string error);
+            backgroundLock.Wait(2000);
+            var after = guard.Probe();
+            return (upgraded && after.Format == 2, $"upgraded={upgraded} format={after.Format} error={error}");
+        });
+
+        Case("临时文件损坏或遗留不影响原标记完整性", () =>
+        {
+            string path = Fresh("temp-damaged-leftover");
+            File.WriteAllText(path, "{\"format\":1,\"app_version\":\"0.4.0\"}");
+            File.WriteAllText(path + ".tmp-bad", "corrupted partial write");
+            File.WriteAllText(path + ".bak-bad", "corrupted backup");
+            var guard = new DataFormatGuard(path, supportedFormat: 1);
+            bool claimed = guard.TryClaim("0.4.1", out string error);
+            var after = guard.Probe();
+            return (claimed && after.State == FormatMarkerState.Valid && after.Format == 1,
+                $"claimed={claimed} format={after.Format} error={error}");
+        });
+
         return Task.FromResult<IReadOnlyList<UpdateSuiteCase>>(cases);
     }
 

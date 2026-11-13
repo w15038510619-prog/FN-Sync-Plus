@@ -223,10 +223,17 @@ public sealed class DataFormatGuard
         return false;
     }
 
+    /// <summary>
+    /// Test hook for injecting verification faults to prove atomic rollback.
+    /// </summary>
+    internal Func<string, bool>? FaultInjectPostWriteVerifier { get; set; }
+
     private bool TryWrite(string appVersion, int format, out string error)
     {
         error = "";
         string temp = $"{_path}.tmp-{Guid.NewGuid():N}";
+        string backup = $"{_path}.bak-{Guid.NewGuid():N}";
+        bool backupCreated = false;
         try
         {
             string json = JsonSerializer.Serialize(new Record
@@ -240,14 +247,29 @@ public sealed class DataFormatGuard
                 writer.Flush();
                 stream.Flush(flushToDisk: true);
             }
+
+            bool exists = File.Exists(_path);
+            if (exists)
+            {
+                try
+                {
+                    File.Copy(_path, backup, overwrite: true);
+                    backupCreated = true;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    // If backup copy fails, proceed with ReplaceFile which creates its own internal backup
+                }
+            }
+
             bool replaced = false;
             for (int attempt = 0; attempt < 5; attempt++)
             {
                 try
                 {
-                    if (File.Exists(_path))
+                    if (exists)
                     {
-                        try { File.Replace(temp, _path, null); }
+                        try { File.Replace(temp, _path, null, ignoreMetadataErrors: true); }
                         catch (IOException) { File.Move(temp, _path, overwrite: true); }
                     }
                     else
@@ -264,27 +286,52 @@ public sealed class DataFormatGuard
             }
             if (!replaced)
             {
-                error = "无法替换配置格式标记文件";
+                if (backupCreated && File.Exists(backup) && !File.Exists(_path))
+                {
+                    try { File.Move(backup, _path, overwrite: true); } catch { }
+                }
+                error = "无法替换配置格式标记文件（可能被其他程序占用）";
                 return false;
             }
 
             // Confirm what actually landed: a silently truncated write must not be reported as ok.
             var probe = Probe();
-            if (probe.State != FormatMarkerState.Valid || probe.Format != format)
+            bool verified = probe.State == FormatMarkerState.Valid && probe.Format == format;
+            if (FaultInjectPostWriteVerifier != null && !FaultInjectPostWriteVerifier(_path))
             {
-                error = $"写入格式标记后校验失败（{probe.Detail}），已停止运行。";
+                verified = false;
+            }
+
+            if (!verified)
+            {
+                if (backupCreated && File.Exists(backup))
+                {
+                    try { File.Move(backup, _path, overwrite: true); } catch { }
+                }
+                error = $"写入格式标记后校验失败（{(probe.State != FormatMarkerState.Valid ? probe.Detail : "格式不匹配或校验拦截")}），已恢复原格式标记并停止运行。";
                 return false;
+            }
+
+            if (backupCreated)
+            {
+                try { File.Delete(backup); } catch { }
             }
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            if (backupCreated && File.Exists(backup) && !File.Exists(_path))
+            {
+                try { File.Move(backup, _path, overwrite: true); } catch { }
+            }
             error = $"无法写入配置格式标记：{ex.Message}";
             return false;
         }
         finally
         {
             try { if (File.Exists(temp)) File.Delete(temp); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            try { if (File.Exists(backup)) File.Delete(backup); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
     }
