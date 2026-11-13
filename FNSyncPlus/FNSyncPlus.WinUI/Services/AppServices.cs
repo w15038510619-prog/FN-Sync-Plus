@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Services;
+using FNSyncPlus.Core.Updates;
 using FNSyncPlus.WinUI.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -14,6 +15,13 @@ namespace FNSyncPlus.WinUI.Services
         public static bool IsVersionedBetaSession { get; private set; }
         public static bool IsLegacyEngineSession { get; private set; }
         public static string? IsolatedLogsDirectory { get; private set; }
+
+        /// <summary>
+        /// Pure visual acceptance mode: an isolated session that must stay completely offline —
+        /// no saved credentials, no NAS connection, no update checks, no sync engine activity.
+        /// Only UI shells, mock fixtures and the readiness beacon run.
+        /// </summary>
+        public static bool IsUiVisualAcceptance { get; private set; }
 
         public static IServiceProvider Provider => _serviceProvider 
             ?? throw new InvalidOperationException("AppServices has not been initialized.");
@@ -28,6 +36,10 @@ namespace FNSyncPlus.WinUI.Services
             IsIsolatedTestSession = profile == DesktopStartupProfile.IsolatedTest;
             IsVersionedBetaSession = profile == DesktopStartupProfile.VersionedBeta;
             IsLegacyEngineSession = profile == DesktopStartupProfile.LegacyEngine;
+            // Pure visual acceptance is a modifier on top of an isolated session; refusing the
+            // combination anywhere else keeps the offline guarantees in one auditable place.
+            IsUiVisualAcceptance = IsIsolatedTestSession &&
+                Array.Exists(args, arg => arg.Equals("--ui-visual-acceptance", StringComparison.Ordinal));
             string? stateArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-state=", StringComparison.Ordinal));
             string? betaStateArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-beta-profile=", StringComparison.Ordinal));
             string? remoteArg = Array.Find(args, arg => arg.StartsWith("--isolated-test-remote=", StringComparison.Ordinal));
@@ -58,11 +70,14 @@ namespace FNSyncPlus.WinUI.Services
             }
             if (IsIsolatedTestSession)
             {
-                settings.IsolatedCredentialPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "FNSyncPlus", "test-session", "credentials.dat");
+                settings.IsolatedCredentialPath = Path.Combine(AppStorageRoot.LocalAppDataDir(),
+                    "test-session", "credentials.dat");
                 settings.RememberCredentials = File.Exists(settings.IsolatedCredentialPath);
-                string productionSettings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FNSyncPlus", "settings.json");
-                settings.TrustedCertThumbprints = AppSettings.ReadTrustedCertificates(productionSettings);
+                // Trusted certificate fingerprints come from the environment's own roaming
+                // settings. With an isolated test data root that file lives under the test root,
+                // so a test session can never even read the production configuration.
+                string environmentSettings = Path.Combine(AppStorageRoot.RoamingAppDataDir(), "settings.json");
+                settings.TrustedCertThumbprints = AppSettings.ReadTrustedCertificates(environmentSettings);
             }
             services.AddSingleton(settings);
 
@@ -95,7 +110,32 @@ namespace FNSyncPlus.WinUI.Services
             var fnOsService = new FnOsIntegrationService(smbService);
             services.AddSingleton(fnOsService);
 
-            // 2. ViewModels
+            // 2. Auto update (phase 2). A managed installation is required for in-place upgrades;
+            //    an unpacked ZIP run can still check but never replaces itself.
+            string updateSettingsPath = IsIsolatedTestSession
+                ? Path.Combine(settings.GetIsolatedLogDirectory(), "updates.json")
+                : Path.Combine(AppStorageRoot.LocalAppDataDir(), "updates.json");
+            var updateSettings = UpdateService.LoadSettings(updateSettingsPath);
+            // Isolation hygiene: an isolated test session must not leak even log lines into the
+            // production connection log, so the update log follows the session-aware log service.
+            var updateLog = (Action<string>)(message => logService.LogConnection("INFO", "[update] " + message));
+            var updateService = new UpdateService(updateSettings, updateSettingsPath, AppContext.BaseDirectory, taskManager, updateLog);
+            services.AddSingleton(updateService);
+            // Restart discernment: classify any interrupted handoff (state file says the updater
+            // was mid-flight when this process died) and block its version from automatic
+            // reinstall until a human diagnoses the machine. Never auto-assumes failure.
+            try { updateService.ReconcileInterruptedOperations(); }
+            catch (Exception ex) { updateLog("更新操作启动对账异常（保持谨慎，不自动重装）：" + ex.Message); }
+
+            // Background checks: one loop, so checks never overlap. Not started in isolated test
+            // sessions, where no network access is allowed. The shutdown coordinator is the one
+            // exit path shared by the manual install button and the unattended scheduler.
+            var shutdownCoordinator = new WinUiShutdownCoordinator();
+            services.AddSingleton<IApplicationShutdownCoordinator>(shutdownCoordinator);
+            var updateScheduler = new UpdateScheduler(updateService, log: updateLog, shutdown: shutdownCoordinator);
+            services.AddSingleton(updateScheduler);
+
+            // 3. ViewModels
             services.AddSingleton<MainViewModel>();
             services.AddSingleton<TasksViewModel>();
             services.AddTransient<AddFolderWizardViewModel>();

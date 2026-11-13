@@ -43,8 +43,10 @@ public sealed class ExperimentalVersionedBackup
     }
 
     public Task<Result> RunAsync(INasStorageProvider provider, string sourceDirectory, string target,
-        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0, bool mirrorDeletionEnabled = false)
-        => RunCoreAsync(provider, sourceDirectory, target, false, null, token, strategy, settlingDelaySeconds, mirrorDeletionEnabled);
+        CancellationToken token = default, BackupStrategy strategy = BackupStrategy.Smart, int settlingDelaySeconds = 0, bool mirrorDeletionEnabled = false,
+        IReadOnlyDictionary<string, string>? confirmedRenames = null)
+        => RunCoreAsync(provider, sourceDirectory, target, false, null, token, strategy, settlingDelaySeconds, mirrorDeletionEnabled,
+            confirmedRenames: confirmedRenames);
 
     /// <summary>Creates a destination, or resumes only one with a matching initialization record.</summary>
     public async Task<Result> CreateNewAsync(INasStorageProvider provider, string sourceDirectory, string target,
@@ -115,7 +117,8 @@ public sealed class ExperimentalVersionedBackup
 
     private async Task<Result> RunCoreAsync(INasStorageProvider provider, string sourceDirectory, string target,
         bool creating, string? existingRoot, CancellationToken token, BackupStrategy strategy, int settlingDelaySeconds, bool mirrorDeletionEnabled,
-        string? ownershipPath = null, byte[]? ownership = null)
+        string? ownershipPath = null, byte[]? ownership = null,
+        IReadOnlyDictionary<string, string>? confirmedRenames = null)
     {
         ArgumentNullException.ThrowIfNull(provider);
         if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("备份目标必须是安全的相对路径", nameof(target));
@@ -207,6 +210,11 @@ public sealed class ExperimentalVersionedBackup
             var additions = baselines.Values.Where(source => !previous.ContainsKey(source.RelativePath)).ToList();
             var renames = new Dictionary<string, ManifestFileEntry>(StringComparer.OrdinalIgnoreCase);
             var matchedOld = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // A user-confirmed pairing is only accepted when the current source hash matches the
+            // old backup record exactly; the previous objects are verified again later in this run.
+            var unresolvedConfirmations = new Dictionary<string, string>(confirmedRenames ?? new Dictionary<string, string>(),
+                StringComparer.OrdinalIgnoreCase);
+            var confirmedMatchedNew = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var ambiguousGroups = new List<AmbiguousRenameException.Group>();
             foreach (var group in missing.GroupBy(old => (old.Size, Hash: old.Sha256.ToUpperInvariant())))
             {
@@ -219,9 +227,37 @@ public sealed class ExperimentalVersionedBackup
                     string.Equals(source.Sha256, group.Key.Hash, StringComparison.OrdinalIgnoreCase));
                 if (matches.Count != 1 || group.Count() != 1 || oldContentCount != 1 || currentContentCount != 1)
                 {
+                    // A manual confirmation may resolve this group, one pair per old/new file. It is
+                    // accepted only if the confirmation names THIS content, i.e. same hash+size.
+                    var confirmed = new List<(ManifestFileEntry Old, SourceFile New)>();
+                    foreach (var previousEntry in group)
+                    {
+                        if (!unresolvedConfirmations.TryGetValue(previousEntry.OriginalRel, out string? newPath)) continue;
+                        var candidate = matches.FirstOrDefault(m => string.Equals(m.RelativePath, newPath, StringComparison.OrdinalIgnoreCase));
+                        if (candidate == null) continue;
+                        if (!string.Equals(candidate.Sha256, previousEntry.Sha256, StringComparison.OrdinalIgnoreCase) || candidate.Size != previousEntry.Size) continue;
+                        confirmed.Add((previousEntry, candidate));
+                    }
+                    if (confirmed.Count > 0 && confirmed.Count == group.Count() &&
+                        confirmed.Select(c => c.New.RelativePath).Distinct(StringComparer.OrdinalIgnoreCase).Count() == confirmed.Count)
+                    {
+                        foreach (var (previousEntry, matched) in confirmed)
+                        {
+                            renames.Add(matched.RelativePath, previousEntry);
+                            matchedOld.Add(previousEntry.OriginalRel);
+                            unresolvedConfirmations.Remove(previousEntry.OriginalRel);
+                        }
+                        continue;
+                    }
+                    string reason = matches.Count != 1
+                        ? $"内容相同的新文件有 {matches.Count} 个，无法确定哪一个接替旧文件"
+                        : group.Count() != 1
+                            ? $"内容相同的旧文件有 {group.Count()} 个，无法确定哪一个被改名"
+                            : "该内容在旧备份或当前源目录中出现多份，配对会造成历史覆盖";
                     ambiguousGroups.Add(new AmbiguousRenameException.Group(
                         group.Count() == 1 ? group.Single().OriginalRel : string.Join(", ", group.Select(old => old.OriginalRel)),
-                        group.Key.Size, group.Key.Hash, matches.Select(source => source.RelativePath).ToList()));
+                        group.Key.Size, group.Key.Hash, matches.Select(source => source.RelativePath).ToList())
+                    { Reason = reason });
                     continue;
                 }
                 var old = group.Single();
@@ -229,11 +265,27 @@ public sealed class ExperimentalVersionedBackup
                 matchedOld.Add(old.OriginalRel);
             }
             var deleted = missing.Where(old => !matchedOld.Contains(old.OriginalRel)).ToList();
-            var unmatchedAdditions = additions.Where(source => !renames.ContainsKey(source.RelativePath)).Select(source => source.RelativePath).ToList();
+            var unmatchedAdditions = additions.Where(source => !renames.ContainsKey(source.RelativePath))
+                .Select(source => source.RelativePath).ToList();
+            // Confirmations that no longer match current content are reported, never applied.
+            foreach (var stale in unresolvedConfirmations)
+                if (!unmatchedAdditions.Contains(stale.Value, StringComparer.OrdinalIgnoreCase) &&
+                    !renames.ContainsKey(stale.Value))
+                    unmatchedAdditions.Add(stale.Value);
             if (ambiguousGroups.Count > 0 || (deleted.Count > 0 && unmatchedAdditions.Count > 0))
             {
-                var difference = new AmbiguousRenameException(string.Empty, ambiguousGroups, unmatchedAdditions);
-                throw new AmbiguousRenameException(difference.BuildUserSummary(), ambiguousGroups, unmatchedAdditions);
+                var additionDetails = unmatchedAdditions
+                    .Select(path => baselines[path])
+                    .Select(source => new AmbiguousRenameException.Addition(source.RelativePath, source.Size, source.Sha256))
+                    .ToList();
+                var removalDetails = deleted
+                    .Where(old => !matchedOld.Contains(old.OriginalRel))
+                    .Select(old => new AmbiguousRenameException.Removal(old.OriginalRel, old.Size, old.Sha256))
+                    .ToList();
+                var detail = new AmbiguousRenameException(string.Empty, ambiguousGroups, unmatchedAdditions,
+                    additionDetails, removalDetails, previousBackupPreserved: true, previousManifestId: oldSnapshot?.Id);
+                throw new AmbiguousRenameException(detail.BuildUserSummary(), ambiguousGroups, unmatchedAdditions,
+                    additionDetails, removalDetails, previousBackupPreserved: true, previousManifestId: oldSnapshot?.Id);
             }
 
             var preparedFiles = new List<SourceFile>();

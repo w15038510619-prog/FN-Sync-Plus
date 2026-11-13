@@ -20,8 +20,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Version>0.4.0-beta</Version>
-    <AssemblyVersion>0.4.0.0</AssemblyVersion>
-    <FileVersion>0.4.0.0</FileVersion>
+    <!-- Derived from $(Version) (see FNSyncPlus.Core.csproj): a pinned 0.4.0.0 made every build
+         look identical to the update client and to the health report. -->
   </PropertyGroup>
 
   <ItemGroup>

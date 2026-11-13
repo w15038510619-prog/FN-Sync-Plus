@@ -103,7 +103,166 @@
                     </StackPanel>
                 </Border>
 
-                <!-- Card 4: About & Version -->
+                <!-- Card 4: Backup capacity & retention (read-only) -->
+                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="备份容量与保留策略（只读）" FontSize="14" FontWeight="SemiBold" />
+                        <TextBlock Text="统计当前备份、历史版本与物理对象的占用。程序不会自动删除任何历史版本；预览仅用于人工评估。"
+                                   FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="240" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="备份任务" FontSize="13" FontWeight="Medium" />
+                                <TextBlock Text="选择要统计的备份目标（需先连接 NAS）" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                            <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{x:Bind ViewModel.CapacityTasks, Mode=OneWay}"
+                                      SelectedIndex="{x:Bind ViewModel.CapacityTaskIndex, Mode=TwoWay}" />
+                        </Grid>
+
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Command="{x:Bind ViewModel.AnalyzeCapacityCommand}" IsEnabled="{x:Bind ViewModel.CanRunCapacity, Mode=OneWay}">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE9D9;" FontSize="12" />
+                                    <TextBlock Text="统计容量" FontSize="12" />
+                                </StackPanel>
+                            </Button>
+                            <NumberBox Value="{x:Bind ViewModel.RetentionKeepVersions, Mode=TwoWay}" Minimum="1" Maximum="1000" SmallChange="1"
+                                       SpinButtonPlacementMode="Compact" Width="120" Header="保留版本数" />
+                            <NumberBox Value="{x:Bind ViewModel.RetentionKeepDays, Mode=TwoWay}" Minimum="0" Maximum="3650" SmallChange="1"
+                                       SpinButtonPlacementMode="Compact" Width="120" Header="保留天数" />
+                            <Button Command="{x:Bind ViewModel.PreviewRetentionCommand}" IsEnabled="{x:Bind ViewModel.CanRunCapacity, Mode=OneWay}"
+                                    VerticalAlignment="Bottom">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE81C;" FontSize="12" />
+                                    <TextBlock Text="预览保留策略" FontSize="12" />
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+
+                        <TextBlock Text="{x:Bind ViewModel.CapacitySummary, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" IsTextSelectionEnabled="True" />
+                        <TextBlock Text="{x:Bind ViewModel.RetentionSummary, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" IsTextSelectionEnabled="True" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Card 5: Software Update -->
+                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="12">
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="软件更新" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.CurrentVersionText, Mode=OneWay}" FontSize="11"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                        </Grid>
+
+                        <TextBlock Text="{x:Bind ViewModel.UpdateSupportMessage, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="200" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="更新源地址（HTTPS）" FontSize="13" FontWeight="Medium" />
+                                <TextBlock Text="公司内网更新服务器的清单地址，例如 https://update.example.internal/fnsync/manifest.json" FontSize="11" TextWrapping="Wrap"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                            <TextBox Grid.Column="1" Text="{x:Bind ViewModel.UpdateFeedUrl, Mode=TwoWay}" FontSize="11" PlaceholderText="https://…/manifest.json" />
+                        </Grid>
+
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="200" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="更新通道" FontSize="13" FontWeight="Medium" />
+                                <TextBlock Text="Stable 只接收正式版；Beta 可接收测试版。请按公司试点范围选择" FontSize="11" TextWrapping="Wrap"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                            <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.UpdateChannelIndex, Mode=TwoWay}" HorizontalAlignment="Stretch">
+                                <ComboBoxItem Content="Stable（正式）" />
+                                <ComboBoxItem Content="Beta（试点）" />
+                            </ComboBox>
+                        </Grid>
+
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="200" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="更新方式" FontSize="13" FontWeight="Medium" />
+                                <TextBlock Text="无人值守安装需要先通过安全验收；否则请保持“仅检查”" FontSize="11" TextWrapping="Wrap"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                            <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.UpdateModeIndex, Mode=TwoWay}" HorizontalAlignment="Stretch">
+                                <ComboBoxItem Content="仅检查更新" />
+                                <ComboBoxItem Content="下载后提示" />
+                                <ComboBoxItem Content="无人值守安装" />
+                            </ComboBox>
+                        </Grid>
+
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="允许无人值守安装" FontSize="13" FontWeight="Medium" />
+                                <TextBlock Text="仅在测试环境验证通过、且公司明确批准后启用。备份进行中会推迟安装，不会中断备份" FontSize="11" TextWrapping="Wrap"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </StackPanel>
+                            <ToggleSwitch Grid.Column="1" IsOn="{x:Bind ViewModel.UnattendedEnabled, Mode=TwoWay}"
+                                          IsEnabled="{x:Bind ViewModel.UnattendedSelectable, Mode=OneWay}" OnContent="" OffContent="" />
+                        </Grid>
+
+                        <ProgressBar IsIndeterminate="True"
+                                     Visibility="{x:Bind ViewModel.ShowDownloadProgress, Mode=OneWay}" Height="4" />
+
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Command="{x:Bind ViewModel.CheckUpdateCommand}" IsEnabled="{x:Bind ViewModel.CanCheckUpdate, Mode=OneWay}">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE895;" FontSize="12" />
+                                    <TextBlock Text="检查更新" FontSize="12" />
+                                </StackPanel>
+                            </Button>
+                            <Button Command="{x:Bind ViewModel.DownloadUpdateCommand}">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE896;" FontSize="12" />
+                                    <TextBlock Text="下载更新包" FontSize="12" />
+                                </StackPanel>
+                            </Button>
+                            <Button Command="{x:Bind ViewModel.InstallUpdateCommand}" IsEnabled="{x:Bind ViewModel.CanInstallUpdate, Mode=OneWay}">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE777;" FontSize="12" />
+                                    <TextBlock Text="安装并重启" FontSize="12" />
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+
+                        <TextBlock Text="{x:Bind ViewModel.UpdateStatus, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                        <TextBlock Text="{x:Bind ViewModel.LastCheckText, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <TextBlock Text="{x:Bind ViewModel.InstallBlockedReason, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        <!-- P0-2：后台调度是真实运行的，这里显示它最近一次的动作，避免"设置项存在但没有调度" -->
+                        <TextBlock Text="{x:Bind ViewModel.AutoCheckStatus, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Card 5: About & Version -->
                 <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
                     <StackPanel Spacing="8">
                         <TextBlock Text="关于软件与版本信息" FontSize="14" FontWeight="SemiBold" />

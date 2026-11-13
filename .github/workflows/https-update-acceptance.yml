@@ -1,0 +1,60 @@
+name: HTTPS Update Acceptance Harness
+
+on:
+  workflow_dispatch:
+    inputs:
+      prepare_timeout_sec:
+        description: 'Preparation timeout in seconds'
+        required: false
+        default: '300'
+  pull_request:
+    paths:
+      - 'tools/acceptance/https-update-acceptance.ps1'
+      - 'tools/FNSyncPlus.LocalUpdateServer/**'
+      - 'FNSyncPlus/FNSyncPlus.Core/Updates/**'
+      - 'FNSyncPlus/FNSyncPlus.Updater/**'
+
+jobs:
+  acceptance-https-update:
+    name: Run Controlled Loopback HTTPS Update Acceptance
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8.0 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore Solution
+        run: dotnet restore FNSyncPlus/FNSyncPlus.sln
+
+      - name: Build Solution and Tools
+        run: |
+          dotnet build FNSyncPlus/FNSyncPlus.sln -c Release --no-restore
+          dotnet build tools/FNSyncPlus.LocalUpdateServer/FNSyncPlus.LocalUpdateServer.csproj -c Release
+
+      - name: Run HTTPS Update Acceptance Suite
+        shell: pwsh
+        run: |
+          $timeout = if ("${{ inputs.prepare_timeout_sec }}" -ne "") { [int]"${{ inputs.prepare_timeout_sec }}" } else { 300 }
+          & powershell.exe -ExecutionPolicy Bypass -File "tools\acceptance\https-update-acceptance.ps1" -DotnetPath "dotnet" -PrepareTimeoutSeconds $timeout
+          if ($LASTEXITCODE -ne 0) {
+            throw "HTTPS 端到端更新验收测试失败，退出码: $LASTEXITCODE"
+          }
+
+      - name: Upload Test Evidences
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: https-update-acceptance-evidence
+          path: |
+            **/server-facts.json
+            **/server-facts.json.requests.jsonl
+            **/server-stdout.log
+            **/server-stderr.log
+            **/storage-audit.log
+            **/update.log
+          if-no-files-found: ignore

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
@@ -33,9 +34,12 @@ namespace FNSyncPlus.WinUI
             _logService = AppServices.GetService<LogService>();
             InitializeComponent();
 
+            // The version used to be a hard-coded string, so an upgraded install kept claiming the
+            // old version. It now comes from the assembly that is actually running.
+            string product = "飞牛同步增强版" + ProductVersionText();
             string title = AppServices.IsIsolatedTestSession
-                ? (_settings.IsVersionedBetaTestProfile ? "飞牛同步增强版 v0.4.0-beta [隔离测试会话·新版配置]" : "飞牛同步增强版 v0.4.0-beta [隔离测试会话]")
-                : AppServices.IsVersionedBetaSession ? "飞牛同步增强版 v0.4.0-beta [新版备份试用]" : "飞牛同步增强版 v0.4.0-beta [旧版引擎·仅供诊断]";
+                ? (_settings.IsVersionedBetaTestProfile ? product + " [隔离测试会话·新版配置]" : product + " [隔离测试会话]")
+                : AppServices.IsVersionedBetaSession ? product + " [新版备份试用]" : product + " [旧版引擎·仅供诊断]";
             WindowHelper.ConfigureWindow(this, title, 1200, 780);
             AppTitleText.Text = title;
             _logService.TaskLogWriteFailed += OnTaskLogWriteFailed;
@@ -45,6 +49,7 @@ namespace FNSyncPlus.WinUI
             Closed += OnWindowClosed;
             WindowHelper.SetMicaBackdrop(this);
             SetTitleBar(AppTitleBarDragArea);
+            ApplyStoredTheme();
 
             ViewModel.RequestNavigate += NavigateToTag;
             ViewModel.RequestToggleTheme += ToggleAppTheme;
@@ -218,6 +223,19 @@ namespace FNSyncPlus.WinUI
             _ = RequestShutdownAsync();
         }
 
+        /// <summary>
+        /// Safe-exit entry point for an update handoff. Runs the same sequence as the exit menu —
+        /// stop new work, wait for running tasks, flush logs, then really close — and can never be
+        /// intercepted by hide-to-tray, because it does not go through AppWindow.Closing.
+        /// </summary>
+        internal void BeginUpdateShutdown(string reason)
+        {
+            if (_shutdownComplete) return;
+            try { AppTitleText.Text = reason; }
+            catch (Exception ex) { App.LogCrashException(ex, "MainWindow.BeginUpdateShutdown"); }
+            _ = RequestShutdownAsync();
+        }
+
         private async Task RequestShutdownAsync()
         {
             if (_shutdownComplete) return;
@@ -337,6 +355,79 @@ namespace FNSyncPlus.WinUI
             {
                 addPage.CheckAndTriggerAutoFolderPicker();
             }
+
+            // Visual acceptance only: report this page as ready once its content has actually
+            // loaded and one layout pass has run, so the harness screenshots a rendered page
+            // instead of a white frame or the previous view.
+            if (AppServices.IsUiVisualAcceptance) HookVisualPageReady(tag);
+        }
+
+        private void HookVisualPageReady(string tag)
+        {
+            if (ContentFrame.Content is not FrameworkElement page) return;
+            void Report() => DispatcherQueue.TryEnqueue(() => DispatcherQueue.TryEnqueue(() =>
+            {
+                try
+                {
+                    var manager = AppServices.GetService<TaskManager>();
+                    UiVisualSignal.ReportPageReady(tag, new Dictionary<string, object?>
+                    {
+                        ["task_count"] = manager.Tasks.Count,
+                        ["nas_online"] = manager.IsNasOnline,
+                    });
+                }
+                catch (Exception ex) { App.LogCrashException(ex, "MainWindow.VisualPageReady"); }
+            }));
+            if (page.IsLoaded)
+            {
+                Report();
+                return;
+            }
+            RoutedEventHandler? once = null;
+            once = (s, e) =>
+            {
+                page.Loaded -= once!;
+                Report();
+            };
+            page.Loaded += once;
+        }
+
+        /// <summary>Version shown in the title bar, taken from the running assembly plus its build suffix.</summary>
+        private static string ProductVersionText()
+        {
+            try
+            {
+                var assembly = typeof(MainWindow).Assembly;
+                var attributes = assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false);
+                string version = attributes.Length > 0
+                    ? ((System.Reflection.AssemblyInformationalVersionAttribute)attributes[0]).InformationalVersion
+                    : assembly.GetName().Version?.ToString(3) ?? string.Empty;
+                int metadata = version.IndexOf('+');
+                if (metadata > 0) version = version[..metadata];
+                return string.IsNullOrWhiteSpace(version) ? string.Empty : " v" + version;
+            }
+            catch (Exception)
+            {
+                return string.Empty;
+            }
+        }
+
+        /// <summary>
+        /// Applies the theme the user saved last time. The setting used to be written but never read,
+        /// so a dark-mode user got a light window on every launch until they toggled it again.
+        /// </summary>
+        private void ApplyStoredTheme()
+        {
+            try
+            {
+                bool dark = string.Equals(_settings.AppTheme, "Dark", StringComparison.OrdinalIgnoreCase);
+                if (Content is FrameworkElement root) root.RequestedTheme = dark ? ElementTheme.Dark : ElementTheme.Light;
+                IconThemeToggle.Glyph = dark ? "\uE706" : "\uE708";
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"应用主题失败: {ex.Message}");
+            }
         }
 
         private void ToggleAppTheme()
@@ -346,6 +437,15 @@ namespace FNSyncPlus.WinUI
                 bool isDark = rootElement.ActualTheme == ElementTheme.Dark;
                 rootElement.RequestedTheme = isDark ? ElementTheme.Light : ElementTheme.Dark;
                 IconThemeToggle.Glyph = isDark ? "\uE706" : "\uE708"; // Sun / Moon
+                try
+                {
+                    _settings.AppTheme = isDark ? "Light" : "Dark";
+                    _settings.Save();
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"保存主题失败: {ex.Message}");
+                }
             }
         }
 

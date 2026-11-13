@@ -6,13 +6,26 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>12</LangVersion>
     <Version>0.4.0-beta</Version>
-    <AssemblyVersion>0.4.0.0</AssemblyVersion>
-    <FileVersion>0.4.0.0</FileVersion>
+    <!-- AssemblyVersion is derived from $(Version) on purpose. Hard-coding it made every build
+         report 0.4.0.0 to the update client, so the release actually being installed could never be
+         compared with min_compatible_client or with the manifest version. -->
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
+  </ItemGroup>
+
+  <!-- The pinned update-signing public key is embedded by the release build (see build-winui.ps1).
+       Without it the update verifier refuses to be created, so an unpacked dev build never accepts
+       an unsigned manifest. -->
+  <!-- The release build pins the key explicitly (-p:UpdatePublicKeyPath=...). A build without a
+       key stays fail-closed: the updater refuses every package because it cannot verify one. -->
+  <ItemGroup Condition="'$(UpdatePublicKeyPath)' != ''">
+    <EmbeddedResource Include="$(UpdatePublicKeyPath)" LogicalName="FNSyncPlus.update-public.pem" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(UpdatePublicKeyPath)' == '' AND Exists('Updates\update-public.pem')">
+    <EmbeddedResource Include="Updates\update-public.pem" LogicalName="FNSyncPlus.update-public.pem" />
   </ItemGroup>
 
 </Project>

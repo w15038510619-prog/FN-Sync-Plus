@@ -840,8 +840,7 @@ namespace FNSyncPlus.Core.Services
         {
             try
             {
-                string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                string logDir = Path.Combine(localApp, "FNSyncPlus", "logs");
+                string logDir = Path.Combine(AppStorageRoot.LocalAppDataDir(), "logs");
                 Directory.CreateDirectory(logDir);
                 string logFile = Path.Combine(logDir, $"connection_{DateTime.Now:yyyyMMdd}.log");
                 string logMsg = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{stage}] {ex.GetType().FullName}: {ex.Message}\n{ex.StackTrace}\n";

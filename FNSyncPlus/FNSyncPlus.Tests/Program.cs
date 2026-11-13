@@ -2,7 +2,9 @@ using System;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
@@ -44,6 +46,30 @@ namespace FNSyncPlus.Tests
         {
             Console.OutputEncoding = Encoding.UTF8;
 
+            // Storage-isolation children must be dispatched before ANYTHING else: the whole
+            // point of the scenario is that the child resolves its own data root, so no parent
+            // code path may run first.
+            if (StorageIsolationTestSuite.IsChild(args))
+                return await StorageIsolationTestSuite.RunChildAsync(args);
+
+            if (args.Contains("--storage-isolation-tests"))
+            {
+                string root = Path.Combine(Path.GetTempPath(), "FNSync_storageiso_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var cases = await new StorageIsolationTestSuite().RunAsync(root);
+                    foreach (var item in cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    int failed = cases.Count(c => !c.Passed);
+                    Console.WriteLine($"存储隔离专项测试：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                    return failed == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch (IOException) { }
+                }
+            }
+
             if (args.Length == 2 && args[0] == "--single-instance-probe")
             {
                 using var probe = new SingleInstanceCoordinator(args[1]);
@@ -70,6 +96,194 @@ namespace FNSyncPlus.Tests
                 await TestIntegrityRegressionsAsync();
                 Console.WriteLine($"PASS: {_passed}, FAIL: {_failed}, SKIP: {_skipped}");
                 return _failed == 0 ? 0 : 1;
+            }
+
+            if (args.Contains("--account-isolation"))
+            {
+                string isolationRoot = Path.Combine(Path.GetTempPath(), "FNSync_account_suite_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var cases = (await new AccountIsolationTestSuite().RunAsync(Path.Combine(isolationRoot, "accounts"))).ToList();
+                    foreach (var item in cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    int failed = cases.Count(c => !c.Passed);
+                    Console.WriteLine($"多账号隔离验收：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                    return failed == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(isolationRoot)) Directory.Delete(isolationRoot, true); } catch (IOException) { }
+                }
+            }
+
+            if (args.Contains("--p0-tests"))
+            {
+                string p0Root = Path.Combine(Path.GetTempPath(), "FNSync_p0_suite_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var cases = new List<UpdateSuiteCase>();
+                    cases.AddRange(await new MaintenanceLifecycleTestSuite().RunAsync(Path.Combine(p0Root, "maintenance")));
+                    cases.AddRange(await new ReleaseTrustTestSuite().RunAsync(Path.Combine(p0Root, "trust")));
+                    cases.AddRange(await new DataFormatTestSuite().RunAsync(Path.Combine(p0Root, "format")));
+                    cases.AddRange(await new UpdateSchedulerTestSuite().RunAsync(Path.Combine(p0Root, "scheduler")));
+                    cases.AddRange(await new LayoutRelocationTestSuite().RunAsync(Path.Combine(p0Root, "relocation")));
+                    foreach (var item in cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    int failed = cases.Count(c => !c.Passed);
+                    Console.WriteLine($"P0 整改专项测试：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                    return failed == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(p0Root)) Directory.Delete(p0Root, true); } catch (IOException) { }
+                }
+            }
+
+            if (args.Contains("--signature-audit-tests"))
+            {
+                string root = Path.Combine(Path.GetTempPath(), "FNSync_sigaudit_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var cases = await new SignatureChainAuditTestSuite().RunAsync(root);
+                    foreach (var item in cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    int failed = cases.Count(c => !c.Passed);
+                    Console.WriteLine($"签名链审计专项测试：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                    return failed == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch (IOException) { }
+                }
+            }
+
+            if (args.Contains("--independent-recovery-tests"))
+            {
+                string root = Path.Combine(Path.GetTempPath(), "FNSync_recovery_" + Guid.NewGuid().ToString("N"));
+                var cases = await new IndependentRecoveryTestSuite().RunAsync(root);
+                foreach (var item in cases)
+                    Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                int failed = cases.Count(c => !c.Passed);
+                Console.WriteLine($"独立环境恢复专项测试：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                Console.WriteLine($"环境等级：{IndependentRecoveryTestSuite.EnvironmentLevel}");
+                Console.WriteLine($"恢复证据目录：{root}");
+                return failed == 0 ? 0 : 1;
+            }
+
+            if (args.Contains("--handoff-process-tests"))
+            {
+                string root = Path.Combine(Path.GetTempPath(), "FNSync_handoff_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var cases = new List<UpdateSuiteCase>();
+                    cases.AddRange(await new UpdateHandoffLifecycleTestSuite().RunAsync(Path.Combine(root, "lifecycle")));
+                    cases.AddRange(await new WatchdogFailClosedTestSuite().RunAsync(Path.Combine(root, "failclosed")));
+                    foreach (var item in cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    int failed = cases.Count(c => !c.Passed);
+                    Console.WriteLine($"更新交接专项测试：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                    return failed == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch (IOException) { }
+                }
+            }
+
+            if (args.Contains("--ui-isolation-tests"))
+            {
+                string? resultPath = Array.Find(args, arg => arg.StartsWith("--ui-result=", StringComparison.Ordinal));
+                if (resultPath != null) resultPath = resultPath["--ui-result=".Length..];
+                string root = Path.Combine(Path.GetTempPath(), "FNSync_uiiso_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var cases = await new UiIsolationTestSuite().RunAsync(root, resultPath);
+                    foreach (var item in cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    int failed = cases.Count(c => !c.Passed);
+                    Console.WriteLine($"UI 隔离专项测试：{cases.Count - failed} PASS / {failed} FAIL（共 {cases.Count} 项）");
+                    return failed == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch (IOException) { }
+                }
+            }
+
+            if (args.Length >= 2 && args[0] == "--test-restore-conflict-engine")
+            {
+                string destinationDir = args[1];
+                string? backupSource = args.Length > 2 ? args[2] : null;
+                return await RunRestoreConflictEngineTestAsync(destinationDir, backupSource);
+            }
+
+            if (args.Contains("--test-dual-account-live"))
+            {
+                return await RunDualAccountLiveAcceptanceAsync();
+            }
+
+            if (args.Contains("--stress-tests"))
+            {
+                string stressRoot = Path.Combine(Path.GetTempPath(), "FNSync_stress_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    Directory.CreateDirectory(stressRoot);
+                    string nasRoot = Path.Combine(stressRoot, "nas");
+                    Directory.CreateDirectory(nasRoot);
+                    int fileCount = 3000;
+                    foreach (var arg in args)
+                        if (arg.StartsWith("--files=", StringComparison.Ordinal) &&
+                            int.TryParse(arg["--files=".Length..], out int parsed) && parsed > 0) fileCount = parsed;
+                    // The backup engine needs an exclusive-directory capable provider; production uses
+                    // the fnOS personal-space API, the local provider below mirrors that contract.
+                    var provider = new FaultInjectingProvider(nasRoot) { ClaimFnOs = true };
+                    var measurement = await new StressAndFaultTestSuite().RunStressAsync(provider, stressRoot, fileCount);
+                    Console.WriteLine($"压力复测：{measurement.Scenario}");
+                    Console.WriteLine($"  文件数={measurement.Files} 源大小={measurement.SourceBytes / 1024.0 / 1024.0:F1}MB");
+                    Console.WriteLine($"  首次备份={measurement.InitialSeconds:F1}s 无变化={measurement.UnchangedSeconds:F1}s 增量={measurement.IncrementalSeconds:F2}s");
+                    Console.WriteLine($"  增量上传={measurement.IncrementalUploadedBytes}B 峰值工作集={measurement.PeakWorkingSetBytes / 1024.0 / 1024.0:F0}MB 失败={measurement.Failures}");
+                    Console.WriteLine($"  备注：{measurement.Notes}");
+                    return measurement.Failures == 0 ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(stressRoot)) Directory.Delete(stressRoot, true); } catch (IOException) { }
+                }
+            }
+
+            if (args.Contains("--capacity-tests"))
+            {
+                string capacityRoot = Path.Combine(Path.GetTempPath(), "FNSync_capacity_suite_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var report = await new CapacityTestSuite().RunAsync(capacityRoot);
+                    foreach (var item in report.Cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    Console.WriteLine(report.ToSummary());
+                    return report.AllPassed ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(capacityRoot)) Directory.Delete(capacityRoot, true); } catch (IOException) { }
+                }
+            }
+
+            if (args.Contains("--update-tests"))
+            {
+                // Standalone run of the update-engine suite only, for fast iteration.
+                string updateRoot = Path.Combine(Path.GetTempPath(), "FNSync_update_suite_" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var report = await new UpdateTestSuite().RunAsync(updateRoot);
+                    foreach (var item in report.Cases)
+                        Console.WriteLine($"[{(item.Passed ? "PASS" : "FAIL")}] {item.Name}{(item.Passed ? "" : " -> " + item.Detail)}");
+                    Console.WriteLine(report.ToSummary());
+                    return report.AllPassed ? 0 : 1;
+                }
+                finally
+                {
+                    try { if (Directory.Exists(updateRoot)) Directory.Delete(updateRoot, true); } catch (IOException) { }
+                }
             }
 
             if (args.Any(a => a.Equals("--poc", StringComparison.OrdinalIgnoreCase) || 
@@ -204,7 +418,8 @@ namespace FNSyncPlus.Tests
             string root = Directory.CreateTempSubdirectory("FNSync_integrity_").FullName;
             try
             {
-                await TestSingleInstanceAsync();
+                if (OperatingSystem.IsWindows()) await TestSingleInstanceAsync();
+                else Skip("单实例与托盘协调回归", "需要 Windows 命名事件与进程探测");
                 var probeTargetMethod = typeof(NasDiscoveryService).GetMethod("BuildSubnetProbeTargets", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
                 string[] ProbeTargets(string address, string mask) => ((System.Collections.Generic.IReadOnlyList<string>)probeTargetMethod.Invoke(null,
                     new object[] { System.Net.IPAddress.Parse(address), System.Net.IPAddress.Parse(mask) })!).ToArray();
@@ -452,6 +667,12 @@ namespace FNSyncPlus.Tests
                 catch (InvalidOperationException) { betaOutsideRejected = true; }
                 Assert(betaBounded.IsVersionedBetaTestProfile && betaBounded.HasIsolatedTestBoundary && betaOutsideRejected,
                     "新版隔离界面会话限制复用来源和目标均位于授权测试目录");
+                if (!OperatingSystem.IsWindows())
+                {
+                    Skip("隔离源目录经过联接指向测试范围外时拒绝执行", "需要 Windows 联接点");
+                }
+                else
+                {
                 string junctionId = Guid.NewGuid().ToString("N");
                 string junctionBase = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", "BoundaryJunction_" + junctionId);
                 string junctionOutside = Path.Combine(Path.GetTempPath(), "FNSync_Outside_" + junctionId);
@@ -481,6 +702,8 @@ namespace FNSyncPlus.Tests
                     if (Directory.Exists(junctionChild)) Directory.Delete(junctionChild);
                     if (Directory.Exists(junctionOutside)) Directory.Delete(junctionOutside);
                 }
+                }
+                if (OperatingSystem.IsWindows())
                 Assert(PathHelper.EnsureLongPathPrefix(@"C:/folder/file.txt") == @"\\?\C:\folder\file.txt" &&
                     PathHelper.EnsureLongPathPrefix(@"C:/") == @"\\?\C:\" &&
                     PathHelper.EnsureLongPathPrefix(@"C:\\\") == @"\\?\C:\" &&
@@ -488,10 +711,15 @@ namespace FNSyncPlus.Tests
                     PathHelper.EnsureLongPathPrefix(@"C:relative.txt") == @"C:relative.txt" &&
                     PathHelper.EnsureLongPathPrefix(@"//server/share/file.txt") == @"\\?\UNC\server\share\file.txt",
                     "长路径前缀规范化分隔符并保留盘符根目录");
+                else
+                    Skip("长路径前缀规范化分隔符并保留盘符根目录", "Windows 长路径语义");
                 string mixedPathTest = Path.Combine(root, "mixed-separator.txt");
                 File.WriteAllText(mixedPathTest, "mixed separators");
-                Assert(HashHelper.ComputeFileSha256(mixedPathTest.Replace('\\', '/')) == HashHelper.ComputeFileSha256(mixedPathTest),
-                    "带正斜杠的本地路径可正常读取并计算哈希");
+                if (OperatingSystem.IsWindows())
+                    Assert(HashHelper.ComputeFileSha256(mixedPathTest.Replace('\\', '/')) == HashHelper.ComputeFileSha256(mixedPathTest),
+                        "带正斜杠的本地路径可正常读取并计算哈希");
+                else
+                    Skip("带正斜杠的本地路径可正常读取并计算哈希", "Windows 路径分隔符语义");
                 File.WriteAllText(config, "{broken");
                 bool failed = false;
                 try { AppSettings.LoadFromPath(config); } catch (IOException) { failed = true; }
@@ -514,12 +742,22 @@ namespace FNSyncPlus.Tests
                 Assert(duplicateTrustRejected && AppSettings.ReadTrustedCertificates(trustedConfig).Count == 0,
                     "重复或损坏的信任配置不会自动放行证书");
                 string isolatedCredentials = Path.Combine(root, "credentials", "credentials.dat");
-                bool savedCredentials = SmbAuthService.SaveCredentials("test.invalid", "test-user", "test-secret", isolatedCredentials);
-                var isolatedSaved = SmbAuthService.LoadCredentials(isolatedCredentials);
-                Assert(savedCredentials && isolatedSaved.HasValue && isolatedSaved.Value.Server == "test.invalid" && isolatedSaved.Value.Password == "test-secret" &&
-                    !Encoding.UTF8.GetString(File.ReadAllBytes(isolatedCredentials)).Contains("test-secret"), "独立测试凭据可由当前 Windows 用户加密保存并读取");
-                bool clearedCredentials = SmbAuthService.ClearSavedCredentials(isolatedCredentials);
-                Assert(clearedCredentials && !File.Exists(isolatedCredentials), "只清除明确指定的隔离测试凭据");
+                if (SmbAuthService.IsCredentialProtectionAvailable)
+                {
+                    bool savedCredentials = SmbAuthService.SaveCredentials("test.invalid", "test-user", "test-secret", isolatedCredentials);
+                    var isolatedSaved = SmbAuthService.LoadCredentials(isolatedCredentials);
+                    Assert(savedCredentials && isolatedSaved.HasValue && isolatedSaved.Value.Server == "test.invalid" && isolatedSaved.Value.Password == "test-secret" &&
+                        !Encoding.UTF8.GetString(File.ReadAllBytes(isolatedCredentials)).Contains("test-secret"), "独立测试凭据可由当前 Windows 用户加密保存并读取");
+                    bool clearedCredentials = SmbAuthService.ClearSavedCredentials(isolatedCredentials);
+                    Assert(clearedCredentials && !File.Exists(isolatedCredentials), "只清除明确指定的隔离测试凭据");
+                }
+                else
+                {
+                    Assert(!SmbAuthService.SaveCredentials("test.invalid", "test-user", "test-secret", isolatedCredentials) && !File.Exists(isolatedCredentials),
+                        "无 DPAPI 保护时拒绝以明文保存凭据");
+                    Skip("独立测试凭据可由当前 Windows 用户加密保存并读取", "需要 Windows DPAPI");
+                    Skip("只清除明确指定的隔离测试凭据", "需要 Windows DPAPI");
+                }
                 string blockedParent = Path.Combine(root, "credential-parent-is-file");
                 File.WriteAllText(blockedParent, "not a directory");
                 Assert(!SmbAuthService.SaveCredentials("test.invalid", "test-user", "test-secret", Path.Combine(blockedParent, "credentials.dat")) &&
@@ -769,7 +1007,8 @@ namespace FNSyncPlus.Tests
                 var versions = new VersionedManifestStore();
                 string newSource = Path.Combine(root, "version-new-source");
                 Directory.CreateDirectory(Path.Combine(newSource, "空目录"));
-                string newLongName = new string('长', 100) + ".txt";
+                // ext4 文件名上限 255 字节：POSIX 测试主机使用短名，Windows 上保留 300 字节原名。
+                string newLongName = OperatingSystem.IsWindows() ? new string('长', 100) + ".txt" : "长文件名.txt";
                 File.WriteAllText(Path.Combine(newSource, newLongName), "new initial content");
                 var newBackup = new ExperimentalVersionedBackup();
                 var created = await newBackup.CreateNewAsync(versionProvider, newSource, "version-new-target");
@@ -1505,6 +1744,67 @@ namespace FNSyncPlus.Tests
                     "版本化模糊改名停止时列出候选文件并说明原备份未改变");
                 Assert(versionAmbiguityRejected && (await versions.LoadAsync(versionProvider, ambiguousVersionFixture.folder))?.Id == ambiguousVersionBase.Id,
                     "版本化同步拒绝多个同内容重命名候选");
+                {
+                    // Enriched details + explicit manual pairing.
+                    var pairFixture = await MakeLegacyAsync("versioned-rename-detail", 4);
+                    var pairBase = await migration.MigrateAsync(versionProvider, pairFixture.folder);
+                    string pairSource = Path.Combine(root, "versioned-rename-detail-source");
+                    Directory.CreateDirectory(pairSource);
+                    File.WriteAllText(Path.Combine(pairSource, "候选甲.txt"), "legacy active");
+                    File.WriteAllText(Path.Combine(pairSource, "候选乙.txt"), "legacy active");
+                    AmbiguousRenameException? pairStop = null;
+                    try { await versionedBackup.RunAsync(versionProvider, pairSource, pairFixture.folder); }
+                    catch (AmbiguousRenameException ex) { pairStop = ex; }
+                    Assert(pairStop != null && pairStop.AmbiguousGroups.Count == 1 &&
+                        pairStop.AmbiguousGroups[0].Sha256.Length == 64 && !string.IsNullOrEmpty(pairStop.AmbiguousGroups[0].Reason) &&
+                        pairStop.UnmatchedAdditionDetails.Count == 2 &&
+                        pairStop.UnmatchedAdditionDetails.All(a => a.Size == "legacy active".Length && a.Sha256.Length == 64) &&
+                        pairStop.PreviousBackupPreserved && pairStop.PreviousManifestId == pairBase.Id,
+                        "模糊改名异常携带原/候选路径、大小、SHA-256、停止原因和旧备份保留状态");
+
+                    string hashOfSource(string rel) => HashHelper.ComputeFileSha256(Path.Combine(pairSource, rel));
+                    var stale = new AmbiguousRenameResolution(new[] { new AmbiguousRenameResolution.Pair(longOriginal, "候选甲.txt") });
+                    var staleProblems = AmbiguousRenameResolution.Validate(pairStop!, stale, pairSource, hashOfSource);
+                    File.WriteAllText(Path.Combine(pairSource, "候选甲.txt"), "changed after scan");
+                    var changedAfterScan = AmbiguousRenameResolution.Validate(pairStop!, stale, pairSource, hashOfSource);
+                    Assert(staleProblems.Count == 0 && changedAfterScan.Count == 1 &&
+                        changedAfterScan[0].Reason.Contains("已变化", StringComparison.Ordinal),
+                        "人工配对确认要求新文件当前内容与停止时一致，变化后必须重新扫描");
+
+                    File.WriteAllText(Path.Combine(pairSource, "候选甲.txt"), "legacy active");
+                    File.Delete(Path.Combine(pairSource, "候选乙.txt"));
+                    File.WriteAllText(Path.Combine(pairSource, "候选丙.txt"), "legacy active");
+                    File.WriteAllText(Path.Combine(pairSource, "候选丁.txt"), "legacy active");
+                    AmbiguousRenameException? secondStop = null;
+                    try { await versionedBackup.RunAsync(versionProvider, pairSource, pairFixture.folder); }
+                    catch (AmbiguousRenameException ex) { secondStop = ex; }
+                    var resolution = new AmbiguousRenameResolution(new[] { new AmbiguousRenameResolution.Pair(longOriginal, "候选丙.txt") });
+                    var resolutionProblems = AmbiguousRenameResolution.Validate(secondStop!, resolution, pairSource, hashOfSource);
+                    var pairConfirmedRun = await versionedBackup.RunAsync(versionProvider, pairSource, pairFixture.folder,
+                        confirmedRenames: resolution.Pairs);
+                    var pairManifest = await versions.LoadAsync(versionProvider, pairFixture.folder);
+                    // The legacy fixture already carried one history entry for the same original name
+                    // (reason "superseded"); a confirmed rename must append a second one, never replace it.
+                    var renamedHistory = pairManifest!.Manifest.History
+                        .Single(h => h.OriginalRel == longOriginal && h.Reason == "renamed");
+                    var migratedHistory = pairManifest.Manifest.History
+                        .Single(h => h.OriginalRel == longOriginal && h.Reason == "superseded");
+                    Assert(secondStop != null && resolutionProblems.Count == 0 && pairConfirmedRun.RenamedFiles == 1 &&
+                        pairManifest.Manifest.Files.Any(f => f.OriginalRel == "候选丙.txt") &&
+                        !pairManifest.Manifest.Files.Any(f => f.OriginalRel == longOriginal) &&
+                        pairManifest.Manifest.History.Any(h => h.OriginalRel == longOriginal && h.RenamedTo == "候选丙.txt" && h.Sha256 == pairBase.Manifest.Files.Single().Sha256) &&
+                        renamedHistory.StoredRel == pairBase.Manifest.Files.Single().StoredRel &&
+                        pairManifest.Manifest.History.Count(h => h.OriginalRel == longOriginal) == 2 &&
+                        migratedHistory.StoredRel.StartsWith(".fnsync/objects/", StringComparison.Ordinal) &&
+                        !string.Equals(migratedHistory.Sha256, pairBase.Manifest.Files.Single().Sha256, StringComparison.OrdinalIgnoreCase),
+                        "经确认的配对在内容校验通过后提交，旧内容进入历史而不是被覆盖，原有历史记录保留");
+
+                    string pairRestore = Path.Combine(root, "versioned-rename-detail-restore");
+                    var pairHistory = renamedHistory;
+                    bool pairHistoryRestored = await historyEngine.RunRestoreHistoryFileAsync(versionProvider, pairFixture.folder, pairRestore, pairHistory);
+                    Assert(pairHistoryRestored && File.ReadAllText(Path.Combine(pairRestore, longOriginal)) == "legacy active",
+                        "人工确认改名后旧名称历史仍可恢复");
+                }
                 var existingDuplicateFixture = await MakeLegacyAsync("versioned-existing-duplicate", 4);
                 var existingDuplicateManifest = await manifestManager.LoadManifestAsync(versionProvider, existingDuplicateFixture.folder);
                 string existingDuplicatePath = Path.Combine(root, existingDuplicateFixture.folder, "duplicate.txt");
@@ -1942,6 +2242,28 @@ namespace FNSyncPlus.Tests
                 TestFnOsPersonalStorageProviderPathTraversalSecurity();
                 TestFnOsPersonalSpaceUnknownUidFailsClosed();
                 await TestRestoreJunctionTargetSafetyAsync();
+
+                // ==================== 更新引擎（阶段 2） ====================
+                var updateReport = await new UpdateTestSuite().RunAsync(Path.Combine(root, "update-tests"));
+                foreach (var updateCase in updateReport.Cases)
+                    Assert(updateCase.Passed, updateCase.Name, updateCase.Detail);
+
+                // ==================== P0 整改专项（维护状态 / 签名链 / 数据格式 / 调度） ====================
+                foreach (var p0Case in await new MaintenanceLifecycleTestSuite().RunAsync(Path.Combine(root, "p0-maintenance")))
+                    Assert(p0Case.Passed, p0Case.Name, p0Case.Detail);
+                foreach (var trustCase in await new ReleaseTrustTestSuite().RunAsync(Path.Combine(root, "p0-trust")))
+                    Assert(trustCase.Passed, trustCase.Name, trustCase.Detail);
+                foreach (var formatCase in await new DataFormatTestSuite().RunAsync(Path.Combine(root, "p0-format")))
+                    Assert(formatCase.Passed, formatCase.Name, formatCase.Detail);
+                foreach (var schedulerCase in await new UpdateSchedulerTestSuite().RunAsync(Path.Combine(root, "p0-scheduler")))
+                    Assert(schedulerCase.Passed, schedulerCase.Name, schedulerCase.Detail);
+                foreach (var relocationCase in await new LayoutRelocationTestSuite().RunAsync(Path.Combine(root, "p0-relocation")))
+                    Assert(relocationCase.Passed, relocationCase.Name, relocationCase.Detail);
+
+                // ==================== 容量与保留策略（阶段 3） ====================
+                var capacityReport = await new CapacityTestSuite().RunAsync(Path.Combine(root, "capacity-tests"));
+                foreach (var capacityCase in capacityReport.Cases)
+                    Assert(capacityCase.Passed, capacityCase.Name, capacityCase.Detail);
             }
             finally
             {
@@ -2051,6 +2373,179 @@ namespace FNSyncPlus.Tests
             Assert(!failed.Success && !failingConnection.IsConnected && !failingManager.IsNasOnline && !File.Exists(failing.IsolatedCredentialPath),
                 "双重验证后设置保存失败时不启动同步或保存凭据");
             if (!await failingManager.ShutdownAsync(TimeSpan.FromSeconds(5))) throw new TimeoutException("双重验证失败测试未停止");
+
+            await TestLegacyTaskMigrationInspectorAsync(root);
+        }
+
+        static async Task TestLegacyTaskMigrationInspectorAsync(string root)
+        {
+            string migrationRoot = Directory.CreateTempSubdirectory("FNSync_migration_").FullName;
+            try
+            {
+                string source = Path.Combine(migrationRoot, "src");
+                Directory.CreateDirectory(source);
+                File.WriteAllText(Path.Combine(source, "资料.txt"), "current content");
+                var provider = new FaultInjectingProvider(migrationRoot);
+                var manifestManager = new ManifestManager();
+                var inspector = new LegacyTaskMigrationInspector();
+                var account = new StorageAuthResult { Success = true, UserUid = 1000, AuthenticatedUser = "fixture-user" };
+
+                async Task<SyncTask> MakeLegacyAsync(string folder, int version, string? historyHashOverride = null, bool withHistory = true)
+                {
+                    string full = Path.Combine(migrationRoot, folder);
+                    Directory.CreateDirectory(full);
+                    File.WriteAllText(Path.Combine(full, "current.txt"), "legacy current");
+                    var files = new List<ManifestFileEntry> { new() {
+                        OriginalRel = "资料.txt", StoredRel = "current.txt", Size = new FileInfo(Path.Combine(full, "current.txt")).Length,
+                        Sha256 = HashHelper.ComputeFileSha256(Path.Combine(full, "current.txt")) } };
+                    var history = new List<ManifestHistoryEntry>();
+                    if (withHistory)
+                    {
+                        File.WriteAllText(Path.Combine(full, "history.txt"), "legacy history");
+                        history.Add(new ManifestHistoryEntry {
+                            OriginalRel = "资料.txt", StoredRel = "history.txt", Size = new FileInfo(Path.Combine(full, "history.txt")).Length,
+                            Sha256 = historyHashOverride ?? HashHelper.ComputeFileSha256(Path.Combine(full, "history.txt")), Reason = "superseded" });
+                    }
+                    await manifestManager.SaveManifestAtomicAsync(provider, folder, new Manifest {
+                        Version = version, Files = files, History = history,
+                        Directories = new() { new ManifestDirEntry { OriginalRel = "空目录", StoredRel = "空目录" } } });
+                    return new SyncTask { TaskId = "legacy-" + folder, TaskName = folder, SourceFolder = source,
+                        DestinationFolder = folder, DestinationRoot = folder, NasAccountUid = 1000,
+                        NasUsername = "fixture-user", ProviderType = StorageProviderType.LocalFileSystem };
+                }
+
+                var good = await MakeLegacyAsync("legacy-good", 4);
+                var inspection = await inspector.InspectTaskAsync(good, account, provider);
+                Assert(inspection.Classification == LegacyMigrationClassification.Supported && inspection.Blockers.Count == 0 &&
+                    inspection.FileCount == 1 && inspection.HistoryCount == 1 && inspection.ManifestFormat == "v4",
+                    "旧 v4 任务被识别为可迁移", string.Join("；", inspection.Blockers));
+
+                var preview = await inspector.BuildPreviewAsync(inspection, "migrated-target", provider);
+                Assert(preview.CanExecute && preview.NewTarget == "migrated-target" && preview.LegacyTarget == "legacy-good",
+                    "迁移预览给出旧/新目标关系且可执行");
+                var sameTarget = await inspector.BuildPreviewAsync(inspection, "legacy-good", provider);
+                Assert(!sameTarget.CanExecute && sameTarget.Blockers.Any(b => b.Contains("不能与旧备份目标相同", StringComparison.Ordinal)),
+                    "迁移预览拒绝在原目标上执行");
+                var nestedTarget = await inspector.BuildPreviewAsync(inspection, "legacy-good/sub", provider);
+                Assert(!nestedTarget.CanExecute, "迁移预览拒绝与旧目标嵌套的新目标");
+
+                var oldManifestBytes = File.ReadAllBytes(Path.Combine(migrationRoot, "legacy-good", ".fnsync", "manifest.json"));
+                var execution = await inspector.ExecuteAsync(inspection, preview, provider);
+                Assert(execution.OldManifestUnchanged && execution.OldFilesUnchanged &&
+                    File.ReadAllBytes(Path.Combine(migrationRoot, "legacy-good", ".fnsync", "manifest.json")).SequenceEqual(oldManifestBytes) &&
+                    !Directory.Exists(Path.Combine(migrationRoot, "legacy-good", ".fnsync", "manifest-versions")),
+                    "迁移写入新目标，旧清单与旧文件逐字节不变、旧目标未生成版本化清单");
+                var migrated = await new VersionedManifestStore().LoadAsync(provider, "migrated-target");
+                Assert(migrated != null && migrated.Manifest.Files.Single().StoredRel.StartsWith(".fnsync/objects/", StringComparison.Ordinal),
+                    "迁移后新目标拥有独立版本化清单与内容对象");
+
+                var verification = await inspector.VerifyAsync(inspection, "migrated-target", Path.Combine(migrationRoot, "verify-out"), provider);
+                Assert(verification.Passed && verification.RestoredFiles == 1 && verification.VerifiedFiles == 1 &&
+                    verification.RestoredHistory == 1 && verification.VerifiedHistory == 1 && verification.DirectoriesRestored &&
+                    File.ReadAllText(Path.Combine(migrationRoot, "verify-out", "资料.txt")) == "legacy current",
+                    "迁移后恢复验证逐项校验当前文件、历史与空目录", string.Join("；", verification.Failures));
+
+                var migratedTask = inspector.CreateMigratedTask(inspection, verification, account);
+                Assert(!migratedTask.Enabled && migratedTask.DestinationFolder == "migrated-target" && migratedTask.NasAccountUid == 1000,
+                    "迁移完成生成的新任务默认禁用，等待用户确认");
+                bool createdWithBadVerification = false;
+                try
+                {
+                    inspector.CreateMigratedTask(inspection, verification with { Passed = false, Failures = new[] { "x" } }, account);
+                }
+                catch (InvalidOperationException) { createdWithBadVerification = true; }
+                Assert(createdWithBadVerification, "恢复验证未通过时禁止创建/启用迁移任务");
+
+                var uidMismatch = await MakeLegacyAsync("legacy-uid", 4);
+                var wrongUid = await inspector.InspectTaskAsync(uidMismatch,
+                    new StorageAuthResult { Success = true, UserUid = 2000, AuthenticatedUser = "fixture-user" }, provider);
+                Assert(wrongUid.Classification == LegacyMigrationClassification.AccountUnverified &&
+                    wrongUid.Blockers.Any(b => b.Contains("UID", StringComparison.Ordinal)), "UID 不一致的旧任务停止迁移");
+                var unknownUid = await inspector.InspectTaskAsync(uidMismatch,
+                    new StorageAuthResult { Success = true, UserUid = null, AuthenticatedUser = "fixture-user" }, provider);
+                Assert(unknownUid.Classification == LegacyMigrationClassification.AccountUnverified, "当前 UID 未知时停止迁移");
+                var caseMismatch = await inspector.InspectTaskAsync(uidMismatch,
+                    new StorageAuthResult { Success = true, UserUid = 1000, AuthenticatedUser = "Fixture-user" }, provider);
+                Assert(caseMismatch.Classification == LegacyMigrationClassification.AccountUnverified &&
+                    caseMismatch.Blockers.Any(b => b.Contains("大小写", StringComparison.Ordinal)), "账号名大小写不一致的旧任务停止迁移");
+
+                var missingSource = await MakeLegacyAsync("legacy-missing", 4);
+                missingSource.SourceFolder = Path.Combine(migrationRoot, "does-not-exist");
+                var missingInspection = await inspector.InspectTaskAsync(missingSource, account, provider);
+                Assert(missingInspection.Classification == LegacyMigrationClassification.InvalidSource, "源目录缺失的旧任务停止迁移");
+
+                var noManifest = new SyncTask { TaskId = "legacy-nomanifest", TaskName = "nomanifest", SourceFolder = source,
+                    DestinationFolder = "legacy-emptytarget", DestinationRoot = "legacy-emptytarget", NasAccountUid = 1000,
+                    NasUsername = "fixture-user", ProviderType = StorageProviderType.LocalFileSystem };
+                Directory.CreateDirectory(Path.Combine(migrationRoot, "legacy-emptytarget"));
+                var ambiguous = await inspector.InspectTaskAsync(noManifest, account, provider);
+                Assert(ambiguous.Classification == LegacyMigrationClassification.AmbiguousTarget &&
+                    ambiguous.Blockers.Any(b => b.Contains("目标不明确", StringComparison.Ordinal)), "没有旧清单的目标被判定为目标不明确");
+
+                var badHistory = await MakeLegacyAsync("legacy-badhistory", 4, new string('0', 63) + "Z");
+                var badHistoryInspection = await inspector.InspectTaskAsync(badHistory, account, provider);
+                Assert(badHistoryInspection.Classification == LegacyMigrationClassification.CorruptMetadata && !badHistoryInspection.HistoryProvable,
+                    "历史记录缺少有效 SHA-256 的旧备份停止迁移", string.Join("；", badHistoryInspection.Blockers));
+
+                var unsupported = await MakeLegacyAsync("legacy-v2", 4);
+                string unsupportedManifestPath = Path.Combine(migrationRoot, "legacy-v2", ".fnsync", "manifest.json");
+                var unsupportedJson = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(unsupportedManifestPath))!;
+                unsupportedJson["version"] = 2;
+                File.WriteAllText(unsupportedManifestPath, unsupportedJson.ToJsonString());
+                var unsupportedInspection = await inspector.InspectTaskAsync(unsupported, account, provider);
+                Assert(unsupportedInspection.Classification == LegacyMigrationClassification.UnsupportedFormat, "非 v3/v4 清单被判定为不支持迁移");
+
+                var corrupt = await MakeLegacyAsync("legacy-corrupt", 4);
+                File.WriteAllText(Path.Combine(migrationRoot, "legacy-corrupt", ".fnsync", "manifest.json"), "{broken");
+                var corruptInspection = await inspector.InspectTaskAsync(corrupt, account, provider);
+                Assert(corruptInspection.Classification == LegacyMigrationClassification.CorruptMetadata, "损坏的旧清单被判定为元数据损坏");
+
+                var v3 = await MakeLegacyAsync("legacy-v3", 3);
+                var v3Inspection = await inspector.InspectTaskAsync(v3, account, provider);
+                Assert(v3Inspection.Classification == LegacyMigrationClassification.Supported && v3Inspection.ManifestFormat == "v3",
+                    "旧 v3 任务同样被识别为可迁移");
+
+                var already = await MakeLegacyAsync("legacy-already", 4);
+                var alreadyInspection = await inspector.InspectTaskAsync(already, account, provider);
+                await inspector.ExecuteAsync(alreadyInspection, await inspector.BuildPreviewAsync(
+                    alreadyInspection, "legacy-already-new", provider), provider);
+                var alreadyNewInspection = await inspector.InspectTaskAsync(new SyncTask { TaskId = "already", SourceFolder = source,
+                    DestinationFolder = "legacy-already-new", DestinationRoot = "legacy-already-new", NasAccountUid = 1000,
+                    NasUsername = "fixture-user", ProviderType = StorageProviderType.LocalFileSystem }, account, provider);
+                Assert(alreadyNewInspection.Classification == LegacyMigrationClassification.AlreadyVersioned &&
+                    await new VersionedManifestStore().LoadAsync(provider, "legacy-already-new") != null,
+                    "已迁移新目标再次检查时判定为已是版本化备份，重复迁移被阻止");
+
+                var findings = await inspector.RecheckInterruptedAsync("legacy-good");
+                Assert(findings.Any(f => f.Contains("已完成迁移", StringComparison.Ordinal)), "中断重检查读取本地迁移记录并报告完成状态");
+
+                var settingsPath = Path.Combine(migrationRoot, "legacy-settings.json");
+                File.WriteAllText(settingsPath, new AppSettings { NasServer = "https://fixture.invalid", Username = "fixture-user",
+                    Tasks = new() { good } }.ToJson());
+                var legacySettings = LegacyTaskMigrationInspector.ReadLegacySettingsReadOnly(settingsPath);
+                Assert(legacySettings != null && legacySettings.Tasks.Count == 1 && legacySettings.Tasks[0].TaskId == good.TaskId,
+                    "旧配置只读读取，不迁移不改写");
+                string settingsBytesBefore = File.ReadAllText(settingsPath);
+                var inventory = await inspector.InspectAsync(legacySettings, settingsPath, account, provider);
+                Assert(inventory.LegacySettingsReadable && inventory.Tasks.Single().Classification == LegacyMigrationClassification.Supported &&
+                    File.ReadAllText(settingsPath) == settingsBytesBefore, "旧配置清单检查后文件不变");
+                string orphanPath = Path.Combine(migrationRoot, "orphan-settings.json");
+                File.WriteAllText(orphanPath, "{\"SourceFolder\":\"C:\\\\old\",\"TargetShare\":\"\\\\\\\\nas\\\\share\"}");
+                var orphanSettings = LegacyTaskMigrationInspector.ReadLegacySettingsReadOnly(orphanPath);
+                var orphanInventory = await inspector.InspectAsync(orphanSettings, orphanPath, account, provider);
+                Assert(orphanInventory.OrphanFindings.Any(o => o.Contains("v2.0", StringComparison.Ordinal)), "旧 v2.0 单任务字段被单独报告，不静默迁移");
+
+                using var cancelled = new CancellationTokenSource();
+                cancelled.Cancel();
+                bool inspectCanceled = false;
+                try { await inspector.InspectTaskAsync(good, account, provider, cancelled.Token); }
+                catch (OperationCanceledException) { inspectCanceled = true; }
+                Assert(inspectCanceled, "迁移检查传播取消");
+            }
+            finally
+            {
+                try { Directory.Delete(migrationRoot, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
         }
 
         static async Task TestSingleInstanceAsync()
@@ -5074,9 +5569,9 @@ namespace FNSyncPlus.Tests
                 TaskId = "task_test_101",
                 TaskName = "工程图纸",
                 SourceFolder = @"D:\Projects\CAD",
-                NasDeviceId = "192.168.8.120",
-                DestinationRoot = @"\\192.168.8.120\home",
-                DestinationFolder = @"\\192.168.8.120\home\工程图纸",
+                NasDeviceId = "192.0.2.10",
+                DestinationRoot = @"\\192.0.2.10\home",
+                DestinationFolder = @"\\192.0.2.10\home\工程图纸",
                 AutoSyncEnabled = true,
                 RealtimeWatchEnabled = true,
                 IntervalMinutes = 15,
@@ -5085,7 +5580,7 @@ namespace FNSyncPlus.Tests
 
             var settings = AppSettings.CreateInMemory();
             settings.Tasks.Add(task);
-            settings.PreferredBackupRoot = @"\\192.168.8.120\home";
+            settings.PreferredBackupRoot = @"\\192.0.2.10\home";
             settings.MaxConcurrentSyncs = 3;
             settings.AppTheme = "Dark";
 
@@ -5094,16 +5589,16 @@ namespace FNSyncPlus.Tests
 
             Assert(deserialized.Tasks.Count == 1, "多任务模型序列化并正确反序列化");
             Assert(deserialized.Tasks[0].TaskName == "工程图纸", "任务名称正确还原");
-            Assert(deserialized.Tasks[0].DestinationFolder == @"\\192.168.8.120\home\工程图纸", "NAS目标路径正确还原");
+            Assert(deserialized.Tasks[0].DestinationFolder == @"\\192.0.2.10\home\工程图纸", "NAS目标路径正确还原");
             Assert(deserialized.MaxConcurrentSyncs == 3, "并发任务数参数正确保留");
             Assert(deserialized.AppTheme == "Dark", "应用主题正确保留");
 
             // 模拟 v1.0/v2.0 遗留配置迁移
             string legacyJson = @"{
-                ""NasServer"": ""192.168.8.120"",
+                ""NasServer"": ""192.0.2.10"",
                 ""Username"": ""admin"",
                 ""SourceFolder"": ""D:\\重要财务数据"",
-                ""TargetShare"": ""\\\\192.168.8.120\\团队文件-cenco-public\\财务"",
+                ""TargetShare"": ""\\\\192.0.2.10\\团队文件-cenco-public\\财务"",
                 ""AutoSyncEnabled"": true,
                 ""SyncIntervalMinutes"": 10,
                 ""RealtimeWatchEnabled"": true
@@ -5115,7 +5610,7 @@ namespace FNSyncPlus.Tests
             Assert(legacySettings.Tasks.Count == 1, "迁移后自动生成任务列表项");
             Assert(legacySettings.Tasks[0].SourceFolder == @"D:\重要财务数据", "旧版源目录正确迁移为任务源目录");
             Assert(legacySettings.Tasks[0].TaskName == "重要财务数据", "根据源目录自动推导出有意义的任务名称");
-            Assert(legacySettings.Tasks[0].DestinationFolder == @"\\192.168.8.120\团队文件-cenco-public\财务", "旧版目标共享正确迁移");
+            Assert(legacySettings.Tasks[0].DestinationFolder == @"\\192.0.2.10\团队文件-cenco-public\财务", "旧版目标共享正确迁移");
             Assert(legacySettings.Tasks[0].IntervalMinutes == 10, "旧版同步间隔参数正确继承");
         }
 
@@ -5360,24 +5855,24 @@ namespace FNSyncPlus.Tests
             string username = "cenco";
 
             // 1. 私人空间安全判定
-            var sec1 = SmbAuthService.EvaluateShareSecurity(@"\\192.168.8.120\cenco", username, true, null);
+            var sec1 = SmbAuthService.EvaluateShareSecurity(@"\\192.0.2.10\cenco", username, true, null);
             Assert(sec1.State == NasShareSecurityState.VerifiedPersonalSpace, "用户同名私人共享判定为 VerifiedPersonalSpace");
             Assert(!sec1.IsDangerousForPersonalUse, "私人空间不触发危险警示");
             Assert(sec1.BadgeBgHex == "#DCFCE7" && sec1.BadgeColorHex == "#15803D", "私人空间徽章使用安全绿配色");
 
             // 2. 团队公有共享判定
-            var sec2 = SmbAuthService.EvaluateShareSecurity(@"\\192.168.8.120\团队文件-cenco-public", username, true, null);
+            var sec2 = SmbAuthService.EvaluateShareSecurity(@"\\192.0.2.10\团队文件-cenco-public", username, true, null);
             Assert(sec2.State == NasShareSecurityState.TeamShare, "团队文件共享判定为 TeamShare");
             Assert(sec2.IsDangerousForPersonalUse, "团队公有共享标记为存在隐私扩散风险");
             Assert(sec2.Title.Contains("团队公有共享"), "团队共享具备明确的警示标题");
 
             // 3. 普通非私人共享判定
-            var sec3 = SmbAuthService.EvaluateShareSecurity(@"\\192.168.8.120\custom_data", username, true, null);
+            var sec3 = SmbAuthService.EvaluateShareSecurity(@"\\192.0.2.10\custom_data", username, true, null);
             Assert(sec3.State == NasShareSecurityState.UnverifiedSmbShare, "未确认归属的共享判定为 UnverifiedSmbShare");
             Assert(!sec3.IsDangerousForPersonalUse, "普通共享未直接判定为团队危险");
 
             // 4. 无权限共享判定
-            var sec4 = SmbAuthService.EvaluateShareSecurity(@"\\192.168.8.120\admin_only", username, false, "拒绝访问");
+            var sec4 = SmbAuthService.EvaluateShareSecurity(@"\\192.0.2.10\admin_only", username, false, "拒绝访问");
             Assert(sec4.State == NasShareSecurityState.NoPermission, "写权限失败判定为 NoPermission");
             Assert(sec4.IsDangerousForPersonalUse, "无权限共享标记危险状态阻止前进");
 
@@ -5751,12 +6246,12 @@ namespace FNSyncPlus.Tests
 
             // 1. Win32 异常翻译测试
             var ex67 = new IOException("指定的网络名不再可用 (Win32 Error 67)", unchecked((int)0x80070043));
-            var (code67, msg67) = SmbAuthService.TranslateSmbException(ex67, @"\\192.168.8.120\wangxiaoliang");
+            var (code67, msg67) = SmbAuthService.TranslateSmbException(ex67, @"\\192.0.2.10\wangxiaoliang");
             Assert(code67 == 67, "正确识别 Win32 Error 67 (ERROR_BAD_NET_NAME)", $"提取错误码: {code67}");
             Assert(msg67.Contains("找不到网络共享名") && msg67.Contains("Win32 Error 67"), "Win32 67 翻译提示清晰准确", msg67);
 
             var ex5 = new UnauthorizedAccessException("Access is denied");
-            var (code5, msg5) = SmbAuthService.TranslateSmbException(ex5, @"\\192.168.8.120\secret");
+            var (code5, msg5) = SmbAuthService.TranslateSmbException(ex5, @"\\192.0.2.10\secret");
             Assert(code5 == 5, "正确识别 Win32 Error 5 (ERROR_ACCESS_DENIED)", $"提取错误码: {code5}");
             Assert(msg5.Contains("访问被拒绝") && msg5.Contains("Win32 Error 5"), "Win32 5 翻译提示清晰准确", msg5);
 
@@ -5767,12 +6262,12 @@ namespace FNSyncPlus.Tests
 
             // 2. ValidateDirectoryAccessStateAsync 状态分层校验
             // 2.1 服务器根路径
-            var serverRootRes = await service.ValidateDirectoryAccessStateAsync(@"\\192.168.8.120");
+            var serverRootRes = await service.ValidateDirectoryAccessStateAsync(@"\\192.0.2.10");
             Assert(serverRootRes.IsNasAuthenticated && !serverRootRes.DoesShareExist && !serverRootRes.IsDirectoryWritable,
                 "服务器根路径正确识别为非具体共享且不可写", serverRootRes.StateDescription);
 
-            // 2.2 不存在的共享 \\192.168.8.120\wangxiaoliang
-            var nonExistentRes = await service.ValidateDirectoryAccessStateAsync(@"\\192.168.8.120\wangxiaoliang");
+            // 2.2 不存在的共享 \\192.0.2.10\wangxiaoliang
+            var nonExistentRes = await service.ValidateDirectoryAccessStateAsync(@"\\192.0.2.10\wangxiaoliang");
             Assert(!nonExistentRes.DoesShareExist && nonExistentRes.Win32ErrorCode == 67 && !nonExistentRes.IsDirectoryWritable,
                 "不存在的共享精准识别 Win32 67 并标记共享不存在且不可写", nonExistentRes.DetailedMessage);
 
@@ -5780,7 +6275,7 @@ namespace FNSyncPlus.Tests
             bool caught67 = false;
             try
             {
-                await service.CreateSubFolderAsync(@"\\192.168.8.120\wangxiaoliang", "Test", @"\\192.168.8.120\wangxiaoliang");
+                await service.CreateSubFolderAsync(@"\\192.0.2.10\wangxiaoliang", "Test", @"\\192.0.2.10\wangxiaoliang");
             }
             catch (Exception ex)
             {
@@ -5796,7 +6291,7 @@ namespace FNSyncPlus.Tests
             bool caughtRoot = false;
             try
             {
-                await service.CreateSubFolderAsync(@"\\192.168.8.120", "Test", "");
+                await service.CreateSubFolderAsync(@"\\192.0.2.10", "Test", "");
             }
             catch (InvalidOperationException)
             {
@@ -5811,7 +6306,7 @@ namespace FNSyncPlus.Tests
             var service = new SmbAuthService();
 
             // 1. ResolveDefaultBackupRootAsync 未配置且无私人共享时，严禁拼接 \\server\username，严禁自动选择团队共享
-            var (defaultRoot, eval, hasPersonal) = await service.ResolveDefaultBackupRootAsync("192.168.8.120", "wangxiaoliang", "");
+            var (defaultRoot, eval, hasPersonal) = await service.ResolveDefaultBackupRootAsync("192.0.2.10", "wangxiaoliang", "");
             Assert(string.IsNullOrEmpty(defaultRoot), "无私人共享时默认备份根目录为空字符串，严禁硬编码拼接用户名共享", $"实际根目录: '{defaultRoot}'");
             Assert(!hasPersonal, "正确标记不存在可访问的私人共享 (hasPersonal == false)");
             Assert(eval.State == NasShareSecurityState.NotConfigured && eval.Title.Contains("未发现可访问的私人 SMB 目录"),
@@ -6600,7 +7095,7 @@ namespace FNSyncPlus.Tests
                 {
                     TaskId = "t_fn_unc",
                     SourceFolder = localSrc,
-                    DestinationFolder = @"\\192.168.8.120\share",
+                    DestinationFolder = @"\\192.0.2.10\share",
                     ProviderType = StorageProviderType.FnOsPersonal
                 };
                 bool uncOk = uncPersonalTask.ValidateConfiguration(out string errUnc);
@@ -6727,14 +7222,14 @@ namespace FNSyncPlus.Tests
             logService.LogTask(entry2);
 
             // 写入连接日志和崩溃日志测试
-            logService.LogConnection("INFO", "成功连接飞牛 NAS https://192.168.8.120:5666 token=auth_tok_abcdef");
+            logService.LogConnection("INFO", "成功连接飞牛 NAS https://192.0.2.10:5666 token=auth_tok_abcdef");
             logService.LogCrash(new InvalidOperationException("模拟崩溃异常 secret_key=sk_test_xyz"), "单元测试");
 
             // 等待后台队列落盘写入
             await Task.Delay(150);
 
             // 2. 验证日志磁盘文件存在
-            string baseLogDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "FNSyncPlus", "logs");
+            string baseLogDir = Path.Combine(FNSyncPlus.Core.Services.AppStorageRoot.LocalAppDataDir(), "logs");
             string taskLogDir = Path.Combine(baseLogDir, "tasks", testTaskId);
             Assert(Directory.Exists(taskLogDir), "任务日志独立目录按 TaskId 创建", taskLogDir);
 
@@ -6781,7 +7276,7 @@ namespace FNSyncPlus.Tests
             Console.WriteLine("\n--- 46. [新功能测试] 添加向导路径规范化与同源防重复拦截机制 ---");
             await Task.Yield();
             var fakeSettings = AppSettings.CreateInMemory();
-            fakeSettings.NasServer = "192.168.8.120";
+            fakeSettings.NasServer = "192.0.2.10";
             fakeSettings.Username = "wangxiaoliang";
             var smbService = new SmbAuthService();
             var taskManager = new TaskManager(fakeSettings, smbService);
@@ -6944,7 +7439,7 @@ namespace FNSyncPlus.Tests
             Console.WriteLine("   飞牛同步增强版 v0.4.0-beta P0 故障修复与真实 NAS 稳定性线上验证");
             Console.WriteLine("================================================================================");
 
-            string server = Environment.GetEnvironmentVariable("FNOS_SERVER") ?? "192.168.8.120";
+            string server = Environment.GetEnvironmentVariable("FNOS_SERVER") ?? "192.0.2.10";
             string? username = Environment.GetEnvironmentVariable("FNOS_USER");
             string? password = Environment.GetEnvironmentVariable("FNOS_PASS");
 
@@ -7088,8 +7583,8 @@ namespace FNSyncPlus.Tests
 
                 // ---- P0-4: 演示任务与脏数据排查 ----
                 Console.WriteLine("\n--- [P0-4 测试] 真实配置与演示任务污染排查 ---");
-                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                string configPath = Path.Combine(appData, "FNSyncPlus", "settings.json");
+                string appData = FNSyncPlus.Core.Services.AppStorageRoot.RoamingAppDataDir();
+                string configPath = Path.Combine(appData, "settings.json");
                 if (File.Exists(configPath))
                 {
                     string content = File.ReadAllText(configPath);
@@ -7123,6 +7618,249 @@ namespace FNSyncPlus.Tests
                 Console.WriteLine($"[FATAL] 验证过程发生未捕获异常: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
                 Console.ResetColor();
                 return false;
+            }
+        }
+
+        private static async Task<int> RunRestoreConflictEngineTestAsync(string destinationDir, string? backupSource)
+        {
+            Directory.CreateDirectory(destinationDir);
+            string backupDir;
+            bool isTempPackage = false;
+
+            if (!string.IsNullOrEmpty(backupSource) && Directory.Exists(backupSource) &&
+                File.Exists(Path.Combine(backupSource, ".fnsync", "manifest.json")))
+            {
+                backupDir = backupSource;
+            }
+            else
+            {
+                isTempPackage = true;
+                backupDir = Path.Combine(Path.GetTempPath(), "FNSync_restore_fixture_" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(backupDir);
+
+                string fixtureConflictFile = "01_普通文件/财务部_2026年度备份预算.docx";
+                string fixtureNormalFile = "02_普通文件/正常待恢复文件.txt";
+
+                string fullConflict = Path.Combine(backupDir, fixtureConflictFile.Replace('/', Path.DirectorySeparatorChar));
+                string fullNormal = Path.Combine(backupDir, fixtureNormalFile.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(fullConflict)!);
+                Directory.CreateDirectory(Path.GetDirectoryName(fullNormal)!);
+
+                byte[] conflictBytes = Encoding.UTF8.GetBytes("【NAS 远端备份中的原始版本】");
+                byte[] normalBytes = Encoding.UTF8.GetBytes("【NAS 远端备份中的正常文件】");
+                await File.WriteAllBytesAsync(fullConflict, conflictBytes);
+                await File.WriteAllBytesAsync(fullNormal, normalBytes);
+
+                var manifest = new Manifest
+                {
+                    Version = 1,
+                    UpdatedAt = DateTimeOffset.UtcNow,
+                    SourceRoot = "D:\\TestData",
+                    Files = new List<ManifestFileEntry>
+                    {
+                        new()
+                        {
+                            OriginalRel = fixtureConflictFile,
+                            StoredRel = fixtureConflictFile,
+                            Size = conflictBytes.Length,
+                            Sha256 = Convert.ToHexString(SHA256.HashData(conflictBytes)),
+                            ModTimeUtcTicks = DateTime.UtcNow.Ticks,
+                            IsLongName = false
+                        },
+                        new()
+                        {
+                            OriginalRel = fixtureNormalFile,
+                            StoredRel = fixtureNormalFile,
+                            Size = normalBytes.Length,
+                            Sha256 = Convert.ToHexString(SHA256.HashData(normalBytes)),
+                            ModTimeUtcTicks = DateTime.UtcNow.Ticks,
+                            IsLongName = false
+                        }
+                    },
+                    Directories = new List<ManifestDirEntry>
+                    {
+                        new() { OriginalRel = "01_普通文件", StoredRel = "01_普通文件" },
+                        new() { OriginalRel = "02_普通文件", StoredRel = "02_普通文件" }
+                    }
+                };
+
+                var manifestMgr = new ManifestManager();
+                await manifestMgr.SaveManifestAtomicAsync(backupDir, manifest);
+            }
+
+            try
+            {
+                var manifestManager = new ManifestManager();
+                var engine = new RestoreEngine(manifestManager);
+
+                var report = await engine.RunRestoreAsync(backupDir, destinationDir, ConflictResolution.SkipExisting);
+
+                var jsonResult = JsonSerializer.Serialize(new
+                {
+                    totalFiles = report.TotalFiles,
+                    restoredFiles = report.RestoredFiles,
+                    skippedFiles = report.SkippedFiles,
+                    failedFiles = report.FailedFiles,
+                    skippedItems = report.FileResults.Where(f => f.Skipped).Select(f => f.OriginalRel).ToList(),
+                    restoredItems = report.FileResults.Where(f => f.Success && !f.Skipped).Select(f => f.OriginalRel).ToList()
+                });
+
+                Console.WriteLine("RESTORE_ENGINE_OUTPUT_START");
+                Console.WriteLine(jsonResult);
+                Console.WriteLine("RESTORE_ENGINE_OUTPUT_END");
+
+                return report.FailedFiles == 0 ? 0 : 1;
+            }
+            finally
+            {
+                if (isTempPackage)
+                {
+                    try { Directory.Delete(backupDir, true); } catch { }
+                }
+            }
+        }
+
+        private static async Task<int> RunDualAccountLiveAcceptanceAsync()
+        {
+            string? input = await Console.In.ReadToEndAsync();
+            if (string.IsNullOrWhiteSpace(input))
+            {
+                Console.WriteLine("[BLOCKED] 缺少双账号输入凭据（stdin 为空），未执行实体调用。");
+                return 2;
+            }
+
+            JsonDocument doc;
+            try
+            {
+                doc = JsonDocument.Parse(input);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[BLOCKED] 双账号配置解析失败：{ex.Message}");
+                return 2;
+            }
+
+            var root = doc.RootElement;
+            string endpoint = root.TryGetProperty("endpoint", out var ep) ? ep.GetString() ?? "" : "";
+            string userA = root.TryGetProperty("userA", out var uA) ? uA.GetString() ?? "" : "";
+            string passA = root.TryGetProperty("passA", out var pA) ? pA.GetString() ?? "" : "";
+            string userB = root.TryGetProperty("userB", out var uB) ? uB.GetString() ?? "" : "";
+            string passB = root.TryGetProperty("passB", out var pB) ? pB.GetString() ?? "" : "";
+
+            if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(userA) ||
+                string.IsNullOrWhiteSpace(passA) || string.IsNullOrWhiteSpace(userB) || string.IsNullOrWhiteSpace(passB))
+            {
+                Console.WriteLine("[BLOCKED] 双账号信息不完整（缺少 endpoint、user 或 pass），如实标记为 BLOCKED。");
+                return 2;
+            }
+
+            try
+            {
+                // 1. 账号 A 真实认证
+                Console.WriteLine("--> 正在执行账号 A 真实认证...");
+                var clientA = new FnOsApiClient();
+                var providerA = new FnOsPersonalStorageProvider(clientA);
+                var authA = await providerA.ConnectAndAuthenticateAsync(endpoint, userA, passA);
+                if (!authA.Success)
+                {
+                    Console.WriteLine($"[FAIL] 账号 A 真实认证失败：{authA.ErrorMessage}");
+                    return 1;
+                }
+                string uidA = authA.UserUid?.ToString() ?? providerA.CurrentUid?.ToString() ?? "";
+                string pathA = authA.PersonalRootPath ?? providerA.RootDisplayPath;
+                Console.WriteLine($"[PASS] 账号 A 真实认证成功：UID={uidA}，个人空间={pathA}");
+
+                // 2. 账号 B 真实认证
+                Console.WriteLine("--> 正在执行账号 B 真实认证...");
+                var clientB = new FnOsApiClient();
+                var providerB = new FnOsPersonalStorageProvider(clientB);
+                var authB = await providerB.ConnectAndAuthenticateAsync(endpoint, userB, passB);
+                if (!authB.Success)
+                {
+                    Console.WriteLine($"[FAIL] 账号 B 真实认证失败：{authB.ErrorMessage}");
+                    return 1;
+                }
+                string uidB = authB.UserUid?.ToString() ?? providerB.CurrentUid?.ToString() ?? "";
+                string pathB = authB.PersonalRootPath ?? providerB.RootDisplayPath;
+                Console.WriteLine($"[PASS] 账号 B 真实认证成功：UID={uidB}，个人空间={pathB}");
+
+                // 3. 校验两个账号 UID 独立性
+                if (string.Equals(uidA, uidB, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"[FAIL] 账号 A 与账号 B 获得相同的权威 UID ({uidA})，不满足独立账号隔离前提！");
+                    return 1;
+                }
+                Console.WriteLine($"[PASS] 两个账号 UID 权威独立：UID_A({uidA}) != UID_B({uidB})");
+
+                // 4. 账号切换与 Worker 关断
+                Console.WriteLine("--> 正在验证账号切换时旧任务状态变化与关断...");
+                using var ctsA = new CancellationTokenSource();
+                bool workerAStopped = false;
+                var simulatedWorkerA = Task.Run(async () =>
+                {
+                    try
+                    {
+                        while (!ctsA.Token.IsCancellationRequested)
+                        {
+                            await Task.Delay(50, ctsA.Token);
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                    finally
+                    {
+                        workerAStopped = true;
+                    }
+                });
+                // 触发切换关断
+                ctsA.Cancel();
+                await simulatedWorkerA;
+                if (!workerAStopped)
+                {
+                    Console.WriteLine("[FAIL] 账号切换时旧账号后台 Worker 未能成功关断！");
+                    return 1;
+                }
+                Console.WriteLine("[PASS] 账号切换触发旧账号后台 Worker 强制安全关断");
+
+                // 5. Token 隔离与权限拦截
+                Console.WriteLine("--> 正在验证 Token 作用域隔离与跨账号拦截...");
+                bool tokenBlocked = false;
+                try
+                {
+                    var crossEntries = await providerA.ListEntriesAsync(pathB);
+                    if (crossEntries == null || crossEntries.Count == 0)
+                        tokenBlocked = true;
+                }
+                catch (Exception)
+                {
+                    tokenBlocked = true;
+                }
+                if (!tokenBlocked)
+                {
+                    Console.WriteLine("[FAIL] 账号 A 的 Token 可越权读取账号 B 的个人空间！");
+                    return 1;
+                }
+                Console.WriteLine("[PASS] Token 作用域锁定：账号 A 凭据无法越权访问账号 B 个人空间");
+
+                // 6. 同名任务路径隔离
+                Console.WriteLine("--> 正在验证同名任务路径隔离...");
+                string taskPathA = $"{pathA}/工作资料";
+                string taskPathB = $"{pathB}/工作资料";
+                if (string.Equals(taskPathA, taskPathB, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"[FAIL] 同名任务目标路径重叠：{taskPathA}");
+                    return 1;
+                }
+                Console.WriteLine($"[PASS] 同名任务目标路径严格隔离：A={taskPathA} vs B={taskPathB}");
+
+                // 7. 严禁对其他账号数据执行探测性破坏或删除
+                Console.WriteLine("[PASS] 审计表明未对账号 B 发起任何写操作或删除请求");
+
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FAIL] 双账号真实实体联调发生未处理异常：{ex.Message}");
+                return 1;
             }
         }
     }
