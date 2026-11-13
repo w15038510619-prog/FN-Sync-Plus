@@ -212,6 +212,38 @@ public sealed class DataFormatTestSuite
             return (!upgraded && File.ReadAllText(path) == "not json" && guard.LastPreservedCopy != null, error);
         });
 
+        Case("创建备份失败时立即终止且原文件不受影响", () =>
+        {
+            string path = Fresh("backup-fail");
+            string originalContent = "{\"format\":1,\"app_version\":\"0.4.0\"}";
+            File.WriteAllText(path, originalContent);
+            var guard = new DataFormatGuard(path, supportedFormat: 2)
+            {
+                FaultInjectBackupCreation = _ => false
+            };
+            bool upgraded = guard.TryUpgrade("0.5.0", 2, out string error);
+            bool untouched = File.ReadAllText(path) == originalContent;
+            return (!upgraded && untouched && guard.LastTransactionState == WriteTransactionState.Prepared &&
+                    error.Contains("无法创建配置格式标记事务备份"), $"upgraded={upgraded} state={guard.LastTransactionState} error={error}");
+        });
+
+        Case("替换操作失败时触发回滚并恢复原标记", () =>
+        {
+            string path = Fresh("replace-fail-rollback");
+            string originalContent = "{\"format\":1,\"app_version\":\"0.4.0\"}";
+            File.WriteAllText(path, originalContent);
+            var guard = new DataFormatGuard(path, supportedFormat: 2)
+            {
+                FaultInjectReplaceOperation = _ => false
+            };
+            bool upgraded = guard.TryUpgrade("0.5.0", 2, out string error);
+            var probe = guard.Probe();
+            bool restored = File.ReadAllText(path) == originalContent;
+            return (!upgraded && restored && probe.State == FormatMarkerState.Valid && probe.Format == 1 &&
+                    guard.LastTransactionState == WriteTransactionState.RolledBack,
+                    $"upgraded={upgraded} state={guard.LastTransactionState} error={error}");
+        });
+
         Case("写入后回读验证失败时自动回滚恢复原标记", () =>
         {
             string path = Fresh("rollback-on-verify-fail");
@@ -224,8 +256,27 @@ public sealed class DataFormatTestSuite
             var after = guard.Probe();
             string content = File.ReadAllText(path);
             bool rolledBack = !upgraded && after.State == FormatMarkerState.Valid && after.Format == 1 &&
-                              content.Contains("\"format\":1") && error.Contains("已恢复原格式标记");
-            return (rolledBack, $"upgraded={upgraded} formatAfter={after.Format} error={error}");
+                              content.Contains("\"format\":1") && error.Contains("恢复原") &&
+                              guard.LastTransactionState == WriteTransactionState.RolledBack;
+            return (rolledBack, $"upgraded={upgraded} formatAfter={after.Format} state={guard.LastTransactionState} error={error}");
+        });
+
+        Case("回滚失败时严格保留备份副本且进入RecoveryFailed", () =>
+        {
+            string path = Fresh("rollback-fail-preserve-backup");
+            string originalContent = "{\"format\":1,\"app_version\":\"0.4.0\"}";
+            File.WriteAllText(path, originalContent);
+            var guard = new DataFormatGuard(path, supportedFormat: 2)
+            {
+                FaultInjectPostWriteVerifier = _ => false, // 触发回滚
+                FaultInjectRollbackFailure = _ => false   // 模拟回滚失败
+            };
+            bool upgraded = guard.TryUpgrade("0.5.0", 2, out string error);
+            bool isRecoveryFailed = guard.LastTransactionState == WriteTransactionState.RecoveryFailed;
+            bool backupKept = guard.LastPreservedBackup != null && File.Exists(guard.LastPreservedBackup) &&
+                              File.ReadAllText(guard.LastPreservedBackup) == originalContent;
+            return (!upgraded && isRecoveryFailed && backupKept && error.Contains("RecoveryFailed") && error.Contains("严格保留"),
+                $"upgraded={upgraded} state={guard.LastTransactionState} backupKept={backupKept} error={error}");
         });
 
         Case("锁文件被短暂独占占用时通过重试安全获取", () =>

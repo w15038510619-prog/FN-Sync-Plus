@@ -508,11 +508,10 @@ public sealed class StorageIsolationTestSuite
         Case("目录联接点指向生产数据目录时被拒绝", () =>
         {
             string linkDir = Path.Combine(workspace, "test-junction-to-prod");
-            string prod = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FNSyncPlus");
+            string forbiddenTarget = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             try
             {
-                Directory.CreateDirectory(prod);
-                var psi = new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{linkDir}\" \"{prod}\"")
+                var psi = new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{linkDir}\" \"{forbiddenTarget}\"")
                 {
                     CreateNoWindow = true,
                     UseShellExecute = false,
@@ -538,11 +537,10 @@ public sealed class StorageIsolationTestSuite
             string parentDir = Path.Combine(workspace, "test-parent-with-bad-sub");
             Directory.CreateDirectory(parentDir);
             string subLink = Path.Combine(parentDir, "roaming-junction");
-            string prod = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FNSyncPlus");
+            string forbiddenTarget = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
             try
             {
-                Directory.CreateDirectory(prod);
-                var psi = new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{subLink}\" \"{prod}\"")
+                var psi = new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{subLink}\" \"{forbiddenTarget}\"")
                 {
                     CreateNoWindow = true,
                     UseShellExecute = false,
@@ -561,6 +559,102 @@ public sealed class StorageIsolationTestSuite
             {
                 try { if (Directory.Exists(subLink)) Directory.Delete(subLink); } catch { }
                 try { if (Directory.Exists(parentDir)) Directory.Delete(parentDir, true); } catch { }
+            }
+        });
+
+        Case("断链重解析点被拦截拒绝（无法确认安全即视为不安全）", () =>
+        {
+            string targetDir = Path.Combine(workspace, "test-broken-target");
+            Directory.CreateDirectory(targetDir);
+            string linkDir = Path.Combine(workspace, "test-broken-link");
+            try
+            {
+                var psi = new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{linkDir}\" \"{targetDir}\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true
+                };
+                using var p = Process.Start(psi);
+                p?.WaitForExit();
+                if (!Directory.Exists(linkDir)) return (true, "环境不支持创建联接点，跳过");
+
+                // 删除目标目录，使联接点成为断链 (Broken Reparse Point)
+                Directory.Delete(targetDir);
+
+                bool caught = false;
+                try { AppStorageRoot.ValidateRoot(linkDir); }
+                catch (InvalidOperationException ex) when (ex.Message.Contains("无法确认安全即视为不安全")) { caught = true; }
+                return (caught, "未能拦截断链重解析点");
+            }
+            finally
+            {
+                try { if (Directory.Exists(linkDir)) Directory.Delete(linkDir); } catch { }
+                try { if (Directory.Exists(targetDir)) Directory.Delete(targetDir); } catch { }
+            }
+        });
+
+        Case("隔离目录中包含断链子目录被拦截拒绝", () =>
+        {
+            string parentDir = Path.Combine(workspace, "test-parent-with-broken-sub");
+            Directory.CreateDirectory(parentDir);
+            string targetDir = Path.Combine(workspace, "test-sub-broken-target");
+            Directory.CreateDirectory(targetDir);
+            string subLink = Path.Combine(parentDir, "broken-sublink");
+            try
+            {
+                var psi = new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{subLink}\" \"{targetDir}\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true
+                };
+                using var p = Process.Start(psi);
+                p?.WaitForExit();
+                if (!Directory.Exists(subLink)) return (true, "环境不支持创建联接点，跳过");
+
+                // 删除目标，制造断链
+                Directory.Delete(targetDir);
+
+                bool caught = false;
+                try { AppStorageRoot.ValidateRoot(parentDir); }
+                catch (InvalidOperationException ex) when (ex.Message.Contains("无法确认安全即视为不安全")) { caught = true; }
+                return (caught, "未能拦截子目录中的断链重解析点");
+            }
+            finally
+            {
+                try { if (Directory.Exists(subLink)) Directory.Delete(subLink); } catch { }
+                try { if (Directory.Exists(parentDir)) Directory.Delete(parentDir, true); } catch { }
+                try { if (Directory.Exists(targetDir)) Directory.Delete(targetDir); } catch { }
+            }
+        });
+
+        Case("重解析点循环引用时被拦截拒绝（无法确认安全即视为不安全）", () =>
+        {
+            string cycleDir = Path.Combine(workspace, "test-cycle-parent");
+            Directory.CreateDirectory(cycleDir);
+            string cycleLink = Path.Combine(cycleDir, "cycle-link");
+            try
+            {
+                var psi = new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{cycleLink}\" \"{cycleDir}\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true
+                };
+                using var p = Process.Start(psi);
+                p?.WaitForExit();
+                if (!Directory.Exists(cycleLink)) return (true, "环境不支持创建联接点，跳过");
+
+                bool caught = false;
+                try { AppStorageRoot.ValidateRoot(cycleDir); }
+                catch (InvalidOperationException ex) when (ex.Message.Contains("循环") || ex.Message.Contains("无法确认安全即视为不安全")) { caught = true; }
+                return (caught, "未能拦截循环引用的重解析点");
+            }
+            finally
+            {
+                try { if (Directory.Exists(cycleLink)) Directory.Delete(cycleLink); } catch { }
+                try { if (Directory.Exists(cycleDir)) Directory.Delete(cycleDir, true); } catch { }
             }
         });
 

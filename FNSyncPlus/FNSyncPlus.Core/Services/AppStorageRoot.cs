@@ -181,6 +181,7 @@ public static class AppStorageRoot
 
     /// <summary>
     /// Resolves physical path by following reparse points (symlinks, junctions) for all existing components.
+    /// Strictly fail-closed: unresolvable, cyclic, broken, or inaccessible reparse points throw InvalidOperationException.
     /// </summary>
     public static string ResolvePhysicalPath(string path)
     {
@@ -195,26 +196,77 @@ public static class AppStorageRoot
             string[] parts = relative.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
                 StringSplitOptions.RemoveEmptyEntries);
 
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { NormalizePath(root) };
+            int hops = 0;
+            const int maxHops = 64;
+
             foreach (string part in parts)
             {
                 string next = Path.Combine(current, part);
-                var di = new DirectoryInfo(next);
-                if (di.Exists && di.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                FileAttributes attrs = default;
+                bool exists = false;
+                try
                 {
-                    var target = di.ResolveLinkTarget(returnFinalTarget: true);
-                    if (target != null)
+                    attrs = File.GetAttributes(next);
+                    exists = true;
+                }
+                catch (FileNotFoundException) { exists = false; }
+                catch (DirectoryNotFoundException) { exists = false; }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException(
+                        $"无法读取路径属性（无法确认安全即视为不安全）：{next} ({ex.Message})", ex);
+                }
+
+                if (exists && attrs.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    hops++;
+                    if (hops > maxHops)
                     {
-                        current = target.FullName;
-                        continue;
+                        throw new InvalidOperationException(
+                            $"检测到重解析点跳转次数超限或可能存在循环解析（无法确认安全即视为不安全）：{path}");
                     }
+
+                    FileSystemInfo? target;
+                    try
+                    {
+                        var di = new DirectoryInfo(next);
+                        target = di.ResolveLinkTarget(returnFinalTarget: true);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new InvalidOperationException(
+                            $"无法安全解析重解析点物理路径（无法确认安全即视为不安全）：{next} ({ex.Message})", ex);
+                    }
+
+                    if (target == null || !target.Exists)
+                    {
+                        throw new InvalidOperationException(
+                            $"无法解析重解析点物理目标或目标不存在（无法确认安全即视为不安全）：{next}");
+                    }
+
+                    string targetNormalized = NormalizePath(target.FullName);
+                    if (!visited.Add(targetNormalized))
+                    {
+                        throw new InvalidOperationException(
+                            $"检测到重解析点循环引用（无法确认安全即视为不安全）：{next} -> {targetNormalized}");
+                    }
+
+                    current = targetNormalized;
+                    continue;
                 }
                 current = next;
             }
             return NormalizePath(current);
         }
-        catch
+        catch (InvalidOperationException)
         {
-            return normalized;
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"解析路径物理目标异常（无法确认安全即视为不安全）：{path} ({ex.Message})", ex);
         }
     }
 
@@ -233,7 +285,8 @@ public static class AppStorageRoot
         }
         catch
         {
-            // Fall back to lexical check if resolution fails
+            // 无法确认安全即视为不安全（fail-closed）：拦截潜在的危险路径
+            return true;
         }
         return false;
     }
@@ -356,52 +409,75 @@ public static class AppStorageRoot
     private static void VerifyNoSubdirectoryReparsePointsToProduction(string root)
     {
         if (!Directory.Exists(root)) return;
-        try
+        var forbidden = EnumerateForbiddenProductionRoots();
+        var production = EnumerateProductionPaths();
+        var stack = new Stack<DirectoryInfo>();
+        stack.Push(new DirectoryInfo(root));
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        while (stack.Count > 0)
         {
-            var forbidden = EnumerateForbiddenProductionRoots();
-            var production = EnumerateProductionPaths();
-            var stack = new Stack<DirectoryInfo>();
-            stack.Push(new DirectoryInfo(root));
-
-            while (stack.Count > 0)
+            var current = stack.Pop();
+            string currentNorm = NormalizePath(current.FullName);
+            if (!visited.Add(currentNorm))
             {
-                var current = stack.Pop();
-                DirectoryInfo[] subDirs;
-                try { subDirs = current.GetDirectories(); }
-                catch { continue; }
+                throw new InvalidOperationException(
+                    $"{OverrideEnvironmentVariable} 隔离目录存在循环目录或循环链接（无法确认安全即视为不安全）：{currentNorm}");
+            }
 
-                foreach (var sub in subDirs)
+            FileSystemInfo[] subEntries;
+            try
+            {
+                subEntries = current.GetFileSystemInfos();
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"{OverrideEnvironmentVariable} 无法枚举隔离目录中的项（无法确认安全即视为不安全）：{current.FullName} ({ex.Message})", ex);
+            }
+
+            foreach (var sub in subEntries)
+            {
+                if (sub.Attributes.HasFlag(FileAttributes.ReparsePoint))
                 {
-                    if (sub.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                    FileSystemInfo? target;
+                    try
                     {
-                        FileSystemInfo? target = null;
-                        try { target = sub.ResolveLinkTarget(returnFinalTarget: true); }
-                        catch { }
-
-                        if (target != null)
-                        {
-                            string targetFull = NormalizePath(target.FullName);
-                            if (IsForbiddenOrProductionTarget(targetFull, forbidden, production))
-                            {
-                                throw new InvalidOperationException(
-                                    $"{OverrideEnvironmentVariable} 隔离目录中的子目录重解析点指向生产路径，已阻止：{sub.FullName} -> {targetFull}");
-                            }
-                        }
+                        target = sub.ResolveLinkTarget(returnFinalTarget: true);
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        stack.Push(sub);
+                        throw new InvalidOperationException(
+                            $"{OverrideEnvironmentVariable} 隔离目录中的重解析点解析异常（无法确认安全即视为不安全）：{sub.FullName} ({ex.Message})", ex);
+                    }
+
+                    if (target == null || !target.Exists)
+                    {
+                        throw new InvalidOperationException(
+                            $"{OverrideEnvironmentVariable} 隔离目录中的重解析点目标不存在或无法解析（无法确认安全即视为不安全）：{sub.FullName}");
+                    }
+
+                    string targetFull = NormalizePath(target.FullName);
+                    string rootNorm = NormalizePath(root);
+                    if (targetFull.Equals(rootNorm, StringComparison.OrdinalIgnoreCase) ||
+                        rootNorm.StartsWith(targetFull + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                        visited.Contains(targetFull))
+                    {
+                        throw new InvalidOperationException(
+                            $"{OverrideEnvironmentVariable} 隔离目录中的重解析点指向自身或上级目录构成循环引用（无法确认安全即视为不安全）：{sub.FullName} -> {targetFull}");
+                    }
+
+                    if (IsForbiddenOrProductionTarget(targetFull, forbidden, production))
+                    {
+                        throw new InvalidOperationException(
+                            $"{OverrideEnvironmentVariable} 隔离目录中的子目录重解析点指向生产路径，已阻止：{sub.FullName} -> {targetFull}");
                     }
                 }
+                else if (sub is DirectoryInfo subDir)
+                {
+                    stack.Push(subDir);
+                }
             }
-        }
-        catch (InvalidOperationException)
-        {
-            throw;
-        }
-        catch
-        {
-            // Non-critical file inspection errors are ignored
         }
     }
 
