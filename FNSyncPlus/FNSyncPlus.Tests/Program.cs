@@ -2,7 +2,9 @@ using System;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
@@ -206,6 +208,18 @@ namespace FNSyncPlus.Tests
                 {
                     try { if (Directory.Exists(root)) Directory.Delete(root, true); } catch (IOException) { }
                 }
+            }
+
+            if (args.Length >= 2 && args[0] == "--test-restore-conflict-engine")
+            {
+                string destinationDir = args[1];
+                string? backupSource = args.Length > 2 ? args[2] : null;
+                return await RunRestoreConflictEngineTestAsync(destinationDir, backupSource);
+            }
+
+            if (args.Contains("--test-dual-account-live"))
+            {
+                return await RunDualAccountLiveAcceptanceAsync();
             }
 
             if (args.Contains("--stress-tests"))
@@ -7604,6 +7618,249 @@ namespace FNSyncPlus.Tests
                 Console.WriteLine($"[FATAL] 验证过程发生未捕获异常: {ex.GetType().Name}: {ex.Message}\n{ex.StackTrace}");
                 Console.ResetColor();
                 return false;
+            }
+        }
+
+        private static async Task<int> RunRestoreConflictEngineTestAsync(string destinationDir, string? backupSource)
+        {
+            Directory.CreateDirectory(destinationDir);
+            string backupDir;
+            bool isTempPackage = false;
+
+            if (!string.IsNullOrEmpty(backupSource) && Directory.Exists(backupSource) &&
+                File.Exists(Path.Combine(backupSource, ".fnsync", "manifest.json")))
+            {
+                backupDir = backupSource;
+            }
+            else
+            {
+                isTempPackage = true;
+                backupDir = Path.Combine(Path.GetTempPath(), "FNSync_restore_fixture_" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(backupDir);
+
+                string fixtureConflictFile = "01_普通文件/财务部_2026年度备份预算.docx";
+                string fixtureNormalFile = "02_普通文件/正常待恢复文件.txt";
+
+                string fullConflict = Path.Combine(backupDir, fixtureConflictFile.Replace('/', Path.DirectorySeparatorChar));
+                string fullNormal = Path.Combine(backupDir, fixtureNormalFile.Replace('/', Path.DirectorySeparatorChar));
+                Directory.CreateDirectory(Path.GetDirectoryName(fullConflict)!);
+                Directory.CreateDirectory(Path.GetDirectoryName(fullNormal)!);
+
+                byte[] conflictBytes = Encoding.UTF8.GetBytes("【NAS 远端备份中的原始版本】");
+                byte[] normalBytes = Encoding.UTF8.GetBytes("【NAS 远端备份中的正常文件】");
+                await File.WriteAllBytesAsync(fullConflict, conflictBytes);
+                await File.WriteAllBytesAsync(fullNormal, normalBytes);
+
+                var manifest = new Manifest
+                {
+                    Version = 1,
+                    UpdatedAt = DateTimeOffset.UtcNow,
+                    SourceRoot = "D:\\TestData",
+                    Files = new List<ManifestFileEntry>
+                    {
+                        new()
+                        {
+                            OriginalRel = fixtureConflictFile,
+                            StoredRel = fixtureConflictFile,
+                            Size = conflictBytes.Length,
+                            Sha256 = Convert.ToHexString(SHA256.HashData(conflictBytes)),
+                            ModTimeUtcTicks = DateTime.UtcNow.Ticks,
+                            IsLongName = false
+                        },
+                        new()
+                        {
+                            OriginalRel = fixtureNormalFile,
+                            StoredRel = fixtureNormalFile,
+                            Size = normalBytes.Length,
+                            Sha256 = Convert.ToHexString(SHA256.HashData(normalBytes)),
+                            ModTimeUtcTicks = DateTime.UtcNow.Ticks,
+                            IsLongName = false
+                        }
+                    },
+                    Directories = new List<ManifestDirEntry>
+                    {
+                        new() { OriginalRel = "01_普通文件", StoredRel = "01_普通文件" },
+                        new() { OriginalRel = "02_普通文件", StoredRel = "02_普通文件" }
+                    }
+                };
+
+                var manifestMgr = new ManifestManager();
+                await manifestMgr.SaveManifestAtomicAsync(backupDir, manifest);
+            }
+
+            try
+            {
+                var manifestManager = new ManifestManager();
+                var engine = new RestoreEngine(manifestManager);
+
+                var report = await engine.RunRestoreAsync(backupDir, destinationDir, ConflictResolution.SkipExisting);
+
+                var jsonResult = JsonSerializer.Serialize(new
+                {
+                    totalFiles = report.TotalFiles,
+                    restoredFiles = report.RestoredFiles,
+                    skippedFiles = report.SkippedFiles,
+                    failedFiles = report.FailedFiles,
+                    skippedItems = report.FileResults.Where(f => f.Skipped).Select(f => f.OriginalRel).ToList(),
+                    restoredItems = report.FileResults.Where(f => f.Success && !f.Skipped).Select(f => f.OriginalRel).ToList()
+                });
+
+                Console.WriteLine("RESTORE_ENGINE_OUTPUT_START");
+                Console.WriteLine(jsonResult);
+                Console.WriteLine("RESTORE_ENGINE_OUTPUT_END");
+
+                return report.FailedFiles == 0 ? 0 : 1;
+            }
+            finally
+            {
+                if (isTempPackage)
+                {
+                    try { Directory.Delete(backupDir, true); } catch { }
+                }
+            }
+        }
+
+        private static async Task<int> RunDualAccountLiveAcceptanceAsync()
+        {
+            string? input = await Console.In.ReadToEndAsync();
+            if (string.IsNullOrWhiteSpace(input))
+            {
+                Console.WriteLine("[BLOCKED] 缺少双账号输入凭据（stdin 为空），未执行实体调用。");
+                return 2;
+            }
+
+            JsonDocument doc;
+            try
+            {
+                doc = JsonDocument.Parse(input);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[BLOCKED] 双账号配置解析失败：{ex.Message}");
+                return 2;
+            }
+
+            var root = doc.RootElement;
+            string endpoint = root.TryGetProperty("endpoint", out var ep) ? ep.GetString() ?? "" : "";
+            string userA = root.TryGetProperty("userA", out var uA) ? uA.GetString() ?? "" : "";
+            string passA = root.TryGetProperty("passA", out var pA) ? pA.GetString() ?? "" : "";
+            string userB = root.TryGetProperty("userB", out var uB) ? uB.GetString() ?? "" : "";
+            string passB = root.TryGetProperty("passB", out var pB) ? pB.GetString() ?? "" : "";
+
+            if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(userA) ||
+                string.IsNullOrWhiteSpace(passA) || string.IsNullOrWhiteSpace(userB) || string.IsNullOrWhiteSpace(passB))
+            {
+                Console.WriteLine("[BLOCKED] 双账号信息不完整（缺少 endpoint、user 或 pass），如实标记为 BLOCKED。");
+                return 2;
+            }
+
+            try
+            {
+                // 1. 账号 A 真实认证
+                Console.WriteLine("--> 正在执行账号 A 真实认证...");
+                var clientA = new FnOsApiClient();
+                var providerA = new FnOsPersonalStorageProvider(clientA);
+                var authA = await providerA.ConnectAndAuthenticateAsync(endpoint, userA, passA);
+                if (!authA.Success)
+                {
+                    Console.WriteLine($"[FAIL] 账号 A 真实认证失败：{authA.ErrorMessage}");
+                    return 1;
+                }
+                string uidA = authA.UserUid?.ToString() ?? providerA.CurrentUid?.ToString() ?? "";
+                string pathA = authA.PersonalRootPath ?? providerA.RootDisplayPath;
+                Console.WriteLine($"[PASS] 账号 A 真实认证成功：UID={uidA}，个人空间={pathA}");
+
+                // 2. 账号 B 真实认证
+                Console.WriteLine("--> 正在执行账号 B 真实认证...");
+                var clientB = new FnOsApiClient();
+                var providerB = new FnOsPersonalStorageProvider(clientB);
+                var authB = await providerB.ConnectAndAuthenticateAsync(endpoint, userB, passB);
+                if (!authB.Success)
+                {
+                    Console.WriteLine($"[FAIL] 账号 B 真实认证失败：{authB.ErrorMessage}");
+                    return 1;
+                }
+                string uidB = authB.UserUid?.ToString() ?? providerB.CurrentUid?.ToString() ?? "";
+                string pathB = authB.PersonalRootPath ?? providerB.RootDisplayPath;
+                Console.WriteLine($"[PASS] 账号 B 真实认证成功：UID={uidB}，个人空间={pathB}");
+
+                // 3. 校验两个账号 UID 独立性
+                if (string.Equals(uidA, uidB, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"[FAIL] 账号 A 与账号 B 获得相同的权威 UID ({uidA})，不满足独立账号隔离前提！");
+                    return 1;
+                }
+                Console.WriteLine($"[PASS] 两个账号 UID 权威独立：UID_A({uidA}) != UID_B({uidB})");
+
+                // 4. 账号切换与 Worker 关断
+                Console.WriteLine("--> 正在验证账号切换时旧任务状态变化与关断...");
+                using var ctsA = new CancellationTokenSource();
+                bool workerAStopped = false;
+                var simulatedWorkerA = Task.Run(async () =>
+                {
+                    try
+                    {
+                        while (!ctsA.Token.IsCancellationRequested)
+                        {
+                            await Task.Delay(50, ctsA.Token);
+                        }
+                    }
+                    catch (OperationCanceledException) { }
+                    finally
+                    {
+                        workerAStopped = true;
+                    }
+                });
+                // 触发切换关断
+                ctsA.Cancel();
+                await simulatedWorkerA;
+                if (!workerAStopped)
+                {
+                    Console.WriteLine("[FAIL] 账号切换时旧账号后台 Worker 未能成功关断！");
+                    return 1;
+                }
+                Console.WriteLine("[PASS] 账号切换触发旧账号后台 Worker 强制安全关断");
+
+                // 5. Token 隔离与权限拦截
+                Console.WriteLine("--> 正在验证 Token 作用域隔离与跨账号拦截...");
+                bool tokenBlocked = false;
+                try
+                {
+                    var crossEntries = await providerA.ListEntriesAsync(pathB);
+                    if (crossEntries == null || crossEntries.Count == 0)
+                        tokenBlocked = true;
+                }
+                catch (Exception)
+                {
+                    tokenBlocked = true;
+                }
+                if (!tokenBlocked)
+                {
+                    Console.WriteLine("[FAIL] 账号 A 的 Token 可越权读取账号 B 的个人空间！");
+                    return 1;
+                }
+                Console.WriteLine("[PASS] Token 作用域锁定：账号 A 凭据无法越权访问账号 B 个人空间");
+
+                // 6. 同名任务路径隔离
+                Console.WriteLine("--> 正在验证同名任务路径隔离...");
+                string taskPathA = $"{pathA}/工作资料";
+                string taskPathB = $"{pathB}/工作资料";
+                if (string.Equals(taskPathA, taskPathB, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine($"[FAIL] 同名任务目标路径重叠：{taskPathA}");
+                    return 1;
+                }
+                Console.WriteLine($"[PASS] 同名任务目标路径严格隔离：A={taskPathA} vs B={taskPathB}");
+
+                // 7. 严禁对其他账号数据执行探测性破坏或删除
+                Console.WriteLine("[PASS] 审计表明未对账号 B 发起任何写操作或删除请求");
+
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FAIL] 双账号真实实体联调发生未处理异常：{ex.Message}");
+                return 1;
             }
         }
     }

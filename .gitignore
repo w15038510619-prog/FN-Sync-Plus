@@ -39,3 +39,5 @@ $RECYCLE.BIN/
 
 # Acceptance harness output (build/install evidence, never committed)
 .acceptance/
+pilot-acceptance/
+pilot-acceptance.zip

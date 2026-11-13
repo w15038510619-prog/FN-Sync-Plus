@@ -279,6 +279,24 @@ public sealed class DataFormatTestSuite
                 $"upgraded={upgraded} state={guard.LastTransactionState} backupKept={backupKept} error={error}");
         });
 
+        Case("回滚后文件虽为合法JSON但SHA256与原文件不符时判定RecoveryFailed并保留备份", () =>
+        {
+            string path = Fresh("rollback-sha-mismatch-preserve-backup");
+            string originalContent = "{\"format\":1,\"app_version\":\"0.4.0\"}";
+            File.WriteAllText(path, originalContent);
+            var guard = new DataFormatGuard(path, supportedFormat: 2)
+            {
+                FaultInjectPostWriteVerifier = _ => false, // 触发回滚
+                FaultInjectRollbackCorruption = _ => false  // 模拟回滚后文件虽是合法 JSON 但内容与原文件 SHA-256 不一致
+            };
+            bool upgraded = guard.TryUpgrade("0.5.0", 2, out string error);
+            bool isRecoveryFailed = guard.LastTransactionState == WriteTransactionState.RecoveryFailed;
+            bool backupKept = guard.LastPreservedBackup != null && File.Exists(guard.LastPreservedBackup) &&
+                              File.ReadAllText(guard.LastPreservedBackup) == originalContent;
+            return (!upgraded && isRecoveryFailed && backupKept && error.Contains("RecoveryFailed") && error.Contains("严格保留"),
+                $"upgraded={upgraded} state={guard.LastTransactionState} backupKept={backupKept} error={error}");
+        });
+
         Case("锁文件被短暂独占占用时通过重试安全获取", () =>
         {
             string path = Fresh("lock-transient-retry");

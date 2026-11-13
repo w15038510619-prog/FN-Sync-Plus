@@ -103,6 +103,7 @@ public sealed class DataFormatGuard
     internal Func<string, bool>? FaultInjectReplaceOperation { get; set; }
     internal Func<string, bool>? FaultInjectPostWriteVerifier { get; set; }
     internal Func<string, bool>? FaultInjectRollbackFailure { get; set; }
+    internal Func<string, bool>? FaultInjectRollbackCorruption { get; set; }
 
     /// <summary>Read-only inspection. Never writes, never repairs, never deletes.</summary>
     public FormatMarkerInspection Probe()
@@ -262,6 +263,8 @@ public sealed class DataFormatGuard
         string backup = $"{_path}.bak-{Guid.NewGuid():N}";
         bool backupCreated = false;
         bool exists = File.Exists(_path);
+        string? originalSha256 = null;
+        string? backupSha256 = null;
 
         try
         {
@@ -280,6 +283,7 @@ public sealed class DataFormatGuard
                 try
                 {
                     originalBytes = File.ReadAllBytes(_path);
+                    originalSha256 = Convert.ToHexString(SHA256.HashData(originalBytes));
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
@@ -311,7 +315,9 @@ public sealed class DataFormatGuard
                         return false;
                     }
                     byte[] backupBytes = File.ReadAllBytes(backup);
-                    if (!originalBytes.AsSpan().SequenceEqual(backupBytes))
+                    backupSha256 = Convert.ToHexString(SHA256.HashData(backupBytes));
+                    if (!originalBytes.AsSpan().SequenceEqual(backupBytes) ||
+                        !string.Equals(originalSha256, backupSha256, StringComparison.OrdinalIgnoreCase))
                     {
                         error = "事务备份文件内容与原标记不一致，为防止数据损坏已终止。";
                         try { File.Delete(backup); } catch { }
@@ -372,7 +378,7 @@ public sealed class DataFormatGuard
             if (!replaced)
             {
                 LastTransactionState = WriteTransactionState.RollbackRequired;
-                ExecuteRollback(backupCreated, backup, "替换格式标记文件失败（可能被其他程序独占占用）", out error);
+                ExecuteRollback(backupCreated, backup, originalSha256, backupSha256, "替换格式标记文件失败（可能被其他程序独占占用）", out error);
                 return false;
             }
 
@@ -389,7 +395,7 @@ public sealed class DataFormatGuard
             {
                 LastTransactionState = WriteTransactionState.RollbackRequired;
                 string reason = probe.State != FormatMarkerState.Valid ? probe.Detail : "格式号不匹配或完整性校验未通过";
-                ExecuteRollback(backupCreated, backup, $"写入格式标记后校验失败（{reason}）", out error);
+                ExecuteRollback(backupCreated, backup, originalSha256, backupSha256, $"写入格式标记后校验失败（{reason}）", out error);
                 return false;
             }
 
@@ -404,7 +410,7 @@ public sealed class DataFormatGuard
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             LastTransactionState = WriteTransactionState.RollbackRequired;
-            ExecuteRollback(backupCreated, backup, $"写入配置格式标记异常：{ex.Message}", out error);
+            ExecuteRollback(backupCreated, backup, originalSha256, backupSha256, $"写入配置格式标记异常：{ex.Message}", out error);
             return false;
         }
         finally
@@ -426,23 +432,48 @@ public sealed class DataFormatGuard
         }
     }
 
-    private void ExecuteRollback(bool backupCreated, string backup, string triggerReason, out string error)
+    private void ExecuteRollback(bool backupCreated, string backup, string? originalSha256, string? backupSha256, string triggerReason, out string error)
     {
         if (backupCreated && File.Exists(backup))
         {
+            string? rolledBackSha256 = null;
             try
             {
                 if (FaultInjectRollbackFailure != null && !FaultInjectRollbackFailure(backup))
                     throw new IOException("故障注入：回滚恢复操作异常");
 
                 File.Copy(backup, _path, overwrite: true);
+
+                if (FaultInjectRollbackCorruption != null && !FaultInjectRollbackCorruption(_path))
+                {
+                    // 模拟故障注入：修改回滚后文件内容（使其为有效 JSON 但内容被篡改）
+                    File.WriteAllText(_path, "{\"format\":1,\"app_version\":\"corrupted-rolled-back\"}");
+                }
+
                 var probeAfter = Probe();
-                if (probeAfter.State == FormatMarkerState.Valid)
+                byte[] rolledBackBytes = File.ReadAllBytes(_path);
+                rolledBackSha256 = Convert.ToHexString(SHA256.HashData(rolledBackBytes));
+
+                // 核心安全约束：
+                // 只有原文件 SHA-256、备份文件 SHA-256、回滚后文件 SHA-256 三者完全满足预期一致关系，
+                // 且格式状态为 Valid，才能将回滚结果判定为 RolledBack。
+                // 若仅满足 JSON 格式与版本有效，但字节哈希不一致，严禁判定为恢复成功！
+                bool shaMatches = !string.IsNullOrEmpty(originalSha256) &&
+                                  !string.IsNullOrEmpty(backupSha256) &&
+                                  originalSha256.Equals(backupSha256, StringComparison.OrdinalIgnoreCase) &&
+                                  backupSha256.Equals(rolledBackSha256, StringComparison.OrdinalIgnoreCase);
+
+                if (probeAfter.State == FormatMarkerState.Valid && shaMatches)
                 {
                     LastTransactionState = WriteTransactionState.RolledBack;
-                    error = $"{triggerReason}；已安全自动回滚恢复原格式标记并停止运行。";
+                    error = $"{triggerReason}；已安全自动回滚恢复原格式标记（SHA-256 校验一致: {rolledBackSha256[..8]}）并停止运行。";
                     _log?.Invoke(error);
                     return;
+                }
+                else
+                {
+                    _log?.Invoke($"回滚完整性校验失败：probe={probeAfter.State}, shaMatches={shaMatches} " +
+                                $"[原:{originalSha256?[..8]}, 备:{backupSha256?[..8]}, 滚:{rolledBackSha256?[..8]}]");
                 }
             }
             catch (Exception ex)
@@ -453,7 +484,10 @@ public sealed class DataFormatGuard
             // 回滚未成功 -> 进入 RecoveryFailed，绝不删除 backup！
             LastTransactionState = WriteTransactionState.RecoveryFailed;
             LastPreservedBackup = backup;
-            error = $"{triggerReason}；尝试回滚原有效标记失败（状态：RecoveryFailed）。原有效备份已严格保留：{backup}，程序已安全停止，请人工确认处理。";
+            string hashInfo = rolledBackSha256 != null
+                ? $"原哈希:{originalSha256?[..8]}, 回滚哈希:{rolledBackSha256[..8]}"
+                : "回滚文件不可读取";
+            error = $"{triggerReason}；尝试回滚原有效标记失败（状态：RecoveryFailed，{hashInfo}）。原有效备份已严格保留：{backup}，程序已安全停止，请人工确认处理。";
             _log?.Invoke(error);
         }
         else
