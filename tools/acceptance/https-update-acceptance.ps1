@@ -461,7 +461,7 @@ try {
     $s1dAlive = Test-TrackedAlive -ProcessId $s1d.Process.id -StartedAt $s1d.Process.started
     $s1dOk = ($null -ne $s1d.Report) -and ($s1d.Report.has_update -eq $false) -and
              ([string]$s1d.Report.check_error).Length -gt 0 -and $s1dAlive
-    Record-Result -Name 'S1d 更新服务器不可达时检查优雅失败（应用保持运行）' -Passed $s1dOk `
+    Record-Result -Name 'S1d 更新服务器不可达时检查优雅失败（应用保持运行，备份不受影响）' -Passed $s1dOk `
         -Detail ("error={0} alive={1}" -f $s1d.Report.check_error, $s1dAlive)
     Stop-TrackedProcess -ProcessId $s1d.Process.id -StartedAt $s1d.Process.started -Label 's1d'
 
@@ -656,9 +656,12 @@ try {
     # ------------------------------------------------ final evidence
     $allRequests = Get-ServerRequests
     $protocols = @($allRequests | ForEach-Object { $_.tls_protocol } | Select-Object -Unique)
-    Record-Result -Name '全程证据：HTTPS 地址/TLS 协议/请求清单已留档（详见请求日志）' `
+    $hasTls13 = $protocols -contains 'Tls13'
+    $hasTls12 = $protocols -contains 'Tls12'
+    $negotiatedSummary = if ($hasTls13 -and -not $hasTls12) { 'TLS 1.3 (实测全链路)' } elseif ($hasTls12 -and -not $hasTls13) { 'TLS 1.2 (实测)' } else { 'TLS 1.2+ (混用/自适应)' }
+    Record-Result -Name "全程证据：HTTPS 地址/TLS 协议/请求清单已留档（实测协商：$negotiatedSummary）" `
         -Passed ($allRequests.Count -gt 0 -and ($protocols | Where-Object { $_ -notmatch '^Tls1[23]$' }).Count -eq 0) `
-        -Detail ("url={0} requests={1} protocols={2}" -f $manifestBaseUrl, $allRequests.Count, ($protocols -join ','))
+        -Detail ("url={0} requests={1} protocols={2} hasTls13={3} hasTls12={4}" -f $manifestBaseUrl, $allRequests.Count, ($protocols -join ','), $hasTls13, $hasTls12)
     Record-Result -Name '本验收不声明公司已部署更新服务器（本地隔离证据级别）' -Passed $true `
         -Detail ("server={0} cert=ephemeral-selfsigned note={1}" -f $manifestBaseUrl, $serverFacts.isolation_note)
 }
