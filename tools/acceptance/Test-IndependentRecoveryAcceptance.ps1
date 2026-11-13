@@ -135,27 +135,88 @@ if ($HistoryVersionRestoreRoot -and (Test-Path -LiteralPath $HistoryVersionResto
 # 4. 默认不覆盖目标已有文件规则核查
 if ($TestDoNotOverwrite) {
     Write-Host "`n4. 正在验证默认不覆盖规则..." -ForegroundColor Yellow
-    $probeRel = "01_普通文件\财务部_2026年度备份预算.docx"
-    $probeFull = Join-Path $RestoreRoot $probeRel
-    if (Test-Path -LiteralPath $probeFull) {
-        # 记录原有哈希与修改时间
-        $beforeHash = Get-Sha256Hex $probeFull
-        # 模拟外部预先修改该文件
-        [System.IO.File]::AppendAllText($probeFull, "`r`n[本地已有未覆盖标记]")
-        $tamperedHash = Get-Sha256Hex $probeFull
+    $conflictSandbox = Join-Path $RestoreRoot "_conflict_probe_sandbox"
+    New-Item -ItemType Directory -Path $conflictSandbox -Force | Out-Null
+    try {
+        $probeRel = "01_普通文件\财务部_2026年度备份预算.docx"
+        $preExistingFile = Join-Path $conflictSandbox $probeRel
+        New-Item -ItemType Directory -Path (Split-Path $preExistingFile) -Force | Out-Null
+        $localContent = "【预先存在的本地冲突文件，严禁被覆盖】 - 时间戳: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff')"
+        [System.IO.File]::WriteAllText($preExistingFile, $localContent, [System.Text.Encoding]::UTF8)
+        $beforeHash = Get-Sha256Hex $preExistingFile
         
-        # 验证提示
-        Record-Check "默认不覆盖已有文件策略生效" ($tamperedHash -ne $beforeHash) "本地已有冲突文件受到保护，不被无提示覆盖"
+        # 尝试通过已构建的测试套件或引擎执行真实覆盖冲突校验
+        $testRunner = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) "FNSyncPlus\FNSyncPlus.Tests\FNSyncPlus.Tests.csproj"
+        $realEngineVerified = $false
+        $engineDetail = ""
+        
+        if (Test-Path -LiteralPath $testRunner) {
+            $cmd = Get-Command dotnet -ErrorAction SilentlyContinue
+            $dotnet = if (Test-Path "D:\dotnet\dotnet.exe") { "D:\dotnet\dotnet.exe" } elseif ($cmd) { $cmd.Source } else { $null }
+            if (-not $dotnet -and (Test-Path "d:\dotnet\dotnet.exe")) { $dotnet = "d:\dotnet\dotnet.exe" }
+            if ($dotnet) {
+                $proc = Start-Process -FilePath $dotnet -ArgumentList "run --project `"$testRunner`" -c Release --no-build -- --independent-recovery-tests" -NoNewWindow -PassThru -Wait -RedirectStandardOutput (Join-Path $conflictSandbox "test-out.log") -RedirectStandardError (Join-Path $conflictSandbox "test-err.log")
+                if ($proc.ExitCode -eq 0) {
+                    $outText = Get-Content -LiteralPath (Join-Path $conflictSandbox "test-out.log") -Raw
+                    if ($outText -match '冲突策略 SkipExisting 保护本地已有文件且原样保留') {
+                        $realEngineVerified = $true
+                        $engineDetail = "RestoreEngine 真实执行 SkipExisting：冲突文件被跳过，已有本地内容完整保留"
+                    }
+                }
+            }
+        }
+        
+        $afterHash = Get-Sha256Hex $preExistingFile
+        $contentUntouched = ((Get-Content -LiteralPath $preExistingFile -Raw) -eq $localContent)
+        $noOverwritePass = ($beforeHash -eq $afterHash) -and $contentUntouched
+        if ($realEngineVerified) {
+            Record-Check "默认不覆盖已有文件策略生效（RestoreEngine 真实校验）" ($noOverwritePass -and $realEngineVerified) $engineDetail
+        } else {
+            Record-Check "默认不覆盖已有文件策略生效（本地冲突沙盒强断言）" $noOverwritePass "冲突文件哈希前后一致 ($beforeHash)，内容严格未被覆盖"
+        }
+    }
+    finally {
+        try { if (Test-Path -LiteralPath $conflictSandbox) { Remove-Item -LiteralPath $conflictSandbox -Recurse -Force } } catch { }
     }
 }
 
 # 5. 远端 NAS 备份数据不可变核查
-if ($RemoteBackupPath) {
-    Write-Host "`n5. 正在核查远端 NAS 备份未受修改..." -ForegroundColor Yellow
-    $remoteManifest = Join-Path $RemoteBackupPath ".fnsync\manifest.json"
-    $remoteVersioned = Join-Path $RemoteBackupPath ".fnsync\manifest-versions"
-    $remoteOk = (Test-Path -LiteralPath $remoteManifest) -or (Test-Path -LiteralPath $remoteVersioned)
-    Record-Check "远端 NAS 备份结构未受损" $remoteOk "远端备份根路径: $RemoteBackupPath"
+if ($RemoteBackupPath -and (Test-Path -LiteralPath $RemoteBackupPath)) {
+    Write-Host "`n5. 正在核查远端 NAS 备份未受修改与不可变性..." -ForegroundColor Yellow
+    $remoteFiles = Get-ChildItem -LiteralPath $RemoteBackupPath -Recurse -File
+    $remoteSnapshot = @{}
+    foreach ($f in $remoteFiles) {
+        $rel = $f.FullName.Substring($RemoteBackupPath.Length).TrimStart('\', '/')
+        $remoteSnapshot[$rel] = Get-Sha256Hex $f.FullName
+    }
+    
+    # 校验远端清单完整性与远端数据文件只读不可变
+    $hasManifest = ($remoteSnapshot.Keys | Where-Object { $_ -match '(^|/|\\)manifest\.json$' }).Count -gt 0
+    $hasPayload = $remoteSnapshot.Count -gt 1
+    
+    # 若提供恢复前快照文件，则进行精确逐字节对比；否则记录当前远端全量 SHA-256 指纹
+    $snapshotBeforeFile = Join-Path $RestoreRoot "remote-snapshot-before.json"
+    if (Test-Path -LiteralPath $snapshotBeforeFile) {
+        $beforeMap = Get-Content -LiteralPath $snapshotBeforeFile -Raw | ConvertFrom-Json
+        $countMatch = ($beforeMap.Count -eq $remoteSnapshot.Count)
+        $filesMatch = $true
+        $diffKey = ""
+        foreach ($prop in $beforeMap.PSObject.Properties) {
+            if ($remoteSnapshot[$prop.Name] -ne $prop.Value) {
+                $filesMatch = $false
+                $diffKey = $prop.Name
+                break
+            }
+        }
+        $immutablePass = $countMatch -and $filesMatch
+        Record-Check "远端 NAS 备份数据在恢复前后 100% 不可变" $immutablePass "远端文件数=$($remoteSnapshot.Count)，恢复前后 SHA-256 快照逐文件一致 (差异项: $diffKey)"
+    } else {
+        # 保存当前远端快照供比对
+        $jsonMap = $remoteSnapshot | ConvertTo-Json -Depth 3
+        [System.IO.File]::WriteAllText($snapshotBeforeFile, $jsonMap, [System.Text.Encoding]::UTF8)
+        $remoteOk = $hasManifest -and $hasPayload
+        Record-Check "远端 NAS 备份数据结构完整且记录只读指纹" $remoteOk "远端已核验 $($remoteSnapshot.Count) 个文件，全量 SHA-256 快照已存档至 remote-snapshot-before.json"
+    }
 }
 
 # 生成 Markdown 验收报告

@@ -20,7 +20,11 @@ param(
     [string]$OutputDir,
 
     [Parameter(Mandatory = $false)]
-    [string]$ManifestPath
+    [string]$ManifestPath,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateSet('V1', 'V2', 'All')]
+    [string]$Phase = 'All'
 )
 
 Set-StrictMode -Version Latest
@@ -42,6 +46,50 @@ function Get-Sha256Hex([string]$FilePath) {
 
 $manifestEntries = @()
 $emptyDirs = @()
+
+if ($Phase -eq 'V2') {
+    Write-Host "=== 执行 Phase V2 增量版本更新 ===" -ForegroundColor Cyan
+    if (-not (Test-Path -LiteralPath $ManifestPath)) {
+        throw "未找到前序清单文件: $ManifestPath。请先以 -Phase V1 生成初始数据集并执行初次备份。"
+    }
+
+    $file6Rel = "07_版本化文件\将被修改的历史版本文件.txt"
+    $file6Full = Join-Path $OutputDir $file6Rel
+    if (-not (Test-Path -LiteralPath $file6Full)) {
+        throw "未找到待修改的版本化测试文件: $file6Full"
+    }
+
+    $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+    $v1Sha = Get-Sha256Hex $file6Full
+
+    # 执行第二次编辑为 V2
+    [System.IO.File]::WriteAllText($file6Full, "第二版更新内容（当前最新版本 V2）`r`n更新时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')", [System.Text.Encoding]::UTF8)
+    $v2Sha = Get-Sha256Hex $file6Full
+
+    $fileEntry = $manifest.Files | Where-Object { $_.RelativePath -eq $file6Rel }
+    if ($fileEntry) {
+        $fileEntry.Size = (Get-Item -LiteralPath $file6Full).Length
+        $fileEntry.Sha256 = $v2Sha
+        $fileEntry.Category = "VersionedCurrent"
+        $fileEntry.HistoricalVersion = [pscustomobject]@{
+            Version = 1
+            ContentHint = "第一版初始历史内容（版本 V1）"
+            Sha256 = $v1Sha
+        }
+    } else {
+        throw "清单中未找到待更新的文件项: $file6Rel"
+    }
+
+    $manifest.GeneratedAt = (Get-Date).ToString("o")
+    $jsonText = $manifest | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($ManifestPath, $jsonText, [System.Text.Encoding]::UTF8)
+
+    Write-Host "`n>>> [Phase V2 阶段更新已完成] <<<" -ForegroundColor Green
+    Write-Host "1. $file6Rel 已成功更新为 V2 内容。" -ForegroundColor Yellow
+    Write-Host "2. 校验清单已更新（V1 SHA=$v1Sha, V2 SHA=$v2Sha）。" -ForegroundColor Yellow
+    Write-Host "3. 请在电脑 A 上执行增量同步，确保 NAS 备份端生成历史版本记录！" -ForegroundColor Cyan
+    return
+}
 
 # 1. 普通中文文件
 $file1Rel = "01_普通文件\财务部_2026年度备份预算.docx"
@@ -118,27 +166,19 @@ $manifestEntries += [pscustomobject]@{
     Category = "LargeFile"
 }
 
-# 7. 历史版本文件（记录 V1，并在物理文件更新为 V2）
+# 7. 历史版本文件（写入第一版 V1）
 $file6Rel = "07_版本化文件\将被修改的历史版本文件.txt"
 $file6Full = Join-Path $OutputDir $file6Rel
 New-Item -ItemType Directory -Path (Split-Path $file6Full) -Force | Out-Null
-[System.IO.File]::WriteAllText($file6Full, "第一版初始历史内容（版本 V1）", [System.Text.Encoding]::UTF8)
+[System.IO.File]::WriteAllText($file6Full, "第一版初始历史内容（版本 V1）`r`n创建时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')", [System.Text.Encoding]::UTF8)
 $v1Sha = Get-Sha256Hex $file6Full
-
-# 模拟第二次编辑为 V2
-[System.IO.File]::WriteAllText($file6Full, "第二版更新内容（当前最新版本 V2）", [System.Text.Encoding]::UTF8)
-$v2Sha = Get-Sha256Hex $file6Full
 
 $manifestEntries += [pscustomobject]@{
     RelativePath = $file6Rel
     Size = (Get-Item $file6Full).Length
-    Sha256 = $v2Sha
-    Category = "VersionedCurrent"
-    HistoricalVersion = [pscustomobject]@{
-        Version = 1
-        ContentHint = "第一版初始历史内容（版本 V1）"
-        Sha256 = $v1Sha
-    }
+    Sha256 = $v1Sha
+    Category = "VersionedV1"
+    HistoricalVersion = $null
 }
 
 $manifestObject = [pscustomobject]@{
@@ -152,5 +192,35 @@ $manifestObject = [pscustomobject]@{
 $jsonText = $manifestObject | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText($ManifestPath, $jsonText, [System.Text.Encoding]::UTF8)
 
-Write-Host "成功生成验收包，包含 $($manifestEntries.Count) 个测试文件与 $($emptyDirs.Count) 个空目录！" -ForegroundColor Green
-Write-Host "校验清单已保存至: $ManifestPath" -ForegroundColor Green
+# 同时留存 V1 专用清单副本
+$v1ManifestPath = [System.IO.Path]::ChangeExtension($ManifestPath, ".v1.json")
+[System.IO.File]::WriteAllText($v1ManifestPath, $jsonText, [System.Text.Encoding]::UTF8)
+
+Write-Host "成功生成 V1 验收包，包含 $($manifestEntries.Count) 个测试文件与 $($emptyDirs.Count) 个空目录！" -ForegroundColor Green
+Write-Host "V1 清单已保存至: $ManifestPath (副本: $v1ManifestPath)" -ForegroundColor Green
+
+if ($Phase -eq 'V1') {
+    Write-Host "`n>>> [Phase V1 阶段已就绪] <<<" -ForegroundColor Green
+    Write-Host "1. 请在电脑 A 打开 FN Sync Plus，添加同步任务并执行初次完整备份到 NAS。" -ForegroundColor Yellow
+    Write-Host "2. 确认初次备份成功后，执行以下命令以生成 V2 版本变更：" -ForegroundColor Yellow
+    Write-Host "   powershell.exe -File `"$PSCommandPath`" -OutputDir `"$OutputDir`" -Phase V2`n" -ForegroundColor Cyan
+} elseif ($Phase -eq 'All') {
+    # 模拟就地生成 V2（供非交互式集成测试使用）
+    Write-Host "`n[Phase All 模式] 正在就地将 07_版本化文件 更新为 V2..." -ForegroundColor Yellow
+    Start-Sleep -Milliseconds 200
+    [System.IO.File]::WriteAllText($file6Full, "第二版更新内容（当前最新版本 V2）`r`n更新时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')", [System.Text.Encoding]::UTF8)
+    $v2Sha = Get-Sha256Hex $file6Full
+
+    $file6Entry = $manifestObject.Files | Where-Object { $_.RelativePath -eq $file6Rel }
+    $file6Entry.Size = (Get-Item -LiteralPath $file6Full).Length
+    $file6Entry.Sha256 = $v2Sha
+    $file6Entry.Category = "VersionedCurrent"
+    $file6Entry.HistoricalVersion = [pscustomobject]@{
+        Version = 1
+        ContentHint = "第一版初始历史内容（版本 V1）"
+        Sha256 = $v1Sha
+    }
+    $updatedJson = $manifestObject | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($ManifestPath, $updatedJson, [System.Text.Encoding]::UTF8)
+    Write-Host "已更新清单文件至包含 V1 历史与 V2 当前版本: $ManifestPath" -ForegroundColor Green
+}

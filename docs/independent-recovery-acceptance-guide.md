@@ -26,20 +26,32 @@
 
 ---
 
-## 三、电脑 A 操作步骤（生成数据集并执行备份）
+## 三、电脑 A 操作步骤（两阶段生成数据集与版本化备份）
 
-1. 在电脑 A 上打开 PowerShell，执行生成工具生成标准验收数据集与哈希清单：
+1. **第一阶段（Phase V1）：生成初始数据集与 V1 清单**
+   在电脑 A 打开 PowerShell，运行生成工具：
    ```powershell
    powershell.exe -ExecutionPolicy Bypass -File "tools\acceptance\New-RecoveryAcceptancePackage.ps1" `
        -OutputDir "D:\TestRestoreData_Source" `
-       -ManifestPath "D:\TestRestoreData_Source\recovery-manifest.json"
+       -ManifestPath "D:\TestRestoreData_Source\recovery-manifest.json" `
+       -Phase V1
    ```
-2. 启动电脑 A 的 FN Sync Plus 客户端：
-   - 添加同步任务：本地源目录选定 `D:\TestRestoreData_Source`。
+2. **执行电脑 A 初次完整备份**：
+   - 启动 FN Sync Plus，添加同步任务：本地源目录选定 `D:\TestRestoreData_Source`。
    - 目标 NAS 选定测试目录 `IndependentRecoveryTest`。
-   - 执行同步，确保所有文件（包含普通中文、超长名称、多层目录、空目录）全部上传完毕。
-3. 在本地修改一次 `07_版本化文件\将被修改的历史版本文件.txt`，再次触发同步，生成版本化快照。
-4. 将 `recovery-manifest.json` 单独留存（或通过 U 盘/共享传递至电脑 B，用于后续自动化比对）。
+   - 执行同步，确保包含普通中文、超长名称、多层目录、空目录及 V1 文件的初次备份全部上传完毕。
+3. **第二阶段（Phase V2）：生成增量修改并更新清单**：
+   在电脑 A 再次运行生成工具（Phase V2）：
+   ```powershell
+   powershell.exe -ExecutionPolicy Bypass -File "tools\acceptance\New-RecoveryAcceptancePackage.ps1" `
+       -OutputDir "D:\TestRestoreData_Source" `
+       -ManifestPath "D:\TestRestoreData_Source\recovery-manifest.json" `
+       -Phase V2
+   ```
+   工具会自动将 `07_版本化文件\将被修改的历史版本文件.txt` 升级为 V2 内容，并在 `recovery-manifest.json` 中完整记录 V1 历史版本哈希与 V2 当前哈希。
+4. **执行电脑 A 增量同步**：
+   - 在 FN Sync Plus 触发同步，将 V2 修改增量提交至 NAS，使远端形成真实的历史快照（Sequence 1 与 Sequence 2）。
+5. 将最终的 `recovery-manifest.json` 拷贝传递至电脑 B，用于后续自动化比对。
 
 ---
 
