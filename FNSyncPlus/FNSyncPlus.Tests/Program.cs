@@ -6215,10 +6215,31 @@ namespace FNSyncPlus.Tests
         {
             Console.WriteLine("\n--- 28. 应用图标与托盘尺寸校验 ---");
             string path = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+            using var reader = new BinaryReader(File.OpenRead(path));
+            bool isIcon = reader.ReadUInt16() == 0 && reader.ReadUInt16() == 1;
+            Assert(isIcon, "发布资源的文件头为 Windows ICO");
+            if (!isIcon) return;
+            var frameSizes = new HashSet<int>();
+            int frameCount = reader.ReadUInt16();
+            for (int frame = 0; frame < frameCount; frame++)
+            {
+                int width = reader.ReadByte();
+                int height = reader.ReadByte();
+                reader.BaseStream.Seek(6, SeekOrigin.Current);
+                uint length = reader.ReadUInt32();
+                uint offset = reader.ReadUInt32();
+                if (width == height && length > 0 && offset >= 6 + 16 * frameCount &&
+                    (long)offset + length <= reader.BaseStream.Length)
+                    frameSizes.Add(width == 0 ? 256 : width);
+            }
             foreach (int size in new[] { 16, 20, 24, 32, 48, 64, 128, 256 })
+                Assert(frameSizes.Contains(size), $"发布图标包含 {size} × {size} 帧");
+            // GDI+ can choose and scale a smaller image when asked for the 256 px icon.
+            // The frame table above checks the asset; Windows loading is tested at tray sizes.
+            foreach (int size in new[] { 16, 20, 24 })
             {
                 using var icon = new System.Drawing.Icon(path, size, size);
-                Assert(icon.Width == size && icon.Height == size, $"发布图标包含 {size} × {size} 帧");
+                Assert(icon.Width == size && icon.Height == size, $"Windows 可加载 {size} × {size} 托盘图标");
             }
         }
 
