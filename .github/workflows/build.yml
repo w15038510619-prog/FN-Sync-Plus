@@ -81,6 +81,14 @@ jobs:
     - name: Run UI Isolation Tests
       run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release --no-build -- --ui-isolation-tests
 
+    - name: Verify Self-contained Acceptance Runner (Offline)
+      shell: pwsh
+      run: |
+        $sha = git rev-parse HEAD
+        $publish = Join-Path $env:RUNNER_TEMP 'fn-acceptance-runner'
+        .\tools\acceptance\Publish-AcceptanceRunner.ps1 -SourceSha $sha -OutputDirectory $publish
+        .\tools\acceptance\Test-AcceptanceRunnerPublish.ps1 -Runner (Join-Path $publish 'FNSyncPlus.AcceptanceRunner.exe') -SourceSha $sha -OutputDirectory (Join-Path $env:RUNNER_TEMP 'fn-acceptance-results')
+
     - name: Run Automated Tests
       run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release --no-build
 

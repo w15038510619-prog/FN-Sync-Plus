@@ -10,6 +10,7 @@ on:
   pull_request:
     paths:
       - 'tools/acceptance/https-update-acceptance.ps1'
+      - '.github/workflows/https-update-acceptance.yml'
       - 'tools/FNSyncPlus.LocalUpdateServer/**'
       - 'FNSyncPlus/FNSyncPlus.Core/Updates/**'
       - 'FNSyncPlus/FNSyncPlus.Updater/**'
