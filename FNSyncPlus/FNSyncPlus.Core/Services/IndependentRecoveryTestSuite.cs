@@ -97,6 +97,23 @@ public sealed class IndependentRecoveryTestSuite
             return map;
         }
 
+        await Case("历史文件名显示与 UTF-8 报告保留完整中文路径", async () =>
+        {
+            const string original = @"项目资料/\u7248\u672c\u8bf4\u660e.txt";
+            const string expected = "项目资料/版本说明.txt";
+            string displayed = RestoreDisplayText.OriginalPath(original);
+            string report = Path.Combine(machineB, "unicode-report.txt");
+            await RestoreDisplayText.WriteReportAsync(report, [displayed]);
+            byte[] bytes = await File.ReadAllBytesAsync(report, token);
+            bool ok = displayed == expected && RestoreDisplayText.OriginalPath(expected) == expected &&
+                RestoreDisplayText.OriginalPath(@"folder\u7248.txt") == @"folder\u7248.txt" &&
+                RestoreDisplayText.OriginalPath(@"\uD83D\uDCC1.txt") == "📁.txt" &&
+                RestoreDisplayText.OriginalPath(@"\u002f\u7248.txt") == @"\u002f\u7248.txt" &&
+                bytes.AsSpan().StartsWith(Encoding.UTF8.GetPreamble()) &&
+                (await File.ReadAllLinesAsync(report, token)).Single() == expected;
+            return (ok, displayed);
+        });
+
         // 1. Environment level declaration + physical separation of the simulated remote.
         await Case("环境等级声明：独立会话+模拟远端存储（真实独立 Windows 环境 BLOCKED）", () =>
         {

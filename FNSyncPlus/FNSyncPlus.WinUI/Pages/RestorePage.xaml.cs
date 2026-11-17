@@ -15,6 +15,21 @@ namespace FNSyncPlus.WinUI.Pages
         {
             ViewModel = AppServices.GetService<RestoreViewModel>();
             InitializeComponent();
+
+            if (AppServices.IsUiVisualAcceptance &&
+                Array.IndexOf(Environment.GetCommandLineArgs(), "--restore-history-fixture") >= 0)
+            {
+                ViewModel.HistoryFilesList.Add(new(new FNSyncPlus.Core.Models.ManifestHistoryEntry
+                {
+                    OriginalRel = "设计资料/季度报表.txt", ArchivedAt = DateTimeOffset.Now, Reason = "superseded", Size = 32
+                }));
+                ViewModel.HistoryFilesList.Add(new(new FNSyncPlus.Core.Models.ManifestHistoryEntry
+                {
+                    OriginalRel = @"项目资料/\u7248\u672c\u8bf4\u660e.txt", ArchivedAt = DateTimeOffset.Now.AddDays(-1),
+                    Reason = "renamed", Size = 24
+                }));
+                RestoreTabs.SelectedIndex = 1;
+            }
         }
 
         private async void BtnBrowseNasRestore_Click(object sender, RoutedEventArgs e)

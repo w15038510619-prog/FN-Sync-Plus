@@ -42,5 +42,12 @@ switch ($Mode) {
     }
 }
 
-& $runner @runnerArgs
-exit $LASTEXITCODE
+$previousEncoding = [Console]::OutputEncoding
+try {
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    & $runner @runnerArgs
+    $runnerExitCode = $LASTEXITCODE
+} finally {
+    [Console]::OutputEncoding = $previousEncoding
+}
+exit $runnerExitCode

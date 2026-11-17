@@ -27,7 +27,7 @@ namespace FNSyncPlus.WinUI.ViewModels
     {
         public ManifestHistoryEntry Entry { get; }
         public RestoreHistoryDisplayItem(ManifestHistoryEntry entry) => Entry = entry;
-        public string OriginalRel => Entry.OriginalRel;
+        public string DisplayPath => RestoreDisplayText.OriginalPath(Entry.OriginalRel);
         public string ArchivedAt => Entry.ArchivedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
         public string Reason => Entry.Reason switch
         {
@@ -236,7 +236,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 {
                     PackageFiles.Add(new RestoreFileDisplayItem
                     {
-                        OriginalRelPath = f.OriginalRelPath,
+                        OriginalRelPath = RestoreDisplayText.OriginalPath(f.OriginalRelPath),
                         StoredRelPath = f.StoredRelPath,
                         Size = f.Size,
                         IsLongName = f.IsLongName,
@@ -437,6 +437,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
             var package = SelectedPackage;
             var history = SelectedHistory.Entry;
+            string displayPath = SelectedHistory.DisplayPath;
             string destination = LocalRestoreTarget;
             var policy = ConflictPolicyIndex switch
             {
@@ -454,6 +455,8 @@ namespace FNSyncPlus.WinUI.ViewModels
             DetailedErrorMessage = string.Empty;
             FailedFilesList.Clear();
             HasFailedFiles = false;
+            RestoreLogs.Clear();
+            RestoreLogs.Add($"所选历史版本：{displayPath}（{history.ArchivedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss}）");
             try
             {
                 var report = await _restoreEngine.RestorePackageHistoryAsync(provider, package, destination, history, policy);
@@ -466,13 +469,15 @@ namespace FNSyncPlus.WinUI.ViewModels
                 RestoreStatusText = report.FailedFiles > 0
                     ? $"历史版本：{report.StatusMessage}。请重新选择该历史版本后重试。"
                     : $"历史版本：{report.StatusMessage}";
-                foreach (var item in report.FailedItems) RestoreLogs.Add($"[历史恢复失败] {item.OriginalRel}: {item.ErrorMessage}");
+                RestoreLogs.Add(RestoreStatusText);
+                foreach (var item in report.FailedItems) RestoreLogs.Add($"[历史恢复失败] {RestoreDisplayText.OriginalPath(item.OriginalRel)}: {item.ErrorMessage}");
             }
             catch (OperationCanceledException) { RestoreStatusText = "历史恢复已取消。"; }
             catch (Exception ex)
             {
                 DetailedErrorMessage = ex.ToString();
                 RestoreStatusText = $"历史恢复失败: {ex.Message}";
+                RestoreLogs.Add(RestoreStatusText);
                 HasFailedFiles = true;
             }
             finally { IsRestoring = false; }
@@ -507,12 +512,12 @@ namespace FNSyncPlus.WinUI.ViewModels
                     lines.Add("失败文件清单与原因:");
                     foreach (var f in FailedFilesList)
                     {
-                        lines.Add($"[FAIL] {f.OriginalRel} -> {f.ErrorMessage}");
+                        lines.Add($"[FAIL] {RestoreDisplayText.OriginalPath(f.OriginalRel)} -> {f.ErrorMessage}");
                         if (!string.IsNullOrEmpty(f.DetailedException)) lines.Add($"  Exception: {f.DetailedException}");
                     }
                 }
 
-                await File.WriteAllLinesAsync(logFile, lines);
+                await RestoreDisplayText.WriteReportAsync(logFile, lines);
                 RestoreStatusText = $"报告已导出至: {logFile}";
             }
             catch (Exception ex)

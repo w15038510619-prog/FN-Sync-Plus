@@ -74,7 +74,7 @@
 
         <!-- 3. RESTORABLE FILES LIST -->
         <Border Grid.Row="2" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12">
-            <Pivot>
+            <Pivot x:Name="RestoreTabs">
               <PivotItem Header="当前文件">
             <Grid RowSpacing="8">
                 <Grid.RowDefinitions>
@@ -127,10 +127,16 @@
                               SelectedItem="{x:Bind ViewModel.SelectedHistory, Mode=TwoWay}"
                               IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"
                               SelectionMode="Single">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
                         <ListView.ItemTemplate>
-                            <DataTemplate>
+                            <DataTemplate x:DataType="vm:RestoreHistoryDisplayItem">
                                 <StackPanel Padding="6,4" Spacing="2">
-                                    <TextBlock Text="{Binding OriginalRel}" ToolTipService.ToolTip="{Binding OriginalRel}" TextTrimming="CharacterEllipsis" FontWeight="SemiBold" />
+                                    <TextBlock Text="{x:Bind DisplayPath}" ToolTipService.ToolTip="{x:Bind DisplayPath}"
+                                               TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis" FontWeight="SemiBold" />
                                     <StackPanel Orientation="Horizontal" Spacing="12">
                                         <TextBlock Text="{Binding ArchivedAt}" FontSize="11" />
                                         <TextBlock Text="{Binding Reason}" FontSize="11" />

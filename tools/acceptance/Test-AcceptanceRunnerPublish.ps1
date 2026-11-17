@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Runner,
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{40}$')][string]$SourceSha,
@@ -71,7 +71,12 @@ try {
     $null = Invoke-Report 'verify-v1' 0 @('--verify-restored','--target',$localDir,'--fixture',$fixtureJson)
     $null = Invoke-Report 'fixture-v2' 0 @('--update-fixture','--source',$localDir,'--fixture',$fixtureJson)
     $null = Invoke-Report 'verify-v2' 0 @('--verify-restored','--target',$localDir,'--fixture',"$fixtureJson.v2.json")
-    $null = Invoke-Report 'reject-current-as-history' 1 @('--verify-restored','--target',$localDir,'--fixture',"$fixtureJson.v2.json",'--history')
+    $historyMismatch = Invoke-Report 'reject-current-as-history' 1 @('--verify-restored','--target',$localDir,'--fixture',"$fixtureJson.v2.json",'--history')
+    $displayPath = '版本/可恢复旧版.txt'
+    $historyOutput = Get-Content -LiteralPath (Join-Path $root 'reject-current-as-history.json') -Raw -Encoding utf8
+    if ($historyMismatch.Results[0].Evidence.MismatchedPaths -notcontains $displayPath -or -not $historyOutput.Contains($displayPath)) {
+        throw 'The console report did not preserve a readable Chinese history path.'
+    }
 } finally {
     Pop-Location
     $env:Path = $originalPath

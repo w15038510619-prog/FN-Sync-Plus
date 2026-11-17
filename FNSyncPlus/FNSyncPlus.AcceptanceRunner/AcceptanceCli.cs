@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.WebSockets;
 using System.Reflection;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.Unicode;
 using FNSyncPlus.Core.Services;
 
 namespace FNSyncPlus.Acceptance;
@@ -14,6 +16,7 @@ public static partial class AcceptanceCli
     private sealed class InvalidInput(string reason) : Exception(reason);
 
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
+    private static readonly JsonSerializerOptions ConsoleJson = new(Json) { Encoder = JavaScriptEncoder.Create(UnicodeRanges.All) };
     private static readonly string Build = typeof(AcceptanceCli).Assembly
         .GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion;
 
@@ -110,7 +113,7 @@ public static partial class AcceptanceCli
 
         if (results.Count == 0) results.Add(new(command, level, "FAIL", null, "No results were produced."));
         int exitCode = ExitCode(results);
-        Console.WriteLine(JsonSerializer.Serialize(new { Build, AcceptanceId = acceptanceId, ExitCode = exitCode, Results = results }, Json));
+        Console.WriteLine(JsonSerializer.Serialize(new { Build, AcceptanceId = acceptanceId, ExitCode = exitCode, Results = results }, ConsoleJson));
         return exitCode;
     }
 
