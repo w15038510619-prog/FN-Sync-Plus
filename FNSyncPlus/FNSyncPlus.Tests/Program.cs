@@ -624,7 +624,7 @@ namespace FNSyncPlus.Tests
                 string isolatedSessionPath = isolatedSession.IsolatedSessionPath!;
                 var reloadedSession = AppSettings.LoadIsolatedTestSession(isolatedId);
                 Assert(reloadedSession.IsInMemoryOnly && reloadedSession.Tasks.Single().TaskName == "隔离重启样本" &&
-                    isolatedSessionPath.StartsWith(Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests"), StringComparison.OrdinalIgnoreCase) &&
+                    isolatedSessionPath.StartsWith(AppStorageRoot.TestSessionsRoot(), StringComparison.OrdinalIgnoreCase) &&
                     AppSettings.LoadFromPath(config).Tasks.Single().TaskName == "失败测试",
                     "指定的隔离测试会话可单独保存并重启加载，不修改其他配置");
                 File.WriteAllText(isolatedSessionPath, "{broken");
@@ -635,7 +635,7 @@ namespace FNSyncPlus.Tests
                     "损坏的隔离测试配置不会自动覆盖");
                 var bounded = AppSettings.LoadIsolatedTestSession(Guid.NewGuid());
                 bounded.SetIsolatedTestBoundary("Codex_FN_Test_allowed");
-                var boundedTask = new SyncTask { SourceFolder = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", "source"),
+                var boundedTask = new SyncTask { SourceFolder = Path.Combine(AppStorageRoot.TestSessionsRoot(), "source"),
                     DestinationFolder = "我的文件/Codex_FN_Test_allowed/backup", ProviderType = StorageProviderType.FnOsPersonal };
                 bounded.EnsureIsolatedTestTask(boundedTask);
                 bool outsideRejected = false;
@@ -650,7 +650,7 @@ namespace FNSyncPlus.Tests
                 Assert(outsideRejected && sourceRejected, "持久隔离会话拒绝测试目录外的源目录或 NAS 目标");
                 var betaBounded = AppSettings.LoadVersionedBetaTestProfile(Guid.NewGuid());
                 betaBounded.SetIsolatedTestBoundary("Codex_FN_Test_allowed");
-                var betaBoundedTask = new SyncTask { SourceFolder = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", "source"),
+                var betaBoundedTask = new SyncTask { SourceFolder = Path.Combine(AppStorageRoot.TestSessionsRoot(), "source"),
                     DestinationFolder = "我的文件/Codex_FN_Test_allowed/backup", ProviderType = StorageProviderType.FnOsPersonal };
                 betaBounded.EnsureIsolatedTestTask(betaBoundedTask);
                 betaBoundedTask.ExperimentalExistingRoot = "我的文件/Codex_FN_Test_other/existing";
@@ -666,7 +666,7 @@ namespace FNSyncPlus.Tests
                 else
                 {
                 string junctionId = Guid.NewGuid().ToString("N");
-                string junctionBase = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", "BoundaryJunction_" + junctionId);
+                string junctionBase = Path.Combine(AppStorageRoot.TestSessionsRoot(), "BoundaryJunction_" + junctionId);
                 string junctionOutside = Path.Combine(Path.GetTempPath(), "FNSync_Outside_" + junctionId);
                 string junctionChild = Path.Combine(junctionOutside, "child");
                 string junctionPath = Path.Combine(junctionBase, "link");
@@ -3748,7 +3748,7 @@ namespace FNSyncPlus.Tests
 
             var firstSessionId = Guid.NewGuid();
             string firstRemoteRoot = "Codex_FN_Test_" + Guid.NewGuid().ToString("N");
-            string firstSource = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", "FirstPublicationSource_" + firstSessionId.ToString("N"));
+            string firstSource = Path.Combine(AppStorageRoot.TestSessionsRoot(), "FirstPublicationSource_" + firstSessionId.ToString("N"));
             Directory.CreateDirectory(firstSource);
             Directory.CreateDirectory(Path.Combine(root, firstRemoteRoot));
             File.WriteAllText(Path.Combine(firstSource, "sample.txt"), "updated before restart");
@@ -4409,7 +4409,7 @@ namespace FNSyncPlus.Tests
 
             var betaSettings = AppSettings.LoadVersionedBetaTestProfile(Guid.NewGuid());
             betaSettings.SetIsolatedTestBoundary("Codex_FN_Test_recovery");
-            string betaSource = Path.Combine(Path.GetTempPath(), "FNSyncPlus_CodexTests", "BetaRecovery_" + Guid.NewGuid().ToString("N"));
+            string betaSource = Path.Combine(AppStorageRoot.TestSessionsRoot(), "BetaRecovery_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(betaSource);
             var betaTask = new SyncTask { SourceFolder = betaSource, DestinationFolder = "Codex_FN_Test_recovery/backup", ScheduleMode = TaskSyncScheduleMode.ManualOnly };
             using var betaManager = new TaskManager(betaSettings, new SmbAuthService(), new LogService(Path.Combine(root, "beta-recovery-logs")), experimentalVersionedBackup: true);
