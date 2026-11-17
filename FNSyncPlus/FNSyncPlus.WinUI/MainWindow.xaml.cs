@@ -44,6 +44,7 @@ namespace FNSyncPlus.WinUI
             AppTitleText.Text = title;
             _logService.TaskLogWriteFailed += OnTaskLogWriteFailed;
             _appWindow = AppWindow.GetFromWindowId(Microsoft.UI.Win32Interop.GetWindowIdFromWindow(WindowHelper.GetHandle(this)));
+            _appWindow.SetIcon(System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
             InitializeTrayIcon();
             _appWindow.Closing += OnAppWindowClosing;
             Closed += OnWindowClosed;

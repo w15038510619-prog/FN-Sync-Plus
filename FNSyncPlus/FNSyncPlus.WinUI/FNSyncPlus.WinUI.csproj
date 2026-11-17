@@ -5,7 +5,7 @@
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>FNSyncPlus.WinUI</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon Condition="Exists('Assets\AppIcon.ico')">Assets\AppIcon.ico</ApplicationIcon>
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <Platform Condition="'$(Platform)' == ''">x64</Platform>
     <PlatformTarget>x64</PlatformTarget>
     <Platforms>x64</Platforms>
@@ -32,7 +32,8 @@
     <Content Include="Assets\Square44x44Logo.targetsize-24_altform-unplated.png" />
     <Content Include="Assets\Square44x44Logo.targetsize-48_altform-lightunplated.png" />
     <Content Include="Assets\StoreLogo.png" />
-    <Content Include="Assets\AppIcon.ico" />
+    <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\BrandMark.png" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets\Wide310x150Logo.scale-200.png" />
   </ItemGroup>
 

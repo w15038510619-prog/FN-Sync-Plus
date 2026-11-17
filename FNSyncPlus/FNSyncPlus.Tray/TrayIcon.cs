@@ -12,7 +12,7 @@ public sealed class TrayIcon : IDisposable
     public TrayIcon(Action show, Action exit)
     {
         string path = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
-        _image = File.Exists(path) ? new Icon(path) : (Icon)SystemIcons.Application.Clone();
+        _image = File.Exists(path) ? new Icon(path, SystemInformation.SmallIconSize) : (Icon)SystemIcons.Application.Clone();
         _menu = new ContextMenuStrip();
         _menu.Items.Add("打开主界面", null, (_, _) => show());
         _menu.Items.Add("退出程序", null, (_, _) => exit());

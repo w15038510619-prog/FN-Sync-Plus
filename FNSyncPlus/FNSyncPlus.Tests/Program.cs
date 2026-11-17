@@ -312,7 +312,7 @@ namespace FNSyncPlus.Tests
                 await TestTaskPauseStrictnessAsync();
                 TestStateBadgeColorMappingAndDisplayStatus();
                 TestNasConnectionServiceStateTransitionsAndDisconnect();
-                BuildApplicationIcons();
+                VerifyApplicationIcons();
                 await TestNasDirectoryValidationAndWin32ErrorHandlingAsync();
                 await TestNoUsernameShareAssumptionAndSafeDefaultsAsync();
                 await TestFnOsIntegrationAndOfficialClientDetectionAsync();
@@ -6211,24 +6211,15 @@ namespace FNSyncPlus.Tests
             try { File.Delete(tempMd); File.Delete(tempJson); } catch { }
         }
 
-        static void BuildApplicationIcons()
+        static void VerifyApplicationIcons()
         {
-            Console.WriteLine("\n--- 28. 原创应用图标方案生成与多尺寸 ICO 资产校验 ---");
-            string isolatedRoot = Path.Combine(Path.GetTempPath(), "FNSyncPlus_Icons_" + Guid.NewGuid().ToString("N"));
-            string assetsDir = Path.Combine(isolatedRoot, "Assets");
-            Directory.CreateDirectory(assetsDir);
-            string artifactDir = Path.Combine(isolatedRoot, "Artifacts");
-            Directory.CreateDirectory(artifactDir);
-
-            IconBuilder.GenerateIcons(artifactDir, assetsDir);
-
-            string icoPath = Path.Combine(assetsDir, "AppIcon.ico");
-            Assert(File.Exists(icoPath), "成功生成多尺寸复合 AppIcon.ico 文件");
-            var fi = new FileInfo(icoPath);
-            Assert(fi.Length > 10000, $"AppIcon.ico 包含真实多尺寸图像流 (体积: {fi.Length} 字节)");
-
-            string previewPath = Path.Combine(artifactDir, "gui_v0.4.0_icon_concepts.png");
-            Assert(File.Exists(previewPath), "成功输出三套原创图标概念对比全景图 (gui_v0.4.0_icon_concepts.png)");
+            Console.WriteLine("\n--- 28. 应用图标与托盘尺寸校验 ---");
+            string path = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+            foreach (int size in new[] { 16, 20, 24, 32, 48, 64, 128, 256 })
+            {
+                using var icon = new System.Drawing.Icon(path, size, size);
+                Assert(icon.Width == size && icon.Height == size, $"发布图标包含 {size} × {size} 帧");
+            }
         }
 
         static async Task TestNasDirectoryValidationAndWin32ErrorHandlingAsync()

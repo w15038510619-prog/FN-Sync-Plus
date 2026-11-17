@@ -67,9 +67,9 @@ Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 Source: "..\..\docs\deployment-guide.md"; DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#LauncherName}"; WorkingDir: "{app}"
-Name: "{group}\卸载 {#AppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#LauncherName}"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\{#AppName}"; Filename: "{app}\{#LauncherName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#LauncherName}"
+Name: "{group}\卸载 {#AppName}"; Filename: "{uninstallexe}"; IconFilename: "{app}\{#LauncherName}"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#LauncherName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#LauncherName}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#LauncherName}"; Description: "启动 {#AppName}"; Flags: nowait postinstall skipifsilent

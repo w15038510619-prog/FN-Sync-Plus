@@ -28,6 +28,7 @@ namespace FNSyncPlus.App
         private readonly RestoreEngine _restoreEngine;
 
         private WinForms.NotifyIcon? _notifyIcon;
+        private System.Drawing.Icon? _trayImage;
         private bool _isExplicitExit = false;
 
         private List<DiscoveredBackupPackage> _discoveredPackages = new();
@@ -81,11 +82,13 @@ namespace FNSyncPlus.App
 
         private void InitializeTrayIcon()
         {
+            using var iconStream = WpfApplication.GetResourceStream(new Uri("Assets/AppIcon.ico", UriKind.Relative)).Stream;
+            _trayImage = new System.Drawing.Icon(iconStream, WinForms.SystemInformation.SmallIconSize);
             _notifyIcon = new WinForms.NotifyIcon
             {
                 Text = "飞牛同步增强版 (FN Sync Plus) v2.1",
                 Visible = true,
-                Icon = System.Drawing.SystemIcons.Application
+                Icon = _trayImage
             };
 
             var contextMenu = new WinForms.ContextMenuStrip();
@@ -108,10 +111,18 @@ namespace FNSyncPlus.App
         private void ExitApplication()
         {
             _isExplicitExit = true;
-            _notifyIcon?.Dispose();
-            _notifyIcon = null;
+            DisposeTrayIcon();
+
             _taskManager.Dispose();
             WpfApplication.Current.Shutdown();
+        }
+
+        private void DisposeTrayIcon()
+        {
+            _notifyIcon?.Dispose();
+            _notifyIcon = null;
+            _trayImage?.Dispose();
+            _trayImage = null;
         }
 
         private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
@@ -125,7 +136,7 @@ namespace FNSyncPlus.App
             else
             {
                 _taskManager.Dispose();
-                _notifyIcon?.Dispose();
+                DisposeTrayIcon();
             }
         }
 

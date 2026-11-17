@@ -2,10 +2,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\FNSyncPlus.Core\FNSyncPlus.Core.csproj" />
+    <Resource Include="..\FNSyncPlus.WinUI\Assets\AppIcon.ico" Link="Assets\AppIcon.ico" />
+    <Resource Include="..\FNSyncPlus.WinUI\Assets\BrandMark.png" Link="Assets\BrandMark.png" />
   </ItemGroup>
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <ApplicationIcon>..\FNSyncPlus.WinUI\Assets\AppIcon.ico</ApplicationIcon>
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
