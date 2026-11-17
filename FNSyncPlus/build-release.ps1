@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Produces a versioned, updatable FN Sync Plus installation plus a signed update manifest.
 
@@ -26,6 +26,7 @@
 #>
 param(
     [string]$Dotnet = 'dotnet',
+    [ValidatePattern('^[a-fA-F0-9]{40}$')][string]$SourceSha,
     [string]$OutputRoot = (Join-Path $PSScriptRoot '..\Release_WinUI'),
     [string]$Version = '0.4.0',
     [ValidateSet('stable', 'beta')][string]$Channel = 'beta',
@@ -69,10 +70,11 @@ try {
     # 1. Application payload
     New-Item -ItemType Directory -Path $appDir -Force | Out-Null
     $commonPublish = @()
+    if ($SourceSha) { $commonPublish += "-p:SourceRevisionId=$SourceSha" }
     if (-not [string]::IsNullOrWhiteSpace($UpdatePublicKeyPath)) {
         if (-not (Test-Path -LiteralPath $UpdatePublicKeyPath -PathType Leaf)) { throw "更新公钥不存在：$UpdatePublicKeyPath" }
         $resolvedKey = (Resolve-Path -LiteralPath $UpdatePublicKeyPath).Path
-        $commonPublish = @("-p:UpdatePublicKeyPath=$resolvedKey")
+        $commonPublish += "-p:UpdatePublicKeyPath=$resolvedKey"
     }
     Invoke-Dotnet -Arguments (@('publish', 'FNSyncPlus.WinUI\FNSyncPlus.WinUI.csproj', '-c', 'Release', '-r', 'win-x64',
         '--self-contained', 'true', '-p:WindowsPackageType=None', "-p:Version=$Version", '-o', $appDir) + $commonPublish)
@@ -108,7 +110,9 @@ try {
     Copy-Item -LiteralPath (Join-Path $installDir 'FNSyncPlus.Updater.exe') -Destination (Join-Path $installDir 'FN_Sync_Plus.exe') -Force
 
     # 3b. Declare what this build can read. The updater uses it to refuse an unsafe rollback.
-    @{ version = $Version; supported_data_format = $SupportedDataFormat } |
+    $buildMetadata = @{ version = $Version; supported_data_format = $SupportedDataFormat }
+    if ($SourceSha) { $buildMetadata.source_sha = $SourceSha }
+    $buildMetadata |
         ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $appDir 'build-meta.json') -Encoding utf8
 
     # 4. Package the payload (what the updater extracts)
