@@ -407,6 +407,7 @@ namespace FNSyncPlus.Tests
         static async Task TestIntegrityRegressionsAsync()
         {
             string root = Directory.CreateTempSubdirectory("FNSync_integrity_").FullName;
+            AppStorageRoot.InitializeForTests(AppStorageRoot.TestRoot ?? Path.Combine(root, "app-data"));
             try
             {
                 if (OperatingSystem.IsWindows()) await TestSingleInstanceAsync();
