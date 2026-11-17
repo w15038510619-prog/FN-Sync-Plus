@@ -665,7 +665,25 @@ try {
     Record-Result -Name '本验收不声明公司已部署更新服务器（本地隔离证据级别）' -Passed $true `
         -Detail ("server={0} cert=ephemeral-selfsigned note={1}" -f $manifestBaseUrl, $serverFacts.isolation_note)
 }
+catch {
+    Record-Result -Name '验收过程异常终止' -Passed $false -Detail $_.Exception.Message
+}
 finally {
+    # Failed launch verification can relaunch an older version before the harness registers its PID.
+    $ownedPrefix = $installRoot.TrimEnd('\') + '\'
+    Get-Process -Name 'FNSyncPlus.WinUI' -ErrorAction SilentlyContinue | ForEach-Object {
+        $candidate = $_
+        if (-not $script:existingSnapshot.ContainsKey($candidate.Id) -and $candidate.Path -and
+            $candidate.Path.StartsWith($ownedPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+            -not ($script:trackedProcesses | Where-Object { $_.id -eq $candidate.Id })) {
+            try { $null = Register-TrackedProcess -ProcessId $candidate.Id -Label 'rollback-fallback' -ExpectedPath $ownedPrefix }
+            catch {
+                if (Get-Process -Id $candidate.Id -ErrorAction SilentlyContinue) {
+                    Record-Result -Name '无法登记需清理的回滚进程' -Passed $false -Detail "pid=$($candidate.Id)"
+                }
+            }
+        }
+    }
     foreach ($entry in @($script:trackedProcesses)) {
         $alreadyGone = -not (Test-TrackedAlive -ProcessId $entry.id -StartedAt $entry.started)
         if (-not $alreadyGone) {
