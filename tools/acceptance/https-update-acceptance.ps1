@@ -480,11 +480,11 @@ try {
         -ReportPath $s2Report -Url $manifestUrl -Install -TimeoutSec $PrepareTimeoutSeconds
     $probeP5 = $s2.Report
     if ($null -eq $probeP5) { throw "S2 探针报告未生成：$s2Report" }
-    Record-Result -Name "S2 自动检查：发现 $versionB（真实 HTTPS 清单 + 真实验签）" `
+    Record-Result -Name "S2 检查更新：发现 $versionB（真实 HTTPS 清单 + 真实验签）" `
         -Passed ($probeP5.has_update -eq $true -and $probeP5.version -eq $versionB -and
                  $probeP5.signature_algorithm -match 'ECDSA P-256') `
         -Detail ("version={0} notes={1} alg={2}" -f $probeP5.version, $probeP5.notes, $probeP5.signature_algorithm)
-    Record-Result -Name 'S2 自动下载：HTTPS 下载且 SHA-256 与已签名清单一致' `
+    Record-Result -Name 'S2 请求下载：HTTPS 下载且 SHA-256 与已签名清单一致' `
         -Passed ($probeP5.download_ok -eq $true -and $probeP5.download_sha256 -eq $packageBHash -and
                  $probeP5.release_url -eq "$manifestBaseUrl/$packageBName") `
         -Detail ("url={0} sha256={1}… size={2}" -f $probeP5.release_url,
@@ -530,10 +530,18 @@ try {
     $launchDeadline = (Get-Date).AddSeconds(120)
     $journal = ''
     $newPid = 0
+    $versionPattern = [regex]::Escape($versionB)
+    $opId = [string]$probeP5.operation_id
+    $opsDir = Join-Path $installRoot '.ops'
+    $opFile = Join-Path $opsDir "$opId.json"
     while ((Get-Date) -lt $launchDeadline) {
         $journal = Get-FileText -Path $journalPath
-        if ($journal -match "launch $versionB ok \(pid (\d+)\)") { $newPid = [int]$Matches[1]; break }
-        if ($journal -match 'not healthy' -or $journal -match 'failed') { break }
+        $state = Read-JsonFile -Path $opFile
+        if ($state.status -eq 3 -and $journal -match "launch $versionPattern ok \(pid (\d+)\)") {
+            $newPid = [int]$Matches[1]
+            break
+        }
+        if ($state.status -in 4,5,6) { break }
         Start-Sleep -Milliseconds 500
     }
     Record-Result -Name 'S2 更新器启动新版本并通过健康检查（三方 PID 之三）' -Passed ($newPid -gt 0) `
@@ -549,9 +557,6 @@ try {
             $reportB.usable, $reportB.services_initialized, $reportB.task_manager_ok, $reportB.format_state)
 
     # Operation evidence chain for S2.
-    $opId = [string]$probeP5.operation_id
-    $opsDir = Join-Path $installRoot '.ops'
-    $opFile = Join-Path $opsDir "$opId.json"
     $opState = Read-JsonFile -Path $opFile
     Record-Result -Name 'S2 操作状态文件记录 Installed（含更新器进程身份四元组）' `
         -Passed ($null -ne $opState -and [int]$opState.status -eq 3 -and $opState.version -eq $versionB -and
@@ -623,21 +628,23 @@ try {
     if (-not ($probeS3.updater_started -eq $true)) { throw 'S3 更新器未启动，终止验收' }
     $updater3 = Register-TrackedProcess -ProcessId ([int]$probeS3.updater_pid) -Label 'updater-s3' -ExpectedPath $installRoot
 
-    # Wait for the rollback: pointer must end back on 0.6.0 with 0.7.0 retained for diagnosis.
+    # Wait for the restored pointer and the durable RolledBack record before reading evidence.
+    $op3Id = [string]$probeS3.operation_id
+    $op3File = Join-Path $opsDir "$op3Id.json"
     $deadline = (Get-Date).AddSeconds($ApplyBudgetSeconds)
     $rolledBack = $false
     while ((Get-Date) -lt $deadline) {
         $current = Read-JsonFile -Path (Join-Path $installRoot 'current.json')
         $journalNow = Get-FileText -Path $journalPath
-        if ($null -ne $current -and $current.version -eq $versionB -and
+        $rollbackState = Read-JsonFile -Path $op3File
+        if ($null -ne $current -and $current.version -eq $versionB -and $rollbackState.status -eq 4 -and
             ($journalNow -match "rolled back to $versionB" -or $journalNow -match "pointer restored to $versionB")) { $rolledBack = $true; break }
         Start-Sleep -Milliseconds 500
     }
     Record-Result -Name "S3 启动验证失败后自动回滚到 $versionB（指针证据）" -Passed $rolledBack `
         -Detail ("active={0}" -f (Read-JsonFile -Path (Join-Path $installRoot 'current.json')).version)
     $journalNow = Get-FileText -Path $journalPath
-    $op3Id = [string]$probeS3.operation_id
-    $op3State = Read-JsonFile -Path (Join-Path $opsDir "$op3Id.json")
+    $op3State = Read-JsonFile -Path $op3File
     Record-Result -Name 'S3 操作状态记录 RolledBack（失败原因留档）' `
         -Passed ($null -ne $op3State -and [int]$op3State.status -eq 4 -and $op3State.version -eq $versionC) `
         -Detail ("status={0}(4=RolledBack) reason={1}" -f $op3State.status, $op3State.failure_reason)
