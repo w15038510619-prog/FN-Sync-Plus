@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Produces a versioned, updatable FN Sync Plus installation plus a signed update manifest.
 
