@@ -58,12 +58,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: https-update-acceptance-evidence
+          include-hidden-files: true
           path: |
-            **/server-facts.json
-            **/server-facts.json.requests.jsonl
-            **/server-stdout.log
-            **/server-stderr.log
-            **/storage-audit.log
-            **/update.log
-            **/acceptance-result.json
-          if-no-files-found: ignore
+            .acceptance/online-beta-ci/acceptance-result.json
+            .acceptance/online-beta-ci/server-facts.json
+            .acceptance/online-beta-ci/server-facts.json.requests.jsonl
+            .acceptance/online-beta-ci/server-stdout.log
+            .acceptance/online-beta-ci/server-stderr.log
+            .acceptance/online-beta-ci/storage-audit.log
+            .acceptance/online-beta-ci/layout/install/update.log
+            .acceptance/online-beta-ci/layout/install/.ops/*.json
+            .acceptance/online-beta-ci/layout/install/.health/report-*.json
