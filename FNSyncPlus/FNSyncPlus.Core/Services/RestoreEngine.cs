@@ -113,7 +113,7 @@ namespace FNSyncPlus.Core.Services
             VersionId = versionId
         };
 
-        private async Task<DiscoveredBackupPackage?> DiscoverProviderPackageAsync(INasStorageProvider provider,
+        public async Task<DiscoveredBackupPackage?> DiscoverProviderPackageAsync(INasStorageProvider provider,
             string path, string name, CancellationToken token)
         {
             string normalized = PathHelper.NormalizeRelPath(path);

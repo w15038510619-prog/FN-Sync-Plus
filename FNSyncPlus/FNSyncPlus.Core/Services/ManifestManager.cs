@@ -351,7 +351,7 @@ namespace FNSyncPlus.Core.Services
                 throw new InvalidDataException($"远端清单回读校验失败: {path}");
         }
 
-        private static Manifest ParseManifest(byte[] bytes)
+        public static Manifest ParseManifest(byte[] bytes)
         {
             using var document = JsonDocument.Parse(bytes);
             if (document.RootElement.ValueKind != JsonValueKind.Object ||
