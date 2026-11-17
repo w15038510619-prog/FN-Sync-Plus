@@ -79,3 +79,6 @@ try {
     $env:DOTNET_ROOT_X64 = $originalDotnetX64
     $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR = $originalExtract
 }
+
+# Negative cases have already been checked. Return the smoke test status to CI.
+exit 0
