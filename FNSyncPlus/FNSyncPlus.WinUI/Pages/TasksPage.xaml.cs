@@ -90,13 +90,15 @@ namespace FNSyncPlus.WinUI.Pages
                 var settings = AppServices.GetService<AppSettings>();
                 var legacy = await Task.Run(settings.ReadVersionedLegacySettings);
                 var text = new StringBuilder();
+                text.AppendLine("旧任务仅供查看，不会自动运行。要继续备份，请在新版里新建任务。");
+                text.AppendLine("如果旧任务与新任务使用同一个备份目录，请停用旧任务。");
                 if (legacy == null || (legacy.Tasks.Count == 0 && string.IsNullOrWhiteSpace(legacy.LegacySourceFolder) && string.IsNullOrWhiteSpace(legacy.LegacyTargetShare)))
                 {
-                    text.AppendLine("没有找到本软件的旧任务。若之前使用飞牛官方同步，请在添加文件夹时选择本地目录和飞牛上的已有目录。");
+                    text.AppendLine("\n没有找到本软件的旧任务。若之前使用飞牛官方同步，可在添加文件夹时选择飞牛上的已有目录。");
                 }
                 else
                 {
-                    text.AppendLine("以下是本软件旧配置中的任务，仅供查看；旧配置没有被修改。");
+
                     if (!string.IsNullOrWhiteSpace(legacy.LegacySourceFolder) || !string.IsNullOrWhiteSpace(legacy.LegacyTargetShare))
                         text.AppendLine($"\n旧单任务\n本地：{legacy.LegacySourceFolder}\n目标：{legacy.LegacyTargetShare}");
                     foreach (var task in legacy.Tasks.Take(50))
@@ -106,7 +108,7 @@ namespace FNSyncPlus.WinUI.Pages
                     }
                     if (legacy.Tasks.Count > 50) text.AppendLine($"\n另有 {legacy.Tasks.Count - 50} 项未在此列出。");
                 }
-                text.AppendLine("\n迁移前请停止旧程序和其他可能写入相同目标的设备。选择已有飞牛目录用于复用，并为新版备份选择独立位置；匹配文件会在 NAS 内复制并占用空间。");
+
                 await new ContentDialog { Title = "查看旧任务", Content = new ScrollViewer { MaxHeight = 420,
                     Content = new TextBlock { Text = text.ToString(), TextWrapping = TextWrapping.Wrap } },
                     CloseButtonText = "知道了", XamlRoot = XamlRoot }.ShowAsync();

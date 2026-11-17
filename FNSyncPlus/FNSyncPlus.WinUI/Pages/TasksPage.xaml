@@ -222,17 +222,31 @@
                                             <ColumnDefinition Width="*" />
                                         </Grid.ColumnDefinitions>
 
-                                        <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                        <Grid Grid.Column="0" ColumnSpacing="6" VerticalAlignment="Center">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" MinWidth="0" />
+                                            </Grid.ColumnDefinitions>
                                             <FontIcon Glyph="&#xE7F4;" FontSize="12" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-                                            <TextBlock Text="{x:Bind SourceFolder, Mode=OneWay}" FontSize="12" FontFamily="Consolas, Segoe UI" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                                        </StackPanel>
+                                            <TextBlock Grid.Column="1" Text="{x:Bind SourceFolder, Mode=OneWay}"
+                                                       ToolTipService.ToolTip="{x:Bind SourceFolder, Mode=OneWay}"
+                                                       FontSize="12" FontFamily="Consolas, Segoe UI" TextTrimming="CharacterEllipsis"
+                                                       Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                        </Grid>
 
                                         <FontIcon Grid.Column="1" Glyph="&#xE76C;" FontSize="10" Foreground="{ThemeResource TextFillColorTertiaryBrush}" Margin="12,0" VerticalAlignment="Center" />
 
-                                        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                        <Grid Grid.Column="2" ColumnSpacing="6" VerticalAlignment="Center">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" MinWidth="0" />
+                                            </Grid.ColumnDefinitions>
                                             <FontIcon Glyph="&#xE753;" FontSize="12" Foreground="{ThemeResource AccentFillColorDefaultBrush}" />
-                                            <TextBlock Text="{x:Bind DestinationFolder, Mode=OneWay}" FontSize="12" FontFamily="Consolas, Segoe UI" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
-                                        </StackPanel>
+                                            <TextBlock Grid.Column="1" Text="{x:Bind DestinationFolder, Mode=OneWay}"
+                                                       ToolTipService.ToolTip="{x:Bind DestinationFolder, Mode=OneWay}"
+                                                       FontSize="12" FontFamily="Consolas, Segoe UI" TextTrimming="CharacterEllipsis"
+                                                       Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                                        </Grid>
                                     </Grid>
                                 </Border>
 
