@@ -1,6 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [string]$Dotnet = 'dotnet',
+    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+$')][string]$Version = '0.4.0',
     [Parameter(Mandatory = $true)][string]$InnoCompiler,
     [Parameter(Mandatory = $true)][string]$OutputDirectory
 )
@@ -19,7 +20,6 @@ $publish = Join-Path $root 'acceptance-publish'
 $runner = Join-Path $publish 'FNSyncPlus.AcceptanceRunner.exe'
 & (Join-Path $PSScriptRoot 'Test-AcceptanceRunnerPublish.ps1') -Runner $runner -SourceSha $sha -OutputDirectory (Join-Path $root 'offline-evidence')
 
-$version = '0.4.0'
 $product = Join-Path $root 'application-build'
 & (Join-Path $repo 'FNSyncPlus\build-release.ps1') -Dotnet $Dotnet -OutputRoot $product -Version $version -Channel beta -SourceSha $sha
 $payload = Join-Path $product 'install'

@@ -48,7 +48,7 @@ public sealed class UpdateService
         _http = httpHandler == null
             ? new HttpClient(CreatePlatformHandler()) { Timeout = TimeSpan.FromSeconds(30) }
             : new HttpClient(httpHandler) { Timeout = TimeSpan.FromSeconds(30) };
-        Settings = settings ?? throw new ArgumentNullException(nameof(settings));
+        Settings = (settings ?? throw new ArgumentNullException(nameof(settings))).ApplyReleasePolicy();
         _settingsPath = settingsPath ?? throw new ArgumentNullException(nameof(settingsPath));
         _taskManager = taskManager;
         _log = log;
@@ -126,7 +126,7 @@ public sealed class UpdateService
         ? UpdateChannel.Beta : UpdateChannel.Stable;
 
     public static Version CurrentVersion =>
-        typeof(UpdateService).Assembly.GetName().Version ?? new Version(0, 4, 0);
+        typeof(UpdateService).Assembly.GetName().Version ?? throw new InvalidOperationException("发布版本号缺失。");
 
     public async Task<UpdateCheckOutcome> CheckAsync(CancellationToken token = default)
     {
@@ -530,7 +530,7 @@ public sealed class UpdateService
         try
         {
             if (File.Exists(path))
-                return JsonSerializer.Deserialize<UpdateSettings>(File.ReadAllText(path)) ?? new UpdateSettings();
+                return (JsonSerializer.Deserialize<UpdateSettings>(File.ReadAllText(path)) ?? new UpdateSettings()).ApplyReleasePolicy();
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException) { }
         return new UpdateSettings();

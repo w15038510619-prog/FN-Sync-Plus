@@ -15,10 +15,9 @@
         <OutputRoot>/FN-Sync-Plus-<version>-x64.zip   payload package used by the updater
         <OutputRoot>/manifest.json                    signed manifest (only with -SignManifest)
 
-    Signing needs a private key that must never be committed or shipped. Generate it once with:
-        dotnet run --project tools/FNSyncPlus.UpdateTool -- keygen --private keys/update-private.pem --public keys/update-public.pem
-    and copy update-public.pem to FNSyncPlus/FNSyncPlus.Core/Updates/update-public.pem before
-    building the client, so the public key is embedded into the binaries.
+    Generate the signing pair outside the repository. Supply -UpdatePublicKeyPath so the public
+    key is embedded in both the application and launcher. The signing private key is read only
+    by UpdateTool when -SignManifest is enabled.
 
 .NOTES
     Without -SignManifest this script produces an unsigned manifest skeleton and says so. The
@@ -28,7 +27,9 @@ param(
     [string]$Dotnet = 'dotnet',
     [ValidatePattern('^[a-fA-F0-9]{40}$')][string]$SourceSha,
     [string]$OutputRoot = (Join-Path $PSScriptRoot '..\Release_WinUI'),
-    [string]$Version = '0.4.0',
+    [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$Version = '0.4.0',
+    [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$MinimumClientVersion = '0.4.0',
+    [switch]$ControlledOnlineBeta,
     [ValidateSet('stable', 'beta')][string]$Channel = 'beta',
     [switch]$SkipTests,
     [switch]$SignManifest,
@@ -53,6 +54,34 @@ function Invoke-Dotnet {
     if ($LASTEXITCODE -ne 0) { throw "dotnet 命令失败，退出码 $LASTEXITCODE" }
 }
 
+$OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
+if ($ControlledOnlineBeta -and ($Channel -ne 'beta' -or !$UpdatePublicKeyPath)) {
+    throw 'Controlled online Beta builds require the Beta channel and an explicit public key.'
+}
+if ($UpdatePublicKeyPath) {
+    $UpdatePublicKeyPath = (Resolve-Path -LiteralPath $UpdatePublicKeyPath).Path
+    $pem = [IO.File]::ReadAllText($UpdatePublicKeyPath)
+    if (([regex]::Matches($pem, '-----BEGIN ')).Count -ne 1 -or $pem -notmatch '-----BEGIN PUBLIC KEY-----') {
+        throw 'UpdatePublicKeyPath must contain only a public PEM key.'
+    }
+}
+if ($SignManifest) {
+    if (!$SigningKeyPath -or !$UpdatePublicKeyPath) { throw 'Signing requires both the private and public key paths.' }
+    $SigningKeyPath = (Resolve-Path -LiteralPath $SigningKeyPath).Path
+    $repoPrefix = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path.TrimEnd('\') + '\'
+    if ($ControlledOnlineBeta -and ($SigningKeyPath.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+        $SigningKeyPath.StartsWith($OutputRoot.TrimEnd('\')+'\', [StringComparison]::OrdinalIgnoreCase))) {
+        throw 'Keep the Beta signing private key outside the repository and output directory.'
+    }
+    [Uri]$baseUri = $null
+    if (![Uri]::TryCreate($ManifestBaseUrl,[UriKind]::Absolute,[ref]$baseUri) -or
+        $baseUri.Scheme -ne 'https' -or $baseUri.Query -or $baseUri.Fragment -or $baseUri.UserInfo) {
+        throw 'ManifestBaseUrl must be an HTTPS directory without query, fragment or credentials.'
+    }
+    $ManifestBaseUrl = $baseUri.AbsoluteUri.TrimEnd('/')
+    if ([version]$Version -le [version]$MinimumClientVersion) { throw 'An online release must be newer than its minimum client.' }
+}
+
 Push-Location $PSScriptRoot
 try {
     if (-not $SkipTests) {
@@ -71,11 +100,8 @@ try {
     New-Item -ItemType Directory -Path $appDir -Force | Out-Null
     $commonPublish = @()
     if ($SourceSha) { $commonPublish += "-p:SourceRevisionId=$SourceSha" }
-    if (-not [string]::IsNullOrWhiteSpace($UpdatePublicKeyPath)) {
-        if (-not (Test-Path -LiteralPath $UpdatePublicKeyPath -PathType Leaf)) { throw "更新公钥不存在：$UpdatePublicKeyPath" }
-        $resolvedKey = (Resolve-Path -LiteralPath $UpdatePublicKeyPath).Path
-        $commonPublish += "-p:UpdatePublicKeyPath=$resolvedKey"
-    }
+    if ($ControlledOnlineBeta) { $commonPublish += '-p:ControlledOnlineBeta=true' }
+    if ($UpdatePublicKeyPath) { $commonPublish += "-p:UpdatePublicKeyPath=$UpdatePublicKeyPath" }
     Invoke-Dotnet -Arguments (@('publish', 'FNSyncPlus.WinUI\FNSyncPlus.WinUI.csproj', '-c', 'Release', '-r', 'win-x64',
         '--self-contained', 'true', '-p:WindowsPackageType=None', "-p:Version=$Version", '-o', $appDir) + $commonPublish)
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'TEST_ONLY.txt') -Destination (Join-Path $appDir 'TEST_ONLY.txt') -Force
@@ -122,32 +148,31 @@ try {
 
     # 5. Initial pointers so the launcher works before the first update
     $payloadHash = 'built-' + (Get-Date -Format 'yyyyMMddHHmmss')
-    @{ version = $Version; directory = $appDir; installed_at = (Get-Date).ToUniversalTime().ToString('o'); payload_sha256 = $payloadHash; supported_data_format = $SupportedDataFormat } |
+    @{ version = $Version; directory = "app-$Version"; installed_at = (Get-Date).ToUniversalTime().ToString('o'); payload_sha256 = $payloadHash; supported_data_format = $SupportedDataFormat } |
         ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $installDir 'current.json') -Encoding utf8
     if (Test-Path -LiteralPath (Join-Path $installDir 'previous.json')) { Remove-Item -LiteralPath (Join-Path $installDir 'previous.json') -Force }
 
     # 6. Manifest
     $manifestPath = Join-Path $OutputRoot 'manifest.json'
     if ($SignManifest) {
-        if ([string]::IsNullOrWhiteSpace($SigningKeyPath) -or -not (Test-Path -LiteralPath $SigningKeyPath)) {
-            throw '已要求签名，但 -SigningKeyPath 缺失或不可读。私钥不得放在仓库内。'
-        }
-        if ([string]::IsNullOrWhiteSpace($ManifestBaseUrl)) { throw '已要求签名，但缺少 -ManifestBaseUrl（必须是 HTTPS）' }
         $descriptor = @{
             schema = 1; product = 'FN Sync Plus'; channel = $Channel; arch = 'x64'; version = $Version
-            min_version = '0.0.0'; released_at = (Get-Date).ToUniversalTime().ToString('o')
+            min_version = $MinimumClientVersion; released_at = (Get-Date).ToUniversalTime().ToString('o')
             notes = "FN Sync Plus $Version ($Channel)"; url = "$ManifestBaseUrl/FN-Sync-Plus-$Version-x64.zip"
             sha256 = $packageHash; size = $packageSize; batch = $ReleaseBatch
-            audience = @($Audience); min_compatible_client = '0.4.0'; signature = ''
+            audience = @($Audience); min_compatible_client = $MinimumClientVersion; signature = ''
         }
         $descriptorPath = Join-Path $OutputRoot 'descriptor.json'
         $descriptor | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $descriptorPath -Encoding utf8
         Invoke-Dotnet -Arguments @('run', '--project', '..\tools\FNSyncPlus.UpdateTool\FNSyncPlus.UpdateTool.csproj', '-c', 'Release', '--',
             'sign', '--input', $descriptorPath, '--key', $SigningKeyPath, '--out', $manifestPath, '--package', $packagePath,
             '--version', $Version, '--channel', $Channel, '--url', "$ManifestBaseUrl/FN-Sync-Plus-$Version-x64.zip")
+        Invoke-Dotnet -Arguments @('run', '--project', '..\tools\FNSyncPlus.UpdateTool\FNSyncPlus.UpdateTool.csproj', '-c', 'Release', '--',
+            'verify', '--manifest', $manifestPath, '--public', $UpdatePublicKeyPath, '--current', $MinimumClientVersion,
+            '--channel', $Channel, '--batch', "$ReleaseBatch", '--group', $Audience)
     }
     else {
-        Write-Host '未签名：未提供 -SignManifest，生成的清单不会被客户端接受。'
+        Write-Host '本次构建未生成在线更新清单。'
     }
 
     Write-Host ''

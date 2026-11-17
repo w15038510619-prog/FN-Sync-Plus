@@ -39,6 +39,10 @@ param(
     [int]$PrepareTimeoutSeconds = 120,
     [int]$ExitBudgetSeconds = 120,
     [int]$ApplyBudgetSeconds = 240,
+    [string]$VersionA = '0.5.0',
+    [string]$VersionB = '0.6.0',
+    [string]$VersionC = '0.7.0',
+    [switch]$ControlledOnlineBeta,
     [switch]$SkipBuilds
 )
 
@@ -156,9 +160,10 @@ function Stop-TrackedProcess {
 }
 
 # ---------------------------------------------------------------- fixtures
-$versionA = '0.5.0'
-$versionB = '0.6.0'
-$versionC = '0.7.0'
+if ($VersionA -notmatch '^\d+\.\d+\.\d+$' -or $VersionB -notmatch '^\d+\.\d+\.\d+$' -or $VersionC -notmatch '^\d+\.\d+\.\d+$' -or
+    [version]$VersionA -ge [version]$VersionB -or [version]$VersionB -ge [version]$VersionC) {
+    throw 'Acceptance versions must be ascending numeric versions.'
+}
 $keyDir = Join-Path $WorkRoot 'keys'
 $privateKey = Join-Path $keyDir 'update-private.pem'
 $publicKey = Join-Path $keyDir 'update-public.pem'
@@ -274,20 +279,20 @@ try {
 
         $buildScript = Join-Path $repo 'FNSyncPlus\build-release.ps1'
         $commonBuild = @{
-            Dotnet = $dotnet; Channel = 'beta'; SkipTests = $true
+            Dotnet = $dotnet; Channel = 'beta'; SkipTests = $true; ControlledOnlineBeta = $ControlledOnlineBeta
             UpdatePublicKeyPath = $publicKey; SignManifest = $true; SigningKeyPath = $privateKey
             ManifestBaseUrl = $manifestBaseUrl; SupportedDataFormat = 1
         }
-        Write-Host '--- building A (0.5.0, contains the https probe) ---'
+        Write-Host "--- building A ($versionA, contains the https probe) ---"
         & $buildScript -Version $versionA -OutputRoot $layoutRoot @commonBuild
         $buildOkA = $?
-        Record-Result -Name '构建 A 版本 0.5.0（真实 publish + 内嵌公钥）' `
+        Record-Result -Name "构建 A 版本 $versionA（真实 publish + 内嵌公钥）" `
             -Passed ($buildOkA -and (Test-Path $exeA)) -Detail ("payload={0}" -f $exeA)
 
-        Write-Host '--- building B (0.6.0, manifest URL -> local Kestrel) ---'
+        Write-Host "--- building B ($versionB, manifest URL -> local Kestrel) ---"
         & $buildScript -Version $versionB -OutputRoot $buildB @commonBuild
         $buildOkB = $?
-        Record-Result -Name '构建 B 版本 0.6.0（清单下载地址为本地 HTTPS）' `
+        Record-Result -Name "构建 B 版本 $versionB（清单下载地址为本地 HTTPS）" `
             -Passed ($buildOkB -and (Test-Path (Join-Path $buildB "install\app-$versionB\FNSyncPlus.WinUI.exe"))) `
             -Detail ("baseUrl={0}" -f $manifestBaseUrl)
     }
@@ -297,7 +302,7 @@ try {
     }
 
     $currentA = Read-JsonFile -Path (Join-Path $installRoot 'current.json')
-    Record-Result -Name '初始 current.json 指向 0.5.0' `
+    Record-Result -Name "初始 current.json 指向 $versionA" `
         -Passed ($null -ne $currentA -and $currentA.version -eq $versionA) -Detail ("version={0}" -f $currentA.version)
 
     # ------------------------------------------------ 2. start the isolated Kestrel server
@@ -450,7 +455,7 @@ try {
         -Detail ("error={0} partials={1}" -f $s1c.Report.download_error, $partials.Count)
     Stop-TrackedProcess -ProcessId $s1c.Process.id -StartedAt $s1c.Process.started -Label 's1c'
     $currentAfterS1c = Read-JsonFile -Path (Join-Path $installRoot 'current.json')
-    Record-Result -Name 'S1c 失败后版本指针保持 0.5.0（未发生任何安装）' `
+    Record-Result -Name "S1c 失败后版本指针保持 $versionA（未发生任何安装）" `
         -Passed ($null -ne $currentAfterS1c -and $currentAfterS1c.version -eq $versionA) `
         -Detail ("version={0}" -f $currentAfterS1c.version)
 
@@ -473,7 +478,7 @@ try {
         -ReportPath $s2Report -Url $manifestUrl -Install -TimeoutSec $PrepareTimeoutSeconds
     $probeP5 = $s2.Report
     if ($null -eq $probeP5) { throw "S2 探针报告未生成：$s2Report" }
-    Record-Result -Name 'S2 自动检查：发现 0.6.0（真实 HTTPS 清单 + 真实验签）' `
+    Record-Result -Name "S2 自动检查：发现 $versionB（真实 HTTPS 清单 + 真实验签）" `
         -Passed ($probeP5.has_update -eq $true -and $probeP5.version -eq $versionB -and
                  $probeP5.signature_algorithm -match 'ECDSA P-256') `
         -Detail ("version={0} notes={1} alg={2}" -f $probeP5.version, $probeP5.notes, $probeP5.signature_algorithm)
@@ -511,7 +516,7 @@ try {
         if ($null -ne $current -and $current.version -eq $versionB) { $switched = $true; break }
         Start-Sleep -Milliseconds 500
     }
-    Record-Result -Name 'S2 更新器完成安装并切换版本指针到 0.6.0' -Passed $switched -Detail ("waitedSec≤{0}" -f $ApplyBudgetSeconds)
+    Record-Result -Name "S2 更新器完成安装并切换版本指针到 $versionB" -Passed $switched -Detail ("waitedSec≤{0}" -f $ApplyBudgetSeconds)
     if (-not $switched) {
         $journal = Get-FileText -Path $journalPath
         Record-Result -Name 'S2 journal 记录失败原因' -Passed $false `
@@ -578,7 +583,7 @@ try {
     $packageC = Join-Path $WorkRoot "build-c\$packageCName"
     if (Test-Path -LiteralPath $packageC) { Remove-Item -LiteralPath $packageC -Force }
     Compress-Archive -Path (Join-Path $payloadC '*') -DestinationPath $packageC -CompressionLevel Fastest
-    Record-Result -Name 'S3 构造 0.7.0 缺陷更新包（载荷缺少核心程序集）' -Passed (Test-Path $packageC) `
+    Record-Result -Name "S3 构造 $versionC 缺陷更新包（载荷缺少核心程序集）" -Passed (Test-Path $packageC) `
         -Detail ("package={0}" -f $packageC)
     $descriptorC = Join-Path $WorkRoot 'build-c\descriptor.json'
     [ordered]@{ schema = 1; product = 'FN Sync Plus'; channel = 'beta'; arch = 'x64'
@@ -604,7 +609,7 @@ try {
         -ReportPath $s3Report -Url $manifestUrl -Install -TimeoutSec $PrepareTimeoutSeconds
     $probeS3 = $s3.Report
     if ($null -eq $probeS3) { throw "S3 探针报告未生成：$s3Report" }
-    Record-Result -Name 'S3 0.6.0 实例发现并下载 0.7.0（HTTPS 全流程再次走通）' `
+    Record-Result -Name "S3 $versionB 实例发现并下载 $versionC（HTTPS 全流程再次走通）" `
         -Passed ($probeS3.has_update -eq $true -and $probeS3.version -eq $versionC -and
                  $probeS3.download_ok -eq $true -and $probeS3.updater_started -eq $true) `
         -Detail ("version={0} op={1} updater_pid={2}" -f $probeS3.version, $probeS3.operation_id, $probeS3.updater_pid)
@@ -621,7 +626,7 @@ try {
             ($journalNow -match "rolled back to $versionB" -or $journalNow -match "pointer restored to $versionB")) { $rolledBack = $true; break }
         Start-Sleep -Milliseconds 500
     }
-    Record-Result -Name 'S3 启动验证失败后自动回滚到 0.6.0（指针证据）' -Passed $rolledBack `
+    Record-Result -Name "S3 启动验证失败后自动回滚到 $versionB（指针证据）" -Passed $rolledBack `
         -Detail ("active={0}" -f (Read-JsonFile -Path (Join-Path $installRoot 'current.json')).version)
     $journalNow = Get-FileText -Path $journalPath
     $op3Id = [string]$probeS3.operation_id
@@ -629,7 +634,7 @@ try {
     Record-Result -Name 'S3 操作状态记录 RolledBack（失败原因留档）' `
         -Passed ($null -ne $op3State -and [int]$op3State.status -eq 4 -and $op3State.version -eq $versionC) `
         -Detail ("status={0}(4=RolledBack) reason={1}" -f $op3State.status, $op3State.failure_reason)
-    Record-Result -Name 'S3 失败的 0.7.0 目录保留供排查（未被静默删除）' `
+    Record-Result -Name "S3 失败的 $versionC 目录保留供排查（未被静默删除）" `
         -Passed (Test-Path -LiteralPath (Join-Path $installRoot "app-$versionC\FNSyncPlus.WinUI.exe")) `
         -Detail ("dir=app-{0}" -f $versionC)
     Record-Result -Name 'S3 journal 记录回滚全过程（操作 ID 贯穿）' `

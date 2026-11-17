@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
 using FNSyncPlus.Core.Updates;
@@ -106,12 +107,34 @@ internal static class Program
     {
         string? manifestPath = args.Get("manifest");
         string? publicPath = args.Get("public");
-        if (manifestPath == null || publicPath == null) return Usage();
-        using var key = ECDsa.Create();
-        key.ImportFromPem(File.ReadAllText(publicPath));
-        var verifier = new UpdateManifestVerifier(key.ExportSubjectPublicKeyInfo());
+        string? corePath = args.Get("embedded-core");
+        if (manifestPath == null || (publicPath == null) == (corePath == null)) return Usage();
+        string pem;
+        if (corePath != null)
+        {
+            var core = Assembly.LoadFile(Path.GetFullPath(corePath));
+            using var embedded = core.GetManifestResourceStream(PinnedUpdateKey.ResourceName)
+                ?? throw new InvalidDataException("应用程序没有嵌入更新公钥");
+            using var reader = new StreamReader(embedded);
+            pem = reader.ReadToEnd();
+            if (args.Get("build-version") is { } buildVersion && core.GetName().Version?.ToString(3) != buildVersion)
+                throw new InvalidDataException("应用程序程序集版本与预期不一致");
+            if (args.Has("require-controlled-beta"))
+            {
+                var type = core.GetType(typeof(UpdateSettings).FullName!, throwOnError: true)!;
+                if (type.GetProperty(nameof(UpdateSettings.IsControlledOnlineBeta))?.GetValue(null) is not true)
+                    throw new InvalidDataException("应用程序没有启用受控 Beta 更新策略");
+                Console.WriteLine($"已找到内置公钥和受控 Beta 策略（程序集 {core.GetName().Version}）");
+            }
+        }
+        else
+        {
+            pem = File.ReadAllText(publicPath!);
+        }
+        var verifier = UpdateManifestVerifier.FromPem(pem);
         string channel = args.Get("channel") ?? "stable";
-        Version? current = Version.TryParse(args.Get("current"), out var parsed) ? parsed : null;
+        if (channel is not ("stable" or "beta")) throw new ArgumentException("更新通道必须为 stable 或 beta");
+        Version? current = args.Get("current") is { } inputVersion ? Version.Parse(inputVersion) : null;
         var identity = new ClientUpdateIdentity(args.Get("group") ?? "", int.TryParse(args.Get("batch"), out int batch) ? batch : 0);
         var result = verifier.Verify(File.ReadAllText(manifestPath), identity,
             channel == "beta" ? UpdateChannel.Beta : UpdateChannel.Stable, current, DateTimeOffset.UtcNow);
@@ -147,7 +170,7 @@ internal static class Program
         Console.WriteLine("示例：");
         Console.WriteLine("  keygen --private keys/update-private.pem --public keys/update-public.pem");
         Console.WriteLine("  sign --input release/descriptor.json --key keys/update-private.pem --package release/pkg.zip --out release/manifest.json");
-        Console.WriteLine("  verify --manifest release/manifest.json --public keys/update-public.pem --current 0.4.0");
+        Console.WriteLine("  verify --manifest release/manifest.json --public keys/update-public.pem --current 0.4.1 --channel beta");
         return 2;
     }
 

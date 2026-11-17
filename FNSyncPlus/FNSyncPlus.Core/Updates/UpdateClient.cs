@@ -8,7 +8,30 @@ public enum AutoUpdateMode { CheckOnly = 0, DownloadAndNotify = 1, UnattendedIns
 
 public sealed class UpdateSettings
 {
-    [JsonPropertyName("channel")] public string Channel { get; set; } = "stable";
+    public static bool IsControlledOnlineBeta
+    {
+        get
+        {
+#if FNSYNC_CONTROLLED_ONLINE_BETA
+            return true;
+#else
+            return false;
+#endif
+        }
+    }
+
+    internal UpdateSettings ApplyReleasePolicy()
+    {
+        if (IsControlledOnlineBeta)
+        {
+            Channel = "beta";
+            AutoMode = (int)AutoUpdateMode.CheckOnly;
+            UnattendedEnabled = false;
+        }
+        return this;
+    }
+
+    [JsonPropertyName("channel")] public string Channel { get; set; } = IsControlledOnlineBeta ? "beta" : "stable";
     [JsonPropertyName("auto_mode")] public int AutoMode { get; set; } = (int)AutoUpdateMode.CheckOnly;
     [JsonPropertyName("manifest_url")] public string ManifestUrl { get; set; } = "";
     [JsonPropertyName("last_check")] public DateTimeOffset? LastCheckUtc { get; set; }
@@ -62,7 +85,7 @@ public sealed class UpdateClient : IDisposable
         ? UpdateChannel.Beta : UpdateChannel.Stable;
 
     public bool UnattendedInstallAllowed =>
-        _settings.AutoMode == (int)AutoUpdateMode.UnattendedInstall && _settings.UnattendedEnabled &&
+        !UpdateSettings.IsControlledOnlineBeta && _settings.AutoMode == (int)AutoUpdateMode.UnattendedInstall && _settings.UnattendedEnabled &&
         Uri.TryCreate(_settings.ManifestUrl, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps;
 
     public async Task<UpdateCheckOutcome> CheckAsync(Version currentVersion, ClientUpdateIdentity identity, CancellationToken token = default)

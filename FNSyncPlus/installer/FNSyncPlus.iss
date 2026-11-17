@@ -1,4 +1,4 @@
-; FN Sync Plus — 用户级安装程序（Inno Setup 6）
+﻿; FN Sync Plus — 用户级安装程序（Inno Setup 6）
 ;
 ; 设计约束（与产品安全规则一致）：
 ;   * 只做用户级安装，不需要管理员权限，不写入 HKLM / Program Files；
@@ -12,7 +12,7 @@
 ;     ISCC.exe /DAppVersion=0.4.0 FNSyncPlus.iss
 
 #ifndef AppVersion
-  #define AppVersion "0.4.0"
+  #error "Set AppVersion to the version of the staged payload."
 #endif
 #ifndef PayloadDir
   #define PayloadDir "..\..\Release_WinUI\install"
@@ -30,6 +30,7 @@ AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
 DefaultDirName={localappdata}\Programs\FNSyncPlus
 DefaultGroupName={#AppName}
+UsePreviousAppDir=yes
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=
@@ -62,7 +63,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 
 [Files]
 ; 版本化安装目录：app-<version>\ + FN_Sync_Plus.exe + current.json + update.log
-Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "current.json,previous.json"
 ; 安装说明（如果存在）
 Source: "..\..\docs\deployment-guide.md"; DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
 
@@ -93,17 +94,6 @@ Type: files; Name: "{app}\update.log"
 
 const
   AppVersionConst = '{#AppVersion}';
-
-function JsonEscape(const S: String): String;
-var
-  T: String;
-begin
-  // JSON 里反斜杠必须转义，否则 Windows 路径会破坏 JSON。
-  // StringChangeEx 的第一个参数是 var 参数，不能直接传 const。
-  T := S;
-  StringChangeEx(T, '\', '\\', True);
-  Result := T;
-end;
 
 function DigitsOnly(const S: String): String;
 var
@@ -175,13 +165,21 @@ begin
   Result := StrToIntDef(Digits, 0);
 end;
 
-procedure WritePointerFile(const Path, Version, VersionDir: String; Format: Integer);
+function MoveFileEx(const ExistingFile, NewFile: String; Flags: Cardinal): Boolean;
+  external 'MoveFileExW@kernel32.dll stdcall';
+
+procedure WritePointerFile(const Path, Version: String; Format: Integer);
 var
-  Json: String;
+  Json, TempPath: String;
 begin
-  Json := '{"version":"' + Version + '","directory":"' + JsonEscape(VersionDir) + '",' +
+  Json := '{"version":"' + Version + '","directory":"app-' + Version + '",' +
           '"payload_sha256":"installed-by-setup","supported_data_format":' + IntToStr(Format) + '}';
-  SaveStringToFile(Path, Json, False);
+  TempPath := Path + '.setup.tmp';
+  if not SaveStringToFile(TempPath, Json, False) then
+    RaiseException('无法写入安装指针：' + TempPath);
+  { MOVEFILE_REPLACE_EXISTING or MOVEFILE_WRITE_THROUGH }
+  if not MoveFileEx(TempPath, Path, 9) then
+    RaiseException('无法发布安装指针：' + Path);
 end;
 
 // 找出比当前版本旧的最高版本目录，用于覆盖升级后的回滚。
@@ -239,14 +237,13 @@ begin
     Exit;
   end;
 
-  WritePointerFile(AppDir + '\current.json', AppVersionConst, VersionDir,
-    ReadSupportedFormat(VersionDir));
-
   PreviousVersion := FindPreviousVersion(AppDir, AppVersionConst);
   if PreviousVersion <> '' then
     WritePointerFile(AppDir + '\previous.json', PreviousVersion,
-      AppDir + '\app-' + PreviousVersion,
-      ReadSupportedFormat(AppDir + '\app-' + PreviousVersion));
+       ReadSupportedFormat(AppDir + '\app-' + PreviousVersion));
+
+  WritePointerFile(AppDir + '\current.json', AppVersionConst,
+    ReadSupportedFormat(VersionDir));
 end;
 
 // 卸载时提示配置仍在，避免用户以为备份或设置被删除。

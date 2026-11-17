@@ -118,7 +118,8 @@ namespace FNSyncPlus.WinUI.ViewModels
         public bool CanRunCapacity => CapacityTasks.Count > 0 && !IsCapacityBusy;
 
         /// <summary>Unattended install only makes sense for the unattended mode.</summary>
-        public bool UnattendedSelectable => UpdateModeIndex == (int)AutoUpdateMode.UnattendedInstall;
+        public bool CanChangeUpdatePolicy => !UpdateSettings.IsControlledOnlineBeta;
+        public bool UnattendedSelectable => CanChangeUpdatePolicy && UpdateModeIndex == (int)AutoUpdateMode.UnattendedInstall;
 
         partial void OnUpdateModeIndexChanged(int value) => OnPropertyChanged(nameof(UnattendedSelectable));
 
@@ -411,9 +412,12 @@ namespace FNSyncPlus.WinUI.ViewModels
         {
             var update = _updates.Settings;
             update.ManifestUrl = UpdateFeedUrl.Trim();
-            update.Channel = UpdateChannelIndex == 1 ? "beta" : "stable";
-            update.AutoMode = UpdateModeIndex;
-            update.UnattendedEnabled = UnattendedEnabled && UpdateModeIndex == (int)AutoUpdateMode.UnattendedInstall;
+            if (CanChangeUpdatePolicy)
+            {
+                update.Channel = UpdateChannelIndex == 1 ? "beta" : "stable";
+                update.AutoMode = UpdateModeIndex;
+                update.UnattendedEnabled = UnattendedEnabled && UpdateModeIndex == (int)AutoUpdateMode.UnattendedInstall;
+            }
             _updates.Save();
         }
 

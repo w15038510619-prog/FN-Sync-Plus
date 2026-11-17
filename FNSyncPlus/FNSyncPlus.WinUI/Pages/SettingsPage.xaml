@@ -189,7 +189,7 @@
                                 <TextBlock Text="Stable 只接收正式版；Beta 可接收测试版。请按公司试点范围选择" FontSize="11" TextWrapping="Wrap"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
-                            <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.UpdateChannelIndex, Mode=TwoWay}" HorizontalAlignment="Stretch">
+                            <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.UpdateChannelIndex, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanChangeUpdatePolicy}" HorizontalAlignment="Stretch">
                                 <ComboBoxItem Content="Stable（正式）" />
                                 <ComboBoxItem Content="Beta（试点）" />
                             </ComboBox>
@@ -205,7 +205,7 @@
                                 <TextBlock Text="无人值守安装需要先通过安全验收；否则请保持“仅检查”" FontSize="11" TextWrapping="Wrap"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
-                            <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.UpdateModeIndex, Mode=TwoWay}" HorizontalAlignment="Stretch">
+                            <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.UpdateModeIndex, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanChangeUpdatePolicy}" HorizontalAlignment="Stretch">
                                 <ComboBoxItem Content="仅检查更新" />
                                 <ComboBoxItem Content="下载后提示" />
                                 <ComboBoxItem Content="无人值守安装" />

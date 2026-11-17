@@ -77,16 +77,13 @@ public sealed class VersionedInstallLayout
         {
             if (!File.Exists(path)) return null;
             var pointer = JsonSerializer.Deserialize<Pointer>(File.ReadAllText(path));
-            if (pointer == null || string.IsNullOrWhiteSpace(pointer.Version)) return null;
-            if (Directory.Exists(pointer.Directory)) return pointer;
+            if (pointer == null || !Version.TryParse(pointer.Version, out _)) return null;
 
-            // The pointer records an absolute directory, which is only valid on the machine that
-            // produced it. An installer, a ZIP extracted elsewhere or a changed drive letter all
-            // leave a pointer that points at a path this machine does not have. Re-anchor it to
-            // this root instead of reporting "no version": reporting null used to make the launcher
-            // refuse to start anything even though app-<version> was right next to it.
+            // The active version always lives under this installation. A pointer copied from
+            // another machine must not launch its old absolute directory, even if it still exists.
             string reanchored = VersionDirectory(pointer.Version);
             if (!Directory.Exists(reanchored)) return null;
+            if (string.Equals(pointer.Directory, reanchored, StringComparison.OrdinalIgnoreCase)) return pointer;
             string stale = pointer.Directory;
             pointer.Directory = reanchored;
             try
