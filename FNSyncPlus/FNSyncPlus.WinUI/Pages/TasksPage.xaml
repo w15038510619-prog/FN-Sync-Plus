@@ -147,7 +147,7 @@
                                     </StackPanel>
 
                                     <!-- Action Buttons -->
-                                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                                         <!-- Sync / Pause / Resume Button -->
                                         <Button
                                             Command="{x:Bind TogglePauseCommand}"
