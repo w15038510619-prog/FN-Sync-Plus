@@ -28,9 +28,7 @@ function Convert-BrandImage([Drawing.Image]$Image, [int]$Width, [int]$Height) {
 }
 
 if ($SourceImage) {
-    $original = [Drawing.Image]::FromFile((Resolve-Path -LiteralPath $SourceImage).Path)
-    try { [IO.File]::WriteAllBytes($master, (Convert-BrandImage $original 256 256)) }
-    finally { $original.Dispose() }
+    Copy-Item -LiteralPath (Resolve-Path -LiteralPath $SourceImage).Path -Destination $master -Force
 }
 
 $logo = [Drawing.Image]::FromFile($master)
