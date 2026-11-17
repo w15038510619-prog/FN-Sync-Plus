@@ -10,6 +10,7 @@ on:
   pull_request:
     paths:
       - 'tools/acceptance/https-update-acceptance.ps1'
+      - 'tools/release/**'
       - '.github/workflows/https-update-acceptance.yml'
       - 'tools/FNSyncPlus.LocalUpdateServer/**'
       - 'FNSyncPlus/FNSyncPlus.Core/Updates/**'
@@ -41,10 +42,16 @@ jobs:
         shell: pwsh
         run: |
           $timeout = if ("${{ inputs.prepare_timeout_sec }}" -ne "") { [int]"${{ inputs.prepare_timeout_sec }}" } else { 300 }
-          & powershell.exe -ExecutionPolicy Bypass -File "tools\acceptance\https-update-acceptance.ps1" -DotnetPath "dotnet" -PrepareTimeoutSeconds $timeout
+          $work = Join-Path $PWD '.acceptance\online-beta-ci'
+          & powershell.exe -ExecutionPolicy Bypass -File "tools\acceptance\https-update-acceptance.ps1" -DotnetPath "dotnet" -WorkRoot $work -PrepareTimeoutSeconds $timeout -VersionA 0.4.1 -VersionB 0.4.2 -VersionC 0.4.3 -ControlledOnlineBeta
           if ($LASTEXITCODE -ne 0) {
             throw "HTTPS 端到端更新验收测试失败，退出码: $LASTEXITCODE"
           }
+          if (!(Get-Command openssl -ErrorAction SilentlyContinue)) {
+            $env:PATH += ";$env:ProgramFiles\Git\usr\bin"
+          }
+          python tools/release/Test-BetaPublisher.py (Join-Path $work 'build-b\manifest.json') (Join-Path $work 'keys\update-public.pem')
+          if ($LASTEXITCODE -ne 0) { throw 'Beta publication protocol test failed.' }
 
       - name: Upload Test Evidences
         if: always()
@@ -58,4 +65,5 @@ jobs:
             **/server-stderr.log
             **/storage-audit.log
             **/update.log
+            **/acceptance-result.json
           if-no-files-found: ignore

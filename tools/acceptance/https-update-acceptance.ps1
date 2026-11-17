@@ -31,7 +31,7 @@
 
 .NOTES
     Pilot acceptance harness, not a release step. Signing key and TLS certificate are throw-away
-    artifacts generated inside the work root and never leave it.
+    artifacts. The private fixture key stays in the runner's temporary directory.
 #>
 param(
     [string]$DotnetPath = '',
@@ -165,7 +165,9 @@ if ($VersionA -notmatch '^\d+\.\d+\.\d+$' -or $VersionB -notmatch '^\d+\.\d+\.\d
     throw 'Acceptance versions must be ascending numeric versions.'
 }
 $keyDir = Join-Path $WorkRoot 'keys'
-$privateKey = Join-Path $keyDir 'update-private.pem'
+$keyId = [Convert]::ToBase64String(([Security.Cryptography.SHA256]::Create()).ComputeHash(
+    [Text.Encoding]::UTF8.GetBytes($WorkRoot.ToUpperInvariant()))).TrimEnd('=').Replace('/','_').Replace('+','-')
+$privateKey = Join-Path ([IO.Path]::GetTempPath()) "FNSyncPlus-Fixture-Keys\$keyId\update-private.pem"
 $publicKey = Join-Path $keyDir 'update-public.pem'
 $layoutRoot = Join-Path $WorkRoot 'layout'
 $installRoot = Join-Path $layoutRoot 'install'
@@ -280,8 +282,7 @@ try {
         $buildScript = Join-Path $repo 'FNSyncPlus\build-release.ps1'
         $commonBuild = @{
             Dotnet = $dotnet; Channel = 'beta'; SkipTests = $true; ControlledOnlineBeta = $ControlledOnlineBeta
-            UpdatePublicKeyPath = $publicKey; SignManifest = $true; SigningKeyPath = $privateKey
-            ManifestBaseUrl = $manifestBaseUrl; SupportedDataFormat = 1
+            UpdatePublicKeyPath = $publicKey; MinimumClientVersion = $VersionA; SupportedDataFormat = 1
         }
         Write-Host "--- building A ($versionA, contains the https probe) ---"
         & $buildScript -Version $versionA -OutputRoot $layoutRoot @commonBuild
@@ -290,7 +291,8 @@ try {
             -Passed ($buildOkA -and (Test-Path $exeA)) -Detail ("payload={0}" -f $exeA)
 
         Write-Host "--- building B ($versionB, manifest URL -> local Kestrel) ---"
-        & $buildScript -Version $versionB -OutputRoot $buildB @commonBuild
+        & $buildScript -Version $versionB -OutputRoot $buildB @commonBuild -SignManifest `
+            -SigningKeyPath $privateKey -ManifestBaseUrl $manifestBaseUrl
         $buildOkB = $?
         Record-Result -Name "构建 B 版本 $versionB（清单下载地址为本地 HTTPS）" `
             -Passed ($buildOkB -and (Test-Path (Join-Path $buildB "install\app-$versionB\FNSyncPlus.WinUI.exe"))) `
@@ -572,7 +574,16 @@ try {
     Record-Event -Event 's2-complete' -Fields @{ app_pid = $probeP5.app_pid; updater_pid = $updaterEntry.id;
         new_pid = $newPid; op = $opId; version = $versionB }
 
-    # ------------------------------------------------ S3. rollback: 0.7.0 payload cannot start
+    Stop-TrackedProcess -ProcessId $processB.id -StartedAt $processB.started -Label 'app-B-s2'
+    $processB = $null
+    $repeat = Invoke-HttpsProbe -Exe $exeB -SessionId ([guid]::NewGuid().ToString('N')) `
+        -ReportPath (Join-Path $WorkRoot 'probe-already-current.json') -Url $manifestUrl
+    Record-Result -Name "S2 已安装 $versionB 时不重复提示同一版本" `
+        -Passed ($null -ne $repeat.Report -and $repeat.Report.has_update -eq $false) `
+        -Detail ("check_error={0}" -f $repeat.Report.check_error)
+    Stop-TrackedProcess -ProcessId $repeat.Process.id -StartedAt $repeat.Process.started -Label 'already-current'
+
+    # ------------------------------------------------ S3. rollback: the next payload cannot start
     # Build the broken package: real B payload minus the core assembly -> the new process exits
     # immediately, launch verification fails, the updater must roll back to 0.6.0.
     $payloadC = Join-Path $WorkRoot 'build-c\payload'
@@ -587,8 +598,8 @@ try {
         -Detail ("package={0}" -f $packageC)
     $descriptorC = Join-Path $WorkRoot 'build-c\descriptor.json'
     [ordered]@{ schema = 1; product = 'FN Sync Plus'; channel = 'beta'; arch = 'x64'
-        version = $versionC; min_version = '0.0.0'; notes = '0.7.0 acceptance broken payload'
-        batch = 0; audience = @('*'); min_compatible_client = '0.4.0' } |
+        version = $versionC; min_version = $VersionA; notes = "$versionC acceptance broken payload"
+        batch = 0; audience = @('*'); min_compatible_client = $VersionA } |
         ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $descriptorC -Encoding utf8
     $signC = Run-Exe -Path $dotnet -Arguments @(
         'run', '--project', (Join-Path $repo 'tools\FNSyncPlus.UpdateTool\FNSyncPlus.UpdateTool.csproj'),
@@ -599,10 +610,6 @@ try {
         -Detail ("exit={0}" -f $signC.Code)
     Copy-Item -LiteralPath (Join-Path $WorkRoot 'build-c\manifest.json') -Destination (Join-Path $contentDir 'manifest.json') -Force
     Copy-Item -LiteralPath $packageC -Destination (Join-Path $contentDir $packageCName) -Force
-
-    # Stop the healthy B from S2 so the probe instance owns the single-instance mutex.
-    Stop-TrackedProcess -ProcessId $processB.id -StartedAt $processB.started -Label 'app-B-s2'
-    $processB = $null
 
     $s3Report = Join-Path $WorkRoot 'probe-s3.json'
     $s3 = Invoke-HttpsProbe -Exe $exeB -SessionId ([guid]::NewGuid().ToString('N')) `
