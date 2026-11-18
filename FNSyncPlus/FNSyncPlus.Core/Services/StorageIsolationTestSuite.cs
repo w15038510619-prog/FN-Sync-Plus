@@ -320,7 +320,8 @@ public sealed class StorageIsolationTestSuite
                 string childName = mutexDoc.RootElement.GetProperty("mutex_name").GetString() ?? "";
                 bool primary = mutexDoc.RootElement.GetProperty("mutex_is_primary").GetBoolean();
                 bool distinct = !string.Equals(childName, SingleInstanceCoordinator.DesktopInstanceName, StringComparison.Ordinal);
-                return (primary && distinct && productionInstance.IsPrimary,
+                using var marker = Mutex.OpenExisting(SingleInstanceCoordinator.DesktopInstanceName);
+                return (primary && distinct && marker.SafeWaitHandle.IsInvalid == false,
                     $"childPrimary={primary} distinctName={distinct} productionPrimary={productionInstance.IsPrimary}");
             });
         }
