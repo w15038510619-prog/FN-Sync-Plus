@@ -5,6 +5,7 @@ Release_Build/
 Release_WinUI/
 [Dd]ebug/
 [Rr]elease/
+!tools/release/
 
 # Visual Studio / IDE
 .vs/

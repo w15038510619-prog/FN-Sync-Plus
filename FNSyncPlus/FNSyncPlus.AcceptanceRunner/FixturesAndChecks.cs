@@ -189,5 +189,18 @@ public static partial class AcceptanceCli
             Compare(baseline, "snapshot", [new("new.txt", false, 1, HashText("old")), new("same-name.txt", false, 1, HashText("new"))], "AfterRestore").Status == "FAIL" &&
             Compare(baseline, "different", baseline.Entries, "AfterRestore").Status == "FAIL",
             "Snapshot comparison detects changed bytes, added and removed paths, and a changed snapshot identity.");
+        var time = DateTimeOffset.UtcNow;
+        var window = new WorkerWindow("Initial", time, time.AddSeconds(10), "snapshot");
+        Check("TwoPcOverlapEvidence", Overlaps(window, window with { StartedUtc = time.AddSeconds(1) }) &&
+            !Overlaps(window, window with { StartedUtc = time.AddSeconds(10), FinishedUtc = time.AddSeconds(20) }),
+            "Concurrency requires overlapping actual worker intervals; touching or separate runs cannot pass.");
+        var noPermission = new List<Result>();
+        try { await TwoComputerRunAsync(new("--two-pc-run", []), noPermission, token); }
+        catch (Blocked error) { noPermission.Add(Error("Authorization", "RealNAS", error)); }
+        Check("TwoPcExplicitAuthorization", noPermission is [{ Status: "BLOCKED" }],
+            "Missing authorization never creates or connects to a real NAS test.");
+        Check("TwoPcDestructiveAudit", AuditOne(["file.del"]).Status == "FAIL" &&
+            AuditOne(["file.ls"]).Status == "PASS" && AuditOne(["unclassified"]).Status == "BLOCKED",
+            "Delete requests fail the audit; unknown requests cannot silently pass.");
     }
 }

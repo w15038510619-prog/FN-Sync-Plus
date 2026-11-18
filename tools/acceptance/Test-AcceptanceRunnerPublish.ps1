@@ -67,6 +67,8 @@ try {
     $null = Invoke-Report 'invalid-remote-path' 1 @('--snapshot-before','--mode','RealNasBackup','--acceptance-id',$id,'--baseline',$missing,
         '--provider','SmbShare','--source',$localDir,'--authorize-nas','--source-quiescent')
     $null = Invoke-Report 'invalid-option' 1 @('--test-restore-conflict-engine','--nonsense')
+    $null = Invoke-Report 'two-pc-run-no-authorization' 2 @('--two-pc-run')
+    $null = Invoke-Report 'two-pc-peer-no-authorization' 2 @('--two-pc-peer')
     $null = Invoke-Report 'fixture-v1' 0 @('--new-fixture','--source',$localDir,'--fixture',$fixtureJson)
     $null = Invoke-Report 'verify-v1' 0 @('--verify-restored','--target',$localDir,'--fixture',$fixtureJson)
     $null = Invoke-Report 'fixture-v2' 0 @('--update-fixture','--source',$localDir,'--fixture',$fixtureJson)

@@ -41,6 +41,11 @@ public static partial class AcceptanceCli
                   FnOsPersonal also requires --server <https://host[:port]> [--cert-sha256 <SHA-256>]
                 --test-dual-account-live [--authorize-nas --server <https://host[:port]> --root-a <sandbox> --root-b <sandbox>
                   --allow-test-writes [--cert-sha256 <SHA-256>]]
+                --two-pc-run --role A|B --run-id <GUID> --workspace <new local directory>
+                  --server <https://host[:port]> --start-at <UTC ISO timestamp> --authorize-nas --allow-test-writes
+                  [--cert-sha256 <SHA-256>] [--clocks-synchronized]
+                --two-pc-peer --own <device-evidence.json> --peer <other device-evidence.json>
+                  --server <https://host[:port]> --authorize-nas [--cert-sha256 <SHA-256>]
                 --self-test
                 Exit codes: 0 PASS, 1 FAIL, 2 BLOCKED, 3 SKIP. Reports are JSON on stdout.
                 Credentials are entered in an interactive console. Never pass passwords on the command line.
@@ -55,7 +60,7 @@ public static partial class AcceptanceCli
         }
 
         Console.OutputEncoding = new UTF8Encoding(false);
-        string level = command == "--test-dual-account-live" || args.Contains("RealNasBackup") ? "RealNAS" : "Local";
+        string level = command is "--test-dual-account-live" or "--two-pc-run" or "--two-pc-peer" || args.Contains("RealNasBackup") ? "RealNAS" : "Local";
         var results = new List<Result>();
         string? temp = null;
         string? acceptanceId = null;
@@ -65,7 +70,7 @@ public static partial class AcceptanceCli
             var options = new Options(command, args.Skip(1));
             acceptanceId = options.Get("--acceptance-id");
             // Always isolate Core before it resolves any settings or log locations.
-            if (command is "--test-restore-conflict-engine" or "--test-dual-account-live" or "--self-test" or "--snapshot-before")
+            if (command is "--test-restore-conflict-engine" or "--test-dual-account-live" or "--two-pc-run" or "--two-pc-peer" or "--self-test" or "--snapshot-before")
             {
                 temp = Path.Combine(Path.GetTempPath(), $"FNSyncPlus_Acceptance_{Guid.NewGuid():N}");
                 AppStorageRoot.InitializeForTests(temp);
@@ -82,6 +87,12 @@ public static partial class AcceptanceCli
                     break;
                 case "--test-dual-account-live":
                     await DualAccountAsync(options, results, timeout.Token);
+                    break;
+                case "--two-pc-run":
+                    await TwoComputerRunAsync(options, results, timeout.Token);
+                    break;
+                case "--two-pc-peer":
+                    await TwoComputerPeerAsync(options, results, timeout.Token);
                     break;
                 case "--new-fixture":
                 case "--update-fixture":
@@ -101,7 +112,7 @@ public static partial class AcceptanceCli
         }
         finally
         {
-            if (temp != null && Directory.Exists(temp))
+            if (temp != null && Directory.Exists(temp) && command != "--two-pc-run")
             {
                 try { Directory.Delete(temp, recursive: true); }
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException)
@@ -148,6 +159,8 @@ public static partial class AcceptanceCli
             {
                 "--snapshot-before" or "--test-restore-conflict-engine" => (RemoteFlags, RemoteValues),
                 "--test-dual-account-live" => (new[] { "--authorize-nas", "--allow-test-writes" }, new[] { "--server", "--cert-sha256", "--root-a", "--root-b" }),
+                "--two-pc-run" => (new[] { "--authorize-nas", "--allow-test-writes", "--clocks-synchronized" }, new[] { "--server", "--cert-sha256", "--role", "--run-id", "--workspace", "--start-at" }),
+                "--two-pc-peer" => (new[] { "--authorize-nas" }, new[] { "--server", "--cert-sha256", "--own", "--peer" }),
                 "--new-fixture" or "--update-fixture" => (Array.Empty<string>(), new[] { "--source", "--fixture" }),
                 "--verify-restored" => (new[] { "--history" }, new[] { "--target", "--fixture" }),
                 _ => (Array.Empty<string>(), Array.Empty<string>())
