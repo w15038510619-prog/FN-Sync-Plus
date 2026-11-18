@@ -19,7 +19,7 @@
     <CsWinRTAotOptimizerEnabled>false</CsWinRTAotOptimizerEnabled>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>0.4.4</Version>
+    <Version>0.4.5</Version>
     <!-- Derived from $(Version) (see FNSyncPlus.Core.csproj): a pinned 0.4.0.0 made every build
          look identical to the update client and to the health report. -->
   </PropertyGroup>

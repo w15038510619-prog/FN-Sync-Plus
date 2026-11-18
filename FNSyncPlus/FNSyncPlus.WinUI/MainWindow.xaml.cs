@@ -380,7 +380,8 @@ namespace FNSyncPlus.WinUI
                 try
                 {
                     var manager = AppServices.GetService<TaskManager>();
-                    var metrics = page is Pages.RestorePage restore ? restore.VisualLayoutMetrics() : new Dictionary<string, object?>();
+                    var metrics = page is Pages.RestorePage restore ? restore.VisualLayoutMetrics()
+                        : page is Pages.DevicePage device ? device.VisualLayoutMetrics() : new Dictionary<string, object?>();
                     metrics["task_count"] = manager.Tasks.Count;
                     metrics["nas_online"] = manager.IsNasOnline;
                     metrics["tray_tooltip"] = _trayIcon?.DisplayText;

@@ -190,7 +190,7 @@ function Wait-PageReady {
                 $ready = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
                 $polls++
                 if ($ready.page -eq $Page -and $ready.ready -eq $true) {
-                    return [pscustomobject]@{ ok = $true; polls = $polls; waitedMs = [int]((Get-Date) - $began).TotalMilliseconds; taskCount = $ready.task_count; trayTooltip = $ready.tray_tooltip; caption = $ready.caption_foreground; inactiveCaption = $ready.caption_inactive_foreground }
+                    return [pscustomobject]@{ ok = $true; polls = $polls; waitedMs = [int]((Get-Date) - $began).TotalMilliseconds; taskCount = $ready.task_count; trayTooltip = $ready.tray_tooltip; caption = $ready.caption_foreground; inactiveCaption = $ready.caption_inactive_foreground; cardVisible = $ready.connection_card_visible; valueContrast = $ready.connection_value_contrast; labelContrast = $ready.connection_label_contrast }
                 }
             } catch { }
         }
@@ -279,6 +279,12 @@ function Capture-Scenario {
             Record-Result -Name ("{0}/{1}：标题栏按钮跟随主题并保持未激活状态对比度" -f $ScenarioKey, $Page) `
                 -Passed ($ready.caption -ceq $captionExpected -and $ready.inactiveCaption -ceq $inactiveExpected) `
                 -Detail ("active={0} inactive={1}" -f $ready.caption,$ready.inactiveCaption)
+
+            if ($ExtraArgs -contains '--device-connected-fixture') {
+                Record-Result -Name ("{0}：连接卡片账号、UID、路径及标签对比度至少 4.5:1" -f $ScenarioKey) `
+                    -Passed ($ready.cardVisible -eq $true -and [double]$ready.valueContrast -ge 4.5 -and [double]$ready.labelContrast -ge 4.5) `
+                    -Detail ("visible={0} values={1:N2} labels={2:N2}" -f $ready.cardVisible,$ready.valueContrast,$ready.labelContrast)
+            }
 
             if ($AlsoMinWindow) {
                 $smallPng = Join-Path $OutRoot ("{0}-{1}-min-{2}x{3}.png" -f $ScenarioKey, $Page, $MinWidth, $MinHeight)
@@ -390,6 +396,9 @@ try {
         # D. 设备页：连接状态界面。
         Capture-Scenario -ScenarioKey $key -Page 'Device' -View 'Device' -Theme $theme `
             -TaskNames @() -AlsoMinWindow $false
+
+        Capture-Scenario -ScenarioKey ($key + '-connected') -Page 'Device' -View 'Device' -Theme $theme `
+            -TaskNames @() -AlsoMinWindow $false -ExtraArgs @('--device-connected-fixture')
     }
 
     # ---- 无人值守交接的退出探针：真实应用必须能通过协调器安全退出 ----

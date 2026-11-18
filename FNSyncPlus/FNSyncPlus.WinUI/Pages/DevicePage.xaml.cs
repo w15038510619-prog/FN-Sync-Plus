@@ -17,6 +17,14 @@ namespace FNSyncPlus.WinUI.Pages
 
             this.Loaded += (s, e) =>
             {
+                if (AppServices.IsUiVisualAcceptance && Array.IndexOf(Environment.GetCommandLineArgs(), "--device-connected-fixture") >= 0)
+                {
+                    // Rendering only: do not authenticate or change the service's connection state.
+                    ConnectedCard.Visibility = Visibility.Visible;
+                    AccountValue.Text = "visual-test-user";
+                    UidValue.Text = "1001";
+                    RootValue.Text = "飞牛官方个人空间 [我的文件] (vol1/1001)";
+                }
                 if (!string.IsNullOrEmpty(ViewModel.Password))
                 {
                     TxtPassword.Password = ViewModel.Password;
@@ -28,6 +36,23 @@ namespace FNSyncPlus.WinUI.Pages
             {
                 ViewModel.RequestNavigateToAddFolder -= OnRequestNavigateToAddFolder;
             };
+        }
+
+        public System.Collections.Generic.Dictionary<string, object?> VisualLayoutMetrics()
+        {
+            double Contrast(Microsoft.UI.Xaml.Media.Brush foreground)
+            {
+                if (foreground is not Microsoft.UI.Xaml.Media.SolidColorBrush fg || ConnectedCard.Background is not Microsoft.UI.Xaml.Media.SolidColorBrush bg) return 0;
+                double Linear(double value) => value <= 0.04045 ? value / 12.92 : Math.Pow((value + 0.055) / 1.055, 2.4);
+                double Luma(double r, double g, double b) => 0.2126 * Linear(r / 255) + 0.7152 * Linear(g / 255) + 0.0722 * Linear(b / 255);
+                double alpha = fg.Color.A / 255.0;
+                double text = Luma(fg.Color.R * alpha + bg.Color.R * (1-alpha), fg.Color.G * alpha + bg.Color.G * (1-alpha), fg.Color.B * alpha + bg.Color.B * (1-alpha));
+                double background = Luma(bg.Color.R, bg.Color.G, bg.Color.B);
+                return (Math.Max(text, background) + 0.05) / (Math.Min(text, background) + 0.05);
+            }
+            return new() { ["connection_card_visible"] = ConnectedCard.Visibility == Visibility.Visible,
+                ["connection_value_contrast"] = Math.Min(Contrast(AccountValue.Foreground), Math.Min(Contrast(UidValue.Foreground), Contrast(RootValue.Foreground))),
+                ["connection_label_contrast"] = Contrast(AccountLabel.Foreground) };
         }
 
         private void OnRequestNavigateToAddFolder()

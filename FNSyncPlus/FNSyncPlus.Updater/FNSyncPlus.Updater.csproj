@@ -9,7 +9,7 @@
     <LangVersion>12</LangVersion>
     <AssemblyName>FNSyncPlus.Updater</AssemblyName>
     <RootNamespace>FNSyncPlus.Updater</RootNamespace>
-    <Version>0.4.4</Version>
+    <Version>0.4.5</Version>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
