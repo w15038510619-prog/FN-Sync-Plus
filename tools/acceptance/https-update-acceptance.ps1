@@ -42,7 +42,7 @@ param(
     [string]$VersionA = '0.5.0',
     [string]$VersionB = '0.6.0',
     [string]$VersionC = '0.7.0',
-    [ValidateSet('beta','stable')][string]$Channel = $Channel,
+    [ValidateSet('beta','stable')][string]$Channel = 'stable',
     [switch]$ControlledOnlineBeta,
     [switch]$SkipBuilds
 )

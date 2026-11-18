@@ -1,5 +1,7 @@
 # FN Sync Plus v0.4.0-beta 验收状态
 
+最新结论见 [0.4.4 实际交付与验收](production-candidate-0.4.4.md)。以下旧版状态按时间保留，不代表当前发布状态。
+
 2026-11-18 后续版本、完整回归、安装测试及当前外部条件见 [0.4.3 投运候选交付](production-candidate-0.4.3.md)。本轮按独立账号和独立目标验收，完整双机验收按用户指示记为 SKIP。以下早期记录用于追溯。
 
 > 2026-11-18 状态见 [双电脑收尾验收总表](two-computer-acceptance-status-20261118.md)。用户已确认第二台 Windows 恢复、真实在线升级及配置保留完成。本文以下内容保留早期各轮记录，当时的 BLOCKED 不代表当前状态。剩余实机操作见 [双电脑脚本说明](two-computer-operator-guide.md)。
