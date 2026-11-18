@@ -10,6 +10,7 @@
 
 ```powershell
 Set-Location 'C:\FN-TwoPC\FN-Sync-Plus-TwoPC'
+Set-ExecutionPolicy -Scope Process Bypass -Force
 $start = '2026-11-18T06:00:00Z'
 .\Test-ComputerA.ps1 -Phase Run -Server 'https://NAS_HOST:5667' -StartAtUtc $start -ClocksSynchronized
 ```

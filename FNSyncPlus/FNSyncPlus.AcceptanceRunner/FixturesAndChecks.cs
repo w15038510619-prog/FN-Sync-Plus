@@ -202,5 +202,18 @@ public static partial class AcceptanceCli
         Check("TwoPcDestructiveAudit", AuditOne(["file.del"]).Status == "FAIL" &&
             AuditOne(["file.ls"]).Status == "PASS" && AuditOne(["unclassified"]).Status == "BLOCKED",
             "Delete requests fail the audit; unknown requests cannot silently pass.");
+        Check("TwoPcHeartbeatIsNotWorkerWrite", StorageRequestCount(["user.info", "user.info"]) == 0 &&
+            StorageRequestCount(["user.info", "file.mkdir"]) == 1,
+            "Background authentication heartbeats do not create false task-guard failures; storage requests still count.");
+        string taskSource = Path.Combine(AppStorageRoot.TestSessionsRoot(), "two-pc-source", "source");
+        Directory.CreateDirectory(taskSource);
+        var isolated = AppSettings.LoadIsolatedTestSession(Guid.NewGuid());
+        isolated.SetIsolatedTestBoundary("Codex_FN_Test_TwoPC_SelfTest");
+        isolated.EnsureIsolatedTestTask(new()
+        {
+            SourceFolder = taskSource, ProviderType = FNSyncPlus.Core.Storage.StorageProviderType.FnOsPersonal,
+            DestinationFolder = "Codex_FN_Test_TwoPC_SelfTest/A/backup"
+        });
+        Check("TwoPcSourceBoundary", true, "The two-PC source representation satisfies the actual isolated scheduler path guard.");
     }
 }

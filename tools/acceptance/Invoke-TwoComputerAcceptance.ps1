@@ -98,6 +98,8 @@ if ($Phase -eq 'Observe') {
 }
 
 if (!(Test-Path -LiteralPath $runner -PathType Leaf)) { throw 'Fully extract the acceptance package, including its EXE.' }
+$build = ((& $runner --version) -join [Environment]::NewLine) | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $build.BuildSha -ne $session.SourceSha) { throw 'The EXE build SHA does not match session.json.' }
 if (!$Server) { $Server = Read-Host 'NAS HTTPS address, for example https://nas.example:5667' }
 $arguments = @('--server',$Server,'--authorize-nas')
 if ($CertificateSha256) { $arguments += @('--cert-sha256',$CertificateSha256) }

@@ -14,7 +14,7 @@
 | UI-08 | P1 | `RestorePage.xaml` 历史标签内提供历史恢复按钮，底部完整恢复按钮仍可执行当前版本恢复 | 已确认容易误操作。后续根据当前标签显示明确动作及目标版本 |
 | UPDATE-01 | P1 | `InstallUpdateAsync` 每次调用 DownloadAsync。UpdateService 的 TryFindVerifiedPackage 已存在，但手动安装路径没有使用 | 已确认。后续从共用下载入口复用与当前签名清单相符且重新核验的缓存，缓存不符才重下 |
 | UPDATE-02 | P1 | UpdateService/UpdateClient 创建 30 秒 HttpClient，继承系统代理。现场代理约 40 KiB/s，直连明显更快 | 已有实测和源码依据。待分离检查超时与下载超时，处理取消/进度并保留 TLS 校验。续传须在签名、Range 与哈希一致性范围内单独设计 |
-| UPDATE-03 | P1 | `tools/release/Build-OnlineBeta.ps1` 在本地存在，但被 `.gitignore` 的 `[Rr]elease/` 排除，未进入远端提交 | 本轮补齐原脚本，并对该源码目录添加忽略例外。新包构建来源、SHA-256 和仓库文件对应。CentOS Web 暂存区配置核对见下文，尚不把一次 403 视为完整隔离证明 |
+| UPDATE-03 | P1 | `tools/release/Build-OnlineBeta.ps1` 在本地存在，但被 `.gitignore` 的 `[Rr]elease/` 排除，未进入远端提交 | 本轮补齐原脚本，对该源码目录添加忽略例外，并已确认 GitHub 分支可读。CentOS 当前暂存隔离保护已验证，具体条件见下文 |
 | UPDATE-04 | P2 | 手动安装先检查和下载，安装状态直到开始启动更新器才切换，已下载路径仍再下载 | 已确认主要链路。待先修 UPDATE-01，再补检查/校验/等待任务/重启/失败反馈 |
 | DIAG-01 | P2 | 原始 update.log 为 UTF-8，PowerShell 5.1 未显式编码时摘录可乱码。TLS 偶发错误尚未归因，实际证书拒绝测试已通过 | 本轮新增脚本统一显式 UTF-8 及 ASCII 示例路径。历史产品日志问题仍登记，普通异常不能等同权限拒绝 |
 | TEST-01 | P1 | 原双账号程序只在单机依次登录两个账号，同名任务也顺序执行，不能证明两台电脑并发 | 本轮补双机各自登录入口，交换证据并检查真实 Worker 重叠。未执行实机时输出 BLOCKED |
@@ -22,4 +22,4 @@
 
 双电脑 P0 实机报告回收后进入产品集中整改。新工具支持测试人员录入安装版操作观察并对证据文件计算 SHA-256，明确区分操作人员记录和工具自动检查。
 
-CentOS 暂存区域本轮仅执行 HTTPS 只读探测。不同 URL 的 403/404 只能证明这些具体请求没有返回内容。要确认整个 `/data/fnsync-updates/.beta-staging/` 都无法经 Web 读取，还需核对 Nginx 生效配置、root/alias 映射及符号链接。当前记为 BLOCKED。没有重新发布在线更新清单。
+CentOS 暂存区域完成只读核对。`nginx -T` 显示 worker 使用 `nginx` 账号，`location ^~ /fnsync/` alias 为 `/data/fnsync-updates/`，暂存区依赖文件系统权限隔离。`stat` 确认 `.beta-staging` 为 `root` 所有、权限 `700`，非 root Nginx worker 无法遍历其中任何子路径。已知公钥 URL `/fnsync/.beta-staging/beta-update-public.pem` 返回 403，另两个入口返回 404。公开 beta 目录内未发现符号链接。当前保护条件 PASS，后续发布继续保持暂存目录 700。原始配置证据保留在开发电脑 `D:\FN_Sync_Plus_TwoPC_20261118\centos-staging-readonly-audit.txt`。本轮没有修改 Nginx 或更新清单。

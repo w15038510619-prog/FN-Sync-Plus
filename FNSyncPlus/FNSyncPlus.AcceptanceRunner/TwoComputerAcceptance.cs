@@ -66,14 +66,14 @@ public static partial class AcceptanceCli
         string workspace = LocalPath(options.Require("--workspace"));
         if (Directory.Exists(workspace) || File.Exists(workspace)) throw new InvalidInput("Use a new local workspace.");
         Directory.CreateDirectory(workspace);
-        string source = Path.Combine(workspace, "source");
+        string source = Path.Combine(AppStorageRoot.TestSessionsRoot(), $"TwoPC_{runId:N}_{role}", "source");
         Directory.CreateDirectory(source);
         var server = Server(options);
         string sandbox = $"Codex_FN_Test_TwoPC_{runId:N}";
         string target = $"{sandbox}/{role}/backup";
         await WriteNewJsonAsync(Path.Combine(workspace, "cleanup-inventory.json"), new
         {
-            LocalWorkspace = workspace, IsolatedProfileRoot = AppStorageRoot.TestRoot, RelativePersonalBackupPath = target,
+            LocalWorkspace = workspace, LocalSource = source, IsolatedProfileRoot = AppStorageRoot.TestRoot, RelativePersonalBackupPath = target,
             Retained = true, Action = "Retain test files and history, including after failure. No automatic remote deletion."
         }, token);
         var trace = new ConcurrentQueue<string>();
@@ -189,6 +189,9 @@ public static partial class AcceptanceCli
             "The actual outgoing request trace is classified. No remote delete operation is permitted in this test.");
     }
 
+    // user.info is the authenticated control-channel heartbeat, independent of task execution.
+    private static int StorageRequestCount(IEnumerable<string> trace) => trace.Count(operation => operation != "user.info");
+
     private static async Task<Entry[]> ReadLocalFilesAsync(string root, CancellationToken token)
     {
         var entries = new List<Entry>();
@@ -234,12 +237,12 @@ public static partial class AcceptanceCli
     private static async Task TestIdleGuardsAsync(TaskManager manager, SyncTask task, Session session,
         ConcurrentQueue<string> trace, List<Result> results, CancellationToken token)
     {
-        int before = trace.Count;
+        int before = StorageRequestCount(trace);
         manager.PauseTask(task.TaskId);
         manager.TriggerSync(task.TaskId);
         await Task.Delay(500, token);
-        AddResult(results, "PausedTriggerBlocked", task.State == TaskSyncState.Paused && trace.Count == before, null,
-            "A paused synthetic task must ignore a manual trigger without a NAS request.");
+        AddResult(results, "PausedTriggerBlocked", task.State == TaskSyncState.Paused && StorageRequestCount(trace) == before, null,
+            "A paused synthetic task must ignore a manual trigger without a storage request. Authentication heartbeats are excluded.");
         manager.ResumeTask(task.TaskId);
         manager.SetNasOnlineState(false);
         var stopped = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -250,12 +253,12 @@ public static partial class AcceptanceCli
             manager.TriggerSync(task.TaskId);
             await stopped.Task.WaitAsync(TimeSpan.FromSeconds(15), token);
             while (manager.HasRunningWork) await Task.Delay(100, token);
-            AddResult(results, "OfflineTriggerBlocked", trace.Count == before, null,
+            AddResult(results, "OfflineTriggerBlocked", StorageRequestCount(trace) == before, null,
                 "The real scheduler's offline state prevented this test task from issuing NAS requests. The physical network remained connected.");
         }
         finally { manager.TaskStateChanged -= Changed; }
         manager.SetNasOnlineState(true);
-        AddResult(results, "ManualReconnectIdle", !task.IsRunning && trace.Count == before, new { session.Uid },
+        AddResult(results, "ManualReconnectIdle", !task.IsRunning && StorageRequestCount(trace) == before, new { session.Uid },
             "Reconnecting a manual-only synthetic task must leave it idle.");
     }
 
@@ -291,6 +294,14 @@ public static partial class AcceptanceCli
         var before = await ReadBackupAsync(session.Provider, own.BackupPath, token);
         if (before.SnapshotId != own.Windows.Single(w => w.Phase == "Incremental").SnapshotId)
             throw new Blocked("The owned test snapshot changed after its device report. Stop test writers and inspect it.");
+        string restored = Path.Combine(AppStorageRoot.TestRoot!, "after-both-devices");
+        var engine = new RestoreEngine(new ManifestManager());
+        var restore = await engine.RunRestorePackageAsync(session.Provider, before.Package, restored, cancellationToken: token);
+        var restoredFiles = await ReadLocalFilesAsync(restored, token);
+        AddResult(results, "OwnHashesAfterBothRun", restore.FailedFiles == 0 &&
+            restore.IntegrityVerifiedFiles == own.CurrentFiles.Length && own.CurrentFiles.SequenceEqual(restoredFiles),
+            new { Expected = own.CurrentFiles, Actual = restoredFiles },
+            "After both devices finished, actual backup object bytes were recovered and compared against this machine's original file hashes.");
         var permission = ClassifyProbe(await session.Client.ListFilesAsync($"{peer.PersonalRoot}/{peer.BackupPath}", token));
         results.Add(permission with { TestId = "PeerReadPermission", Reason = permission.Reason + " The other device previously confirmed this exact directory as nonempty and owned." });
         await TestPeerUidGuardAsync(session, server, own, peer, trace, results, token);
@@ -306,7 +317,7 @@ public static partial class AcceptanceCli
     private static async Task TestPeerUidGuardAsync(Session session, Uri server, DeviceEvidence own, DeviceEvidence peer,
         ConcurrentQueue<string> trace, List<Result> results, CancellationToken token)
     {
-        string source = Path.Combine(AppStorageRoot.TestRoot!, "uid-guard-source");
+        string source = Path.Combine(AppStorageRoot.TestSessionsRoot(), "uid-guard-source");
         Directory.CreateDirectory(source);
         await File.WriteAllTextAsync(Path.Combine(source, "marker.txt"), "UID boundary check", token);
         string sandbox = own.BackupPath.Split('/')[0];
@@ -330,14 +341,14 @@ public static partial class AcceptanceCli
             if (state.TaskId == task.TaskId && state.State is TaskSyncState.ConfigurationError or TaskSyncState.Completed or TaskSyncState.Error)
                 completion.TrySetResult(state.State == TaskSyncState.ConfigurationError && state.LastSyncStatus == "NAS 账号不匹配");
         };
-        int before = trace.Count;
+        int before = StorageRequestCount(trace);
         try
         {
             manager.TriggerSync(task.TaskId);
             bool refused = await completion.Task.WaitAsync(TimeSpan.FromSeconds(15), token);
-            AddResult(results, "PeerTaskWriteBlocked", refused && trace.Count == before,
+            AddResult(results, "PeerTaskWriteBlocked", refused && StorageRequestCount(trace) == before,
                 new { TaskUid = peer.Uid, ConnectedUid = session.Uid },
-                "The real scheduler rejects the other account's UID before sending any NAS request.");
+                "The real scheduler rejects the other account's UID before sending a storage request. Authentication heartbeats are excluded.");
         }
         finally
         {

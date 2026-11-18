@@ -12,6 +12,7 @@
 | 同版本不重复升级 | PASS | 用户现场确认及现有 HTTPS 回环结果 |
 | 本地 HTTPS 更新与故障回滚 | PASS | `D:\FN_Sync_Plus_WB\.acceptance\online-beta-20261117-retry\acceptance-result.json`，43 PASS / 0 FAIL |
 | 上一提交 Windows CI | PASS | `ad9fb68`，Build run `44055875207`，HTTPS run `44055875201` 均成功，PR #4 为 Draft |
+| 更新构建脚本入库与暂存区隔离 | PASS | 原脚本已补入分支。只读核对 Nginx worker 为 nginx，暂存目录 root/700，公开 beta 无符号链接，已知暂存文件 URL 为 403 |
 | P0-1 两个真实 UID 各自备份和权限隔离 | BLOCKED | 账号已具备。待双方实际运行 Run、交换本人生成的证据并各自运行 Peer |
 | P0-2 两客户端并行首次与增量 | BLOCKED | 待相同轮次和共同时间的两份实机 Worker 时段，必须实际重叠 |
 | P0-3 安装版账号切换及运行时断连 | BLOCKED | 可由一台先行试点机在合成任务中完成。旧的隔离故障回归支持实现，但不能替代这个界面实机检查 |
