@@ -29,7 +29,7 @@
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <TextBlock Text="备份测试实验室 (Test Lab)" FontSize="18" FontWeight="SemiBold" />
                         <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="6,2" VerticalAlignment="Center">
-                            <TextBlock Text="v0.4.0-beta 内置验证系统" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" FontWeight="Medium" />
+                            <TextBlock Text="内部验证系统" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" FontWeight="Medium" />
                         </Border>
                     </StackPanel>
                     <TextBlock Text="安全沙箱环境自动化生成 254/255/256/300 字节临界文件，验证短名无损映射、多任务隔离与 SHA-256 逐字节完整性恢复。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />

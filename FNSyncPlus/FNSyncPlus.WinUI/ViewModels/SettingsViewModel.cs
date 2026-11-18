@@ -169,7 +169,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             };
 
             var update = _updates.Settings;
-            _currentVersionText = $"当前版本 {ProductVersion}（{_updates.CurrentChannelName} 通道）";
+            _currentVersionText = $"当前版本 {ProductVersion}";
             _updateFeedUrl = update.ManifestUrl;
             _updateProxyUrl = update.ProxyUrl ?? "";
             _connectTimeoutSeconds = Math.Clamp(update.ConnectTimeoutSeconds, 2, 120);
@@ -217,7 +217,8 @@ namespace FNSyncPlus.WinUI.ViewModels
             CapacitySummary = "正在统计容量（只读，不会修改任何备份）…";
             try
             {
-                var report = await _capacity.AnalyzeAsync(provider, task.DestinationFolder).ConfigureAwait(true);
+                provider = await _connectionService.GetTaskStorageAsync(task, default) ?? throw new IOException("请先连接创建任务的账号。");
+                var report = await _capacity.AnalyzeAsync(provider, TaskManager.BackupTarget(task)).ConfigureAwait(true);
                 CapacitySummary = report.ToSummary();
             }
             catch (Exception ex)
@@ -243,7 +244,8 @@ namespace FNSyncPlus.WinUI.ViewModels
                     KeepVersions = Math.Max(1, (int)RetentionKeepVersions),
                     KeepDays = Math.Max(0, (int)RetentionKeepDays)
                 };
-                var preview = await _capacity.PreviewRetentionAsync(provider, task.DestinationFolder, policy).ConfigureAwait(true);
+                provider = await _connectionService.GetTaskStorageAsync(task, default) ?? throw new IOException("请先连接创建任务的账号。");
+                var preview = await _capacity.PreviewRetentionAsync(provider, TaskManager.BackupTarget(task), policy).ConfigureAwait(true);
                 var text = new System.Text.StringBuilder();
                 text.AppendLine(preview.Summary);
                 foreach (var version in preview.Versions)

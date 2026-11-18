@@ -16,14 +16,14 @@
 
         <!-- 1. HEADER -->
         <StackPanel Grid.Row="0" Spacing="2">
-            <TextBlock Text="飞牛 NAS 设备连接与认证" FontSize="20" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-            <TextBlock Text="管理局域网内飞牛 NAS 的 SMB 安全连接凭据。密码通过 Windows DPAPI 本地强加密安全保护，杜绝明文泄露。" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            <TextBlock Text="NAS 设备" FontSize="20" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+            <TextBlock Text="连接自己的 NAS 账号。" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
         </StackPanel>
 
         <!-- 2. TWO-COLUMN LAYOUT -->
         <Grid Grid.Row="1" ColumnSpacing="16">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="380" />
+                <ColumnDefinition Width="240" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
@@ -64,31 +64,34 @@
                         </ListView.ItemTemplate>
                     </ListView>
 
-                    <Button Grid.Row="2" Command="{x:Bind ViewModel.SearchLanDevicesCommand}" HorizontalAlignment="Stretch">
+                    <StackPanel Grid.Row="2" Spacing="6">
+                    <TextBlock Text="{x:Bind ViewModel.DiscoveryMessage, Mode=OneWay}" TextWrapping="Wrap" FontSize="12" />
+                    <Button Command="{x:Bind ViewModel.SearchLanDevicesCommand}" HorizontalAlignment="Stretch">
                         <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Center">
                             <FontIcon Glyph="&#xE72C;" FontSize="12" />
-                            <TextBlock Text="重新探测局域网设备" FontSize="12" />
+                            <TextBlock Text="搜索设备" FontSize="12" />
                         </StackPanel>
                     </Button>
+                    </StackPanel>
                 </Grid>
             </Border>
 
             <!-- RIGHT: AUTHENTICATION FORM & STATUS -->
             <Border Grid.Column="1" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="24,20">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel Spacing="16" HorizontalAlignment="Left" Width="400">
+                    <StackPanel Spacing="16" HorizontalAlignment="Stretch">
                         <StackPanel Spacing="4">
                             <TextBlock Text="飞牛账号认证与个人空间直连" FontSize="15" FontWeight="SemiBold" />
-                            <TextBlock Text="直连飞牛官方「我的文件」原生个人存储，杜绝团队共享混用与伪造路径，支持 TLS 证书指纹校验与两步验证。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                            <TextBlock Text="支持我的文件和已授权的团队共享。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
                         </StackPanel>
 
                         <!-- Connected Status Card -->
                         <Border Visibility="{x:Bind ViewModel.IsConnected, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
-                                Background="#F0FDF4" BorderBrush="#BBF7D0" BorderThickness="1" CornerRadius="6" Padding="12,10" Width="380">
+                                Background="#F0FDF4" BorderBrush="#BBF7D0" BorderThickness="1" CornerRadius="6" Padding="12,10">
                             <StackPanel Spacing="6">
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <FontIcon Glyph="&#xE73E;" FontSize="15" Foreground="#15803D" VerticalAlignment="Center" />
-                                    <TextBlock Text="飞牛官方「我的文件」原生个人空间已连接" FontWeight="SemiBold" FontSize="12" Foreground="#15803D" VerticalAlignment="Center" />
+                                    <TextBlock Text="已连接" FontWeight="SemiBold" FontSize="12" Foreground="#15803D" VerticalAlignment="Center" />
                                 </StackPanel>
                                 <Grid ColumnSpacing="8" RowSpacing="2">
                                     <Grid.ColumnDefinitions>
@@ -110,27 +113,29 @@
                             </StackPanel>
                         </Border>
 
+                        <Button Content="切换账号" Command="{x:Bind ViewModel.SwitchAccountCommand}" Visibility="{x:Bind ViewModel.IsConnected, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                        <StackPanel Spacing="12" Visibility="{x:Bind ViewModel.ShowLoginForm, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
                         <!-- NAS Address -->
-                        <StackPanel Spacing="6" Width="380" HorizontalAlignment="Left">
+                        <StackPanel Spacing="6" HorizontalAlignment="Left">
                             <TextBlock Text="NAS 主机名 / IP 地址" FontSize="12" FontWeight="Medium" />
-                            <TextBox Text="{x:Bind ViewModel.NasAddress, Mode=TwoWay}" Width="380" PlaceholderText="例如: 192.168.1.100" FontFamily="Consolas, Segoe UI" FontSize="13" />
+                            <TextBox Text="{x:Bind ViewModel.NasAddress, Mode=TwoWay}" PlaceholderText="例如: 192.168.1.100" FontFamily="Consolas, Segoe UI" FontSize="13" />
                         </StackPanel>
 
                         <!-- Username -->
-                        <StackPanel Spacing="6" Width="380" HorizontalAlignment="Left">
+                        <StackPanel Spacing="6" HorizontalAlignment="Left">
                             <TextBlock Text="飞牛 NAS 用户名" FontSize="12" FontWeight="Medium" />
-                            <TextBox Text="{x:Bind ViewModel.Username, Mode=TwoWay}" Width="380" PlaceholderText="例如: admin 或个人用户名" FontSize="13" />
+                            <TextBox Text="{x:Bind ViewModel.Username, Mode=TwoWay}" PlaceholderText="例如: admin 或个人用户名" FontSize="13" />
                         </StackPanel>
 
                         <!-- Password -->
-                        <StackPanel Spacing="6" Width="380" HorizontalAlignment="Left">
+                        <StackPanel Spacing="6" HorizontalAlignment="Left">
                             <TextBlock Text="密码" FontSize="12" FontWeight="Medium" />
-                            <PasswordBox x:Name="TxtPassword" PasswordChanged="TxtPassword_PasswordChanged" Width="380" PlaceholderText="输入飞牛 NAS 登录密码" FontSize="13" />
+                            <PasswordBox x:Name="TxtPassword" PasswordChanged="TxtPassword_PasswordChanged" PlaceholderText="输入飞牛 NAS 登录密码" FontSize="13" />
                         </StackPanel>
 
                         <!-- TLS Certificate Confirmation Card (Visible only when untrusted cert is detected) -->
                         <Border Visibility="{x:Bind ViewModel.IsCertConfirmationRequired, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
-                                Background="#FFFBEB" BorderBrush="#FDE68A" BorderThickness="1" CornerRadius="8" Padding="14,12" Width="380" HorizontalAlignment="Left">
+                                Background="#FFFBEB" BorderBrush="#FDE68A" BorderThickness="1" CornerRadius="8" Padding="14,12" HorizontalAlignment="Left">
                             <StackPanel Spacing="8">
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <FontIcon Glyph="&#xE7BA;" FontSize="16" Foreground="#D97706" VerticalAlignment="Center" />
@@ -156,7 +161,7 @@
 
                         <!-- Two Factor Authentication Box (Visible only when required) -->
                         <Border Visibility="{x:Bind ViewModel.TwoFactorRequired, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
-                                Background="#EFF6FF" BorderBrush="#BFDBFE" BorderThickness="1" CornerRadius="6" Padding="12,10" Width="380">
+                                Background="#EFF6FF" BorderBrush="#BFDBFE" BorderThickness="1" CornerRadius="6" Padding="12,10">
                             <StackPanel Spacing="8">
                                 <StackPanel Orientation="Horizontal" Spacing="6">
                                     <FontIcon Glyph="&#xE8D7;" FontSize="14" Foreground="#1D4ED8" VerticalAlignment="Center" />
@@ -177,14 +182,14 @@
                         </Border>
 
                         <!-- Remember Password -->
-                        <CheckBox Content="记住凭据 (使用 Windows DPAPI 本地强加密安全存储)" IsChecked="{x:Bind ViewModel.RememberPassword, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanChangeRememberPassword, Mode=OneWay}" FontSize="12" Width="380" />
+                        <CheckBox Content="记住登录信息" IsChecked="{x:Bind ViewModel.RememberPassword, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanChangeRememberPassword, Mode=OneWay}" FontSize="12" />
 
                         <!-- Action Buttons -->
-                        <StackPanel Orientation="Horizontal" Spacing="12" Width="380">
+                        <StackPanel Orientation="Horizontal" Spacing="12">
                             <Button Command="{x:Bind ViewModel.LoginCommand}" Style="{ThemeResource AccentButtonStyle}" Padding="16,8">
                                 <StackPanel Orientation="Horizontal" Spacing="6">
                                     <FontIcon Glyph="&#xE8D7;" FontSize="13" />
-                                    <TextBlock Text="连接飞牛官方个人空间" FontSize="12" FontWeight="SemiBold" />
+                                    <TextBlock Text="连接" FontSize="12" FontWeight="SemiBold" />
                                 </StackPanel>
                             </Button>
 
@@ -196,14 +201,16 @@
                             </Button>
                         </StackPanel>
 
+                        </StackPanel>
+                        <Button Content="断开连接" Command="{x:Bind ViewModel.DisconnectCommand}" Visibility="{x:Bind ViewModel.IsConnected, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
                         <!-- Status Message / InfoBar -->
                         <InfoBar
-                            Width="380"
+
                             HorizontalAlignment="Left"
-                            IsOpen="{x:Bind HasStatusMessage(ViewModel.StatusMessage), Mode=OneWay}"
-                            Severity="{x:Bind GetSeverity(ViewModel.IsSuccess), Mode=OneWay}"
-                            Title="{x:Bind GetStatusTitle(ViewModel.IsSuccess), Mode=OneWay}"
-                            Message="{x:Bind ViewModel.StatusMessage, Mode=OneWay}"
+                            IsOpen="{x:Bind HasStatusMessage(ViewModel.ConnectionMessage), Mode=OneWay}"
+                            Severity="{x:Bind GetSeverity(ViewModel.ConnectionHealthy), Mode=OneWay}"
+                            Title="{x:Bind GetStatusTitle(ViewModel.ConnectionHealthy), Mode=OneWay}"
+                            Message="{x:Bind ViewModel.ConnectionMessage, Mode=OneWay}"
                             IsClosable="False" />
                     </StackPanel>
                 </ScrollViewer>

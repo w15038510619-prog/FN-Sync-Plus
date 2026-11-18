@@ -13,7 +13,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private readonly NasConnectionService _connectionService;
 
         [ObservableProperty]
-        private string _appTitle = "飞牛同步增强版 v0.4.0-beta";
+        private string _appTitle = $"飞牛同步增强版 v{FNSyncPlus.Core.Updates.UpdateService.DisplayVersion}";
 
         [ObservableProperty]
         private string _nasStatusText = "NAS 未连接 (点击配置)";

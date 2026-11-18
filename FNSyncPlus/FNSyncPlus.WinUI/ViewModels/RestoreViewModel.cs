@@ -17,6 +17,7 @@ namespace FNSyncPlus.WinUI.ViewModels
     public class RestoreFileDisplayItem
     {
         public string OriginalRelPath { get; set; } = string.Empty;
+        public string OriginalPath { get; set; } = string.Empty;
         public string StoredRelPath { get; set; } = string.Empty;
         public long Size { get; set; }
         public string FormattedSize => $"{Size:N0} B";
@@ -88,7 +89,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         public bool CanConfigureRestore => !IsRestoring && !IsScanning;
         public bool CanRetryCurrentRestore => CanConfigureRestore && HasFailedFiles && _retryContext is { } retry &&
             retry.Package == SelectedPackage && retry.Target == LocalRestoreTarget && retry.Policy == ConflictPolicyIndex &&
-            FailedFilesList.Count > 0 && _connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider;
+            FailedFilesList.Count > 0 && _connectionService.IsConnected;
 
         partial void OnLocalRestoreTargetChanged(string value) => OnPropertyChanged(nameof(CanRetryCurrentRestore));
         partial void OnConflictPolicyIndexChanged(int value) => OnPropertyChanged(nameof(CanRetryCurrentRestore));
@@ -118,11 +119,16 @@ namespace FNSyncPlus.WinUI.ViewModels
         public RestoreViewModel(RestoreEngine restoreEngine, AppSettings settings, NasConnectionService connectionService)
         {
             _restoreEngine = restoreEngine;
+            PackageFiles.CollectionChanged += (_, _) => { if (!_buildingPreview) RefreshFileViews(); };
+            HistoryFilesList.CollectionChanged += (_, _) => { if (!_buildingPreview) RefreshFileViews(); };
             _settings = settings;
+            LocalRestoreTarget = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "FN-Restore-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
             _connectionService = connectionService;
 
             _connectionService.PropertyChanged += (sender, args) =>
             {
+                if (args.PropertyName == nameof(NasConnectionService.State) && _connectionService.IsConnected && DiscoveredPackages.Count == 0)
+                    UIThreadHelper.RunOnUIThread(async () => await LoadKnownBackupsAsync());
                 if (args.PropertyName == nameof(NasConnectionService.CurrentStorageProvider) &&
                     _connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
                 {
@@ -143,8 +149,78 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
             else if (!string.IsNullOrEmpty(_settings.NasServer))
             {
-                NasScanRoot = $@"\\{_settings.NasServer.Trim()}\{_settings.Username.Trim()}";
+                NasScanRoot = "我的文件";
             }
+        }
+
+        private bool _buildingPreview;
+        private int _previewGeneration;
+        [ObservableProperty] private bool _otherLocationsExpanded;
+        public ObservableCollection<RestoreFileDisplayItem> VisibleFiles { get; } = new();
+        public ObservableCollection<RestoreHistoryDisplayItem> VisibleHistory { get; } = new();
+        public ObservableCollection<string> Folders { get; } = new();
+        public HashSet<string> SelectedCurrentPaths { get; } = new(StringComparer.Ordinal);
+        public HashSet<RestoreHistoryDisplayItem> SelectedHistoryItems { get; } = new();
+        public string HistoryRestoreLabel => $"恢复所选 {SelectedHistoryItems.Count} 条历史版本";
+        public void NotifyHistorySelection() => OnPropertyChanged(nameof(HistoryRestoreLabel));
+        public bool RefreshingViews { get; private set; }
+        public string CurrentRestoreLabel => SelectedCurrentPaths.Count > 0 ? $"恢复所选 {SelectedCurrentPaths.Count} 个文件" : "恢复全部最新文件";
+        public void NotifySelectionChanged() => OnPropertyChanged(nameof(CurrentRestoreLabel));
+        [ObservableProperty] private string _searchText = "";
+        [ObservableProperty] private string _currentFolder = "";
+        [ObservableProperty] private DateTimeOffset? _historyDate;
+        partial void OnSearchTextChanged(string value) => RefreshFileViews();
+        partial void OnCurrentFolderChanged(string value) => RefreshFileViews();
+        partial void OnHistoryDateChanged(DateTimeOffset? value) => RefreshFileViews();
+        public void RefreshFileViews()
+        {
+            RefreshingViews = true;
+            VisibleFiles.Clear(); VisibleHistory.Clear(); Folders.Clear();
+            string prefix = string.IsNullOrEmpty(CurrentFolder) ? "" : CurrentFolder.TrimEnd('/') + "/";
+            foreach (var file in PackageFiles.Where(f => f.OriginalRelPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+            {
+                string rest = file.OriginalRelPath[prefix.Length..];
+                int slash = rest.IndexOf('/');
+                if (slash >= 0 && !Folders.Contains(prefix + rest[..slash])) Folders.Add(prefix + rest[..slash]);
+                if ((slash < 0 || SearchText.Length > 0) && file.OriginalRelPath.Contains(SearchText, StringComparison.OrdinalIgnoreCase)) VisibleFiles.Add(file);
+            }
+            foreach (var file in HistoryFilesList.Where(f => f.DisplayPath.Contains(SearchText, StringComparison.OrdinalIgnoreCase) &&
+                (!HistoryDate.HasValue || f.Entry.ArchivedAt.ToLocalTime().Date == HistoryDate.Value.Date))) VisibleHistory.Add(file);
+            RefreshingViews = false;
+            NotifySelectionChanged();
+        }
+        [RelayCommand] private void FolderUp() { int slash = CurrentFolder.LastIndexOf('/'); CurrentFolder = slash < 0 ? "" : CurrentFolder[..slash]; }
+        private async Task<INasStorageProvider> ProviderForPackageAsync(DiscoveredBackupPackage package) =>
+            package.NasFolderUnc.StartsWith(@"\\") ? await _connectionService.ConnectTeamShareAsync(package.NasFolderUnc) :
+            _connectionService.CurrentStorageProvider ?? throw new IOException("请先连接 NAS。");
+        [RelayCommand] public async Task LoadKnownBackupsAsync()
+        {
+            if (!CanConfigureRestore) return;
+            if (!_connectionService.IsConnected) { RestoreStatusText = "请先连接 NAS，再刷新备份。"; return; }
+            IsScanning = true;
+            try
+            {
+                DiscoveredPackages.Clear();
+                foreach (var task in _settings.Tasks.Where(t => t.NasUsername == _connectionService.Username &&
+                    (!t.NasAccountUid.HasValue || t.NasAccountUid == _connectionService.CurrentUid)).ToArray())
+                {
+                    try
+                    {
+                        List<DiscoveredBackupPackage> found;
+                        if (task.ProviderType == StorageProviderType.SmbShare)
+                        {
+                            await _connectionService.ConnectTeamShareAsync(task.DestinationFolder);
+                            found = await _restoreEngine.DiscoverBackupPackagesAsync(task.DestinationFolder);
+                        }
+                        else found = await _restoreEngine.DiscoverBackupPackagesAsync(_connectionService.CurrentStorageProvider!, task.DestinationFolder);
+                        foreach (var package in found.Where(p => !DiscoveredPackages.Any(x => x.NasFolderUnc == p.NasFolderUnc))) DiscoveredPackages.Add(package);
+                    }
+                    catch (Exception ex) { App.LogCrashException(ex, "Restore.LoadKnownBackup"); RestoreLogs.Add("有备份暂时无法读取，请检查连接与权限。"); }
+                }
+                SelectedPackage = DiscoveredPackages.FirstOrDefault();
+                RestoreStatusText = DiscoveredPackages.Count > 0 ? "请选择备份和要恢复的内容。" : "未找到可用备份，可浏览其他备份位置。";
+            }
+            finally { IsScanning = false; }
         }
 
         [RelayCommand]
@@ -169,13 +245,14 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 List<DiscoveredBackupPackage> packages;
                 var scanWarnings = new List<string>();
-                if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
+                if (!NasScanRoot.StartsWith(@"\\") && _connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
                 {
                     string relScan = NasScanRoot == "我的文件" ? "" : NasScanRoot.TrimStart('/');
                     packages = await _restoreEngine.DiscoverBackupPackagesAsync(fnProvider, relScan, warnings: scanWarnings);
                 }
                 else
                 {
+                    await _connectionService.ConnectTeamShareAsync(NasScanRoot);
                     packages = await _restoreEngine.DiscoverBackupPackagesAsync(NasScanRoot.Trim(), warnings: scanWarnings);
                 }
 
@@ -213,7 +290,10 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         partial void OnSelectedPackageChanged(DiscoveredBackupPackage? value)
         {
+            SelectedCurrentPaths.Clear(); SelectedHistoryItems.Clear(); NotifyHistorySelection();
+            CurrentFolder = "";
             SelectedHistory = null;
+            if (value != null) OtherLocationsExpanded = false;
             FailedFilesList.Clear();
             HasFailedFiles = false;
             LoadPackagePreview(value);
@@ -221,28 +301,24 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         private async void LoadPackagePreview(DiscoveredBackupPackage? pkg)
         {
+            int generation = ++_previewGeneration;
             PackageFiles.Clear();
             HistoryFilesList.Clear();
+            RefreshFileViews();
             if (pkg == null) return;
+            _buildingPreview = true;
 
             try
             {
                 List<RestorePreviewItem> files;
                 var historyItems = new List<ManifestHistoryEntry>();
-                if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
-                {
-                    var manifest = await _restoreEngine.ReadPackageManifestAsync(fnProvider, pkg);
-                    if (manifest.IsNew) throw new InvalidDataException("备份清单已不存在，请重新扫描");
-                    files = manifest.Files.Select(f => new RestorePreviewItem {
-                        OriginalRelPath = f.OriginalRel, StoredRelPath = f.StoredRel,
-                        Size = f.Size, IsLongName = f.IsLongName, Sha256 = f.Sha256, ModTime = f.ModTimeIso
-                    }).ToList();
-                    if (manifest.History != null) historyItems.AddRange(manifest.History);
-                }
-                else
-                {
-                    files = await _restoreEngine.PreviewBackupAsync(pkg.NasFolderUnc);
-                }
+                var provider = await ProviderForPackageAsync(pkg);
+                var manifest = await _restoreEngine.ReadPackageManifestAsync(provider, pkg);
+                if (generation != _previewGeneration || SelectedPackage != pkg) return;
+                if (manifest.IsNew) throw new InvalidDataException("备份已不存在，请刷新。");
+                files = manifest.Files.Select(f => new RestorePreviewItem { OriginalRelPath = f.OriginalRel,
+                    StoredRelPath = f.StoredRel, Size = f.Size, IsLongName = f.IsLongName, Sha256 = f.Sha256, ModTime = f.ModTimeIso }).ToList();
+                if (manifest.History != null) historyItems.AddRange(manifest.History);
 
                 if (!ReferenceEquals(SelectedPackage, pkg)) return;
                 foreach (var history in historyItems.OrderByDescending(h => h.ArchivedAt)) HistoryFilesList.Add(new RestoreHistoryDisplayItem(history));
@@ -251,6 +327,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 {
                     PackageFiles.Add(new RestoreFileDisplayItem
                     {
+                        OriginalPath = f.OriginalRelPath,
                         OriginalRelPath = RestoreDisplayText.OriginalPath(f.OriginalRelPath),
                         StoredRelPath = f.StoredRelPath,
                         Size = f.Size,
@@ -265,6 +342,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 DetailedErrorMessage = ex.ToString();
                 RestoreStatusText = "备份清单读取失败；悬停查看原因。";
             }
+            finally { if (generation == _previewGeneration) { _buildingPreview = false; RefreshFileViews(); } }
         }
 
         [RelayCommand]
@@ -326,14 +404,10 @@ namespace FNSyncPlus.WinUI.ViewModels
                 _restoreEngine.LogEmitted += OnLog;
 
                 RestoreProgressReport report;
-                if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
-                {
-                    report = await _restoreEngine.RunRestorePackageAsync(fnProvider, package, destination, policy, cancellation.Token);
-                }
-                else
-                {
-                    report = await _restoreEngine.RunRestoreAsync(package.NasFolderUnc, destination, policy, cancellation.Token);
-                }
+                var provider = await ProviderForPackageAsync(package);
+                report = SelectedCurrentPaths.Count > 0
+                    ? await _restoreEngine.RetryRestorePackageAsync(provider, package, destination, SelectedCurrentPaths.ToArray(), policy, cancellation.Token)
+                    : await _restoreEngine.RunRestorePackageAsync(provider, package, destination, policy, cancellation.Token);
 
                 UIThreadHelper.RunOnUIThread(() =>
                 {
@@ -395,7 +469,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             try
             {
                 RestoreProgressReport report;
-                if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
+                var retryProvider = await ProviderForPackageAsync(retry.Package);
                 {
                     var policy = ConflictPolicyIndex switch
                     {
@@ -403,11 +477,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                         2 => ConflictResolution.RenameWithTimestamp,
                         _ => ConflictResolution.SkipExisting
                     };
-                    report = await _restoreEngine.RetryRestorePackageAsync(fnProvider, retry.Package, retry.Target, targetFiles, policy, cancellation.Token);
-                }
-                else
-                {
-                    throw new NotSupportedException("当前存储类型尚不支持重试，请重新执行恢复。");
+                    report = await _restoreEngine.RetryRestorePackageAsync(retryProvider, retry.Package, retry.Target, targetFiles, policy, cancellation.Token);
                 }
 
                 UIThreadHelper.RunOnUIThread(() =>
@@ -454,14 +524,9 @@ namespace FNSyncPlus.WinUI.ViewModels
             if (!CanConfigureRestore) return;
             if (SelectedPackage == null || SelectedHistory == null) { RestoreStatusText = "请先选择要恢复的历史版本。"; return; }
             if (string.IsNullOrWhiteSpace(LocalRestoreTarget)) { RestoreStatusText = "请选择还原到本地的目标文件夹。"; return; }
-            if (_connectionService.CurrentStorageProvider is not FnOsPersonalStorageProvider provider)
-            {
-                RestoreStatusText = "当前存储类型尚不支持从此界面恢复历史版本。";
-                return;
-            }
             var package = SelectedPackage;
-            var history = SelectedHistory.Entry;
-            string displayPath = SelectedHistory.DisplayPath;
+            var histories = (SelectedHistoryItems.Count > 0 ? SelectedHistoryItems : new[] { SelectedHistory }.AsEnumerable())
+                .OrderByDescending(h => h.Entry.ArchivedAt).ToArray();
             string destination = LocalRestoreTarget;
             var policy = ConflictPolicyIndex switch
             {
@@ -483,21 +548,24 @@ namespace FNSyncPlus.WinUI.ViewModels
             FailedFilesList.Clear();
             HasFailedFiles = false;
             RestoreLogs.Clear();
-            RestoreLogs.Add($"所选历史版本：{displayPath}（{history.ArchivedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss}）");
+            RestoreLogs.Add("所选历史版本：" + string.Join("；", histories.Select(h => h.DisplayPath + "（" + h.ArchivedAt + "）")));
             try
             {
-                var report = await _restoreEngine.RestorePackageHistoryAsync(provider, package, destination, history, policy, cancellation.Token);
-                RestoredFilesCount = report.RestoredFiles;
-                SkippedFilesCount = report.SkippedFiles;
-                FailedFilesCount = report.FailedFiles;
-                IntegrityVerifiedCount = report.IntegrityVerifiedFiles;
-                HasFailedFiles = report.FailedFiles > 0;
-                RestoreProgress = 100;
-                RestoreStatusText = report.FailedFiles > 0
-                    ? $"历史版本：{report.StatusMessage}。请重新选择该历史版本后重试。"
-                    : $"历史版本：{report.StatusMessage}";
+                var provider = await ProviderForPackageAsync(package);
+                int completed = 0;
+                foreach (var selected in histories)
+                {
+                    var report = await _restoreEngine.RestorePackageHistoryAsync(provider, package, destination, selected.Entry, policy, cancellation.Token);
+                    RestoredFilesCount += report.RestoredFiles;
+                    SkippedFilesCount += report.SkippedFiles;
+                    FailedFilesCount += report.FailedFiles;
+                    IntegrityVerifiedCount += report.IntegrityVerifiedFiles;
+                    RestoreProgress = ++completed * 100.0 / histories.Length;
+                    foreach (var item in report.FailedItems) RestoreLogs.Add($"[历史恢复失败] {RestoreDisplayText.OriginalPath(item.OriginalRel)}: {item.ErrorMessage}");
+                }
+                HasFailedFiles = FailedFilesCount > 0;
+                RestoreStatusText = $"历史恢复完成：成功 {RestoredFilesCount}，已校验 {IntegrityVerifiedCount}，跳过 {SkippedFilesCount}，失败 {FailedFilesCount}。";
                 RestoreLogs.Add(RestoreStatusText);
-                foreach (var item in report.FailedItems) RestoreLogs.Add($"[历史恢复失败] {RestoreDisplayText.OriginalPath(item.OriginalRel)}: {item.ErrorMessage}");
             }
             catch (OperationCanceledException) { RestoreStatusText = "历史恢复已取消。"; }
             catch (Exception ex)

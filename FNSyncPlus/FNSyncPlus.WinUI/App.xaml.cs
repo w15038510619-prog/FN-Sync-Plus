@@ -565,7 +565,7 @@ namespace FNSyncPlus.WinUI
 
                 var sb = new System.Text.StringBuilder();
                 sb.AppendLine("================================================================================");
-                sb.AppendLine($"[CRASH LOG] Timestamp: {timestamp} | Version: v0.4.0-beta | PID: {pid} | Thread: {tid}");
+                sb.AppendLine($"[CRASH LOG] Timestamp: {timestamp} | Version: v{UpdateService.DisplayVersion} | PID: {pid} | Thread: {tid}");
                 sb.AppendLine($"[STAGE/CONTEXT] {context}");
                 sb.AppendLine($"[EXCEPTION TYPE] {ex.GetType().FullName}");
                 sb.AppendLine($"[MESSAGE] {ex.Message}");

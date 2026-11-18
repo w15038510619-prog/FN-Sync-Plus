@@ -42,6 +42,7 @@ namespace FNSyncPlus.WinUI
                 : AppServices.IsVersionedBetaSession ? product : product + " [旧版引擎·仅供诊断]";
             WindowHelper.ConfigureWindow(this, title, 1200, 780);
             AppTitleText.Text = title;
+            ViewModel.AppTitle = title;
             _logService.TaskLogWriteFailed += OnTaskLogWriteFailed;
             _appWindow = AppWindow.GetFromWindowId(Microsoft.UI.Win32Interop.GetWindowIdFromWindow(WindowHelper.GetHandle(this)));
             _appWindow.SetIcon(System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
@@ -84,9 +85,6 @@ namespace FNSyncPlus.WinUI
                 ka4.Invoked += Accelerator_Settings_Invoked;
                 root.KeyboardAccelerators.Add(ka4);
 
-                var ka5 = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.Number5, Modifiers = Windows.System.VirtualKeyModifiers.Control };
-                ka5.Invoked += Accelerator_TestLab_Invoked;
-                root.KeyboardAccelerators.Add(ka5);
 
                 var kaN = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.N, Modifiers = Windows.System.VirtualKeyModifiers.Control };
                 kaN.Invoked += Accelerator_AddWizard_Invoked;
@@ -201,7 +199,7 @@ namespace FNSyncPlus.WinUI
             {
                 _trayIcon = new TrayIcon(
                     () => DispatcherQueue.TryEnqueue(ShowFromTray),
-                    () => DispatcherQueue.TryEnqueue(async () => await RequestShutdownAsync()));
+                    () => DispatcherQueue.TryEnqueue(async () => await RequestShutdownAsync()), ViewModel.AppTitle);
             }
             catch (Exception ex)
             {
@@ -335,8 +333,19 @@ namespace FNSyncPlus.WinUI
             }
         }
 
+        private async void Help_Click(object sender, RoutedEventArgs e)
+        {
+            string text = ContentFrame.Content is RestorePage
+                ? "选择备份后，选择最新文件或历史版本。未选择文件时恢复全部最新文件。请选择新的恢复文件夹，默认跳过已有文件。覆盖同名文件前请核对确认框。团队文件需要 NAS 开启 SMB 并授予当前账号权限。"
+                : "在 NAS 设备登录自己的账号，然后添加本地文件夹和独立备份位置。每个备份目标只使用一个客户端写入。任务详情中可以查看日志；恢复前建议选择空文件夹。保存后仍打开的文档可在允许读取时备份，独占锁定的文件会延后处理。";
+            await new Microsoft.UI.Xaml.Controls.ContentDialog { XamlRoot = Content.XamlRoot,
+                Title = "使用帮助", Content = new Microsoft.UI.Xaml.Controls.TextBlock { Text = text, TextWrapping = TextWrapping.Wrap },
+                CloseButtonText = "知道了" }.ShowAsync();
+        }
+
         public void NavigateToTag(string tag)
         {
+            if (tag.StartsWith("TestLab", StringComparison.Ordinal) && !AppServices.IsIsolatedTestSession) tag = "Tasks";
             Type targetPageType = tag switch
             {
                 "Tasks" => typeof(TasksPage),
@@ -375,6 +384,7 @@ namespace FNSyncPlus.WinUI
                     {
                         ["task_count"] = manager.Tasks.Count,
                         ["nas_online"] = manager.IsNasOnline,
+                        ["tray_tooltip"] = _trayIcon?.DisplayText,
                     });
                 }
                 catch (Exception ex) { App.LogCrashException(ex, "MainWindow.VisualPageReady"); }
@@ -482,15 +492,6 @@ namespace FNSyncPlus.WinUI
             args.Handled = true;
         }
 
-        private void Accelerator_TestLab_Invoked(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
-        {
-            NavigateToTag("TestLab");
-            if (NavView.MenuItems.Count >= 4)
-            {
-                NavView.SelectedItem = NavView.MenuItems[3];
-            }
-            args.Handled = true;
-        }
 
         private async void Accelerator_AddWizard_Invoked(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
         {

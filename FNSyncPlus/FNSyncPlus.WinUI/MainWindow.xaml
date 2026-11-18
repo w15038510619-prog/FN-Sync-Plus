@@ -6,7 +6,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:vm="using:FNSyncPlus.WinUI.ViewModels"
-    Title="飞牛同步增强版 v0.4.0-beta"
+    Title="飞牛同步增强版"
     mc:Ignorable="d">
 
     <Grid>
@@ -26,7 +26,7 @@
             <!-- Brand Icon & Title (Drag Area) -->
             <StackPanel x:Name="AppTitleBarDragArea" Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
                 <Image Width="24" Height="24" Source="ms-appx:///Assets/BrandMark.png" Stretch="Uniform" />
-                <TextBlock x:Name="AppTitleText" Text="飞牛同步增强版 v0.4.0-beta" FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                <TextBlock x:Name="AppTitleText" Text="飞牛同步增强版" FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
             </StackPanel>
 
             <!-- Center: Connected NAS Status Pill Button -->
@@ -45,6 +45,7 @@
 
             <!-- Right: Theme Toggle -->
             <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
+                <Button Content="帮助" Click="Help_Click" Background="Transparent" BorderThickness="0" />
                 <Button Click="BtnThemeToggle_Click" ToolTipService.ToolTip="切换深色/浅色主题" Padding="6" Background="Transparent" BorderThickness="0">
                     <FontIcon x:Name="IconThemeToggle" Glyph="&#xE706;" FontSize="14" />
                 </Button>
@@ -55,7 +56,7 @@
         <NavigationView
             x:Name="NavView"
             Grid.Row="1"
-            PaneDisplayMode="Left"
+            PaneDisplayMode="Auto"
             OpenPaneLength="210"
             IsBackButtonVisible="Collapsed"
             IsSettingsVisible="False"
@@ -77,15 +78,10 @@
                         <FontIcon Glyph="&#xE774;" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem Content="测试实验室" Tag="TestLab">
-                    <NavigationViewItem.Icon>
-                        <FontIcon Glyph="&#xE756;" />
-                    </NavigationViewItem.Icon>
-                </NavigationViewItem>
             </NavigationView.MenuItems>
 
             <NavigationView.FooterMenuItems>
-                <NavigationViewItem Content="全局设置" Tag="Settings">
+                <NavigationViewItem Content="设置" Tag="Settings">
                     <NavigationViewItem.Icon>
                         <FontIcon Glyph="&#xE713;" />
                     </NavigationViewItem.Icon>

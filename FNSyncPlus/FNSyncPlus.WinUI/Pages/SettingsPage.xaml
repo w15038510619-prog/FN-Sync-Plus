@@ -34,7 +34,7 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                                 <TextBlock Text="开机自动启动" FontSize="13" FontWeight="Medium" />
-                                <TextBlock Text="随 Windows 开机在后台启动；试用或测试配置暂不支持此选项" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="随 Windows 启动" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                             <ToggleSwitch Grid.Column="1" IsOn="{x:Bind ViewModel.StartWithWindows, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanConfigureStartup}" OnContent="" OffContent="" />
                         </Grid>
@@ -166,6 +166,8 @@
                         <TextBlock Text="{x:Bind ViewModel.UpdateSupportMessage, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
 
+                        <Expander Header="高级更新选项" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                        <StackPanel Spacing="10">
                         <StackPanel Spacing="6">
                             <TextBox Header="更新源地址（HTTPS）" Text="{x:Bind ViewModel.UpdateFeedUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                      TextWrapping="Wrap" PlaceholderText="https://…/manifest.json" />
@@ -205,7 +207,7 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                                 <TextBlock Text="更新方式" FontSize="13" FontWeight="Medium" />
-                                <TextBlock Text="无人值守安装需要先通过安全验收；否则请保持“仅检查”" FontSize="11" TextWrapping="Wrap"
+                                <TextBlock Text="默认仅检查更新，由你确认安装。" FontSize="11" TextWrapping="Wrap"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                             <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.UpdateModeIndex, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanChangeUpdatePolicy}" HorizontalAlignment="Stretch">
@@ -222,13 +224,15 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
                                 <TextBlock Text="允许无人值守安装" FontSize="13" FontWeight="Medium" />
-                                <TextBlock Text="仅在测试环境验证通过、且公司明确批准后启用。备份进行中会推迟安装，不会中断备份" FontSize="11" TextWrapping="Wrap"
+                                <TextBlock Text="备份完成后才会安装更新。" FontSize="11" TextWrapping="Wrap"
                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                             <ToggleSwitch Grid.Column="1" IsOn="{x:Bind ViewModel.UnattendedEnabled, Mode=TwoWay}"
                                           IsEnabled="{x:Bind ViewModel.UnattendedSelectable, Mode=OneWay}" OnContent="" OffContent="" />
                         </Grid>
 
+                        </StackPanel>
+                        </Expander>
                         <ProgressBar Value="{x:Bind ViewModel.DownloadProgress, Mode=OneWay}" Maximum="100"
                                      Visibility="{x:Bind ViewModel.ShowDownloadProgress, Mode=OneWay}" Height="4" />
 

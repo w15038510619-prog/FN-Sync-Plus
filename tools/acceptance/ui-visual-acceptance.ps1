@@ -190,7 +190,7 @@ function Wait-PageReady {
                 $ready = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
                 $polls++
                 if ($ready.page -eq $Page -and $ready.ready -eq $true) {
-                    return [pscustomobject]@{ ok = $true; polls = $polls; waitedMs = [int]((Get-Date) - $began).TotalMilliseconds; taskCount = $ready.task_count }
+                    return [pscustomobject]@{ ok = $true; polls = $polls; waitedMs = [int]((Get-Date) - $began).TotalMilliseconds; taskCount = $ready.task_count; trayTooltip = $ready.tray_tooltip }
                 }
             } catch { }
         }
@@ -270,6 +270,9 @@ function Capture-Scenario {
             })
             Record-Result -Name ("{0}/{1}：窗口标题包含中文产品名" -f $ScenarioKey, $Page) `
                 -Passed ($default.title -match '飞牛同步增强版') -Detail ("title={0}" -f $default.title)
+
+            Record-Result -Name ("{0}/{1}：真实托盘提示版本与窗口标题一致" -f $ScenarioKey, $Page) `
+                -Passed ($ready.trayTooltip -ceq $default.title) -Detail ("tray={0}" -f $ready.trayTooltip)
 
             if ($AlsoMinWindow) {
                 $smallPng = Join-Path $OutRoot ("{0}-{1}-min-{2}x{3}.png" -f $ScenarioKey, $Page, $MinWidth, $MinHeight)

@@ -519,7 +519,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 }
 
                 // 1. 飞牛官方「我的文件」同名规划通道
-                if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
+                if (!NasDestinationRoot.StartsWith(@"\\") && _connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
                 {
                     var allocatedFn = new List<string>();
 
@@ -686,7 +686,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             int createdCount = 0;
 
             // 1. 飞牛官方「我的文件」原生任务创建
-            if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
+            if (!NasDestinationRoot.StartsWith(@"\\") && _connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
             {
                 if (!fnProvider.IsAuthenticated)
                 {
@@ -811,6 +811,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
 
             // 2. 传统 SMB 共享校验与创建通道
+            await _connectionService.ConnectTeamShareAsync(NasDestinationRoot);
             var rootValidation = await _smbService.ValidateDirectoryAccessStateAsync(NasDestinationRoot, _settings.NasServer);
             if (!rootValidation.DoesShareExist || !rootValidation.IsDirectoryWritable)
             {
@@ -828,25 +829,15 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             foreach (var item in PlannedTasks)
             {
-                var (ensureOk, ensuredPath, ensureMsg) = await _fnOsService.EnsureSameNameBackupFolderAsync(
-                    NasDestinationRoot, 
-                    item.SourcePath, 
-                    item.TargetSubFolder
-                );
-
-                if (!ensureOk)
+                string ensuredPath = item.FullTargetUnc;
+                if (Directory.Exists(ensuredPath) || File.Exists(ensuredPath))
                 {
                     item.IsFailed = true;
-                    item.StatusText = $"❌ 创建目标失败: {ensureMsg}";
-                    item.ErrorMessage = ensureMsg;
+                    item.ErrorMessage = "目标已经存在，请为新备份选择独立目录。";
                     failedCount++;
                     continue;
                 }
-
                 item.FinalTargetUnc = ensuredPath;
-                item.StatusText = "✔ 目标就绪，任务已建立";
-                item.IsFailed = false;
-
                 var task = new SyncTask
                 {
                     TaskId = Guid.NewGuid().ToString("N"),
@@ -855,6 +846,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                     DestinationRoot = NasDestinationRoot,
                     DestinationFolder = ensuredPath,
                     ProviderType = StorageProviderType.SmbShare,
+                    NasAccountUid = _connectionService.CurrentUid,
                     NasUsername = _connectionService.Username,
                     NasDeviceId = _connectionService.ServerAddress,
                     Mode = SyncMode.OneWayBackup,

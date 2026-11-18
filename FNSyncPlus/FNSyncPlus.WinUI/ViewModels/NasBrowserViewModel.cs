@@ -108,6 +108,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _customPathErrorMessage = string.Empty;
 
         public string ConfirmedSelectedPath { get; private set; } = string.Empty;
+        public bool AllowReadOnlySelection { get; set; }
 
         public void ResetDialogSelection()
         {
@@ -144,8 +145,8 @@ namespace FNSyncPlus.WinUI.ViewModels
                     Categories.Clear();
                     Categories.Add(new CategoryItem
                     {
-                        Title = "👤 我的文件 (官方个人空间)",
-                        Subtitle = $"已就绪 · UID: {fnProvider.CurrentUid} (专属读写)",
+                        Title = "我的文件",
+                        Subtitle = "个人空间",
                         UncPath = "我的文件",
                         Category = NasShareCategory.PersonalSpace,
                         IsPersonal = true,
@@ -155,23 +156,14 @@ namespace FNSyncPlus.WinUI.ViewModels
 
                     try
                     {
-                        var categorized = await _smbService.EnumerateCategorizedSharesAsync(server, _settings.Username);
-                        foreach (var share in categorized.Shares)
-                        {
-                            bool isPers = share.Category == NasShareCategory.PersonalSpace;
-                            Categories.Add(new CategoryItem
-                            {
-                                Title = isPers ? $"👤 {share.Name}" : $"👥 {share.Name}",
-                                Subtitle = isPers ? "私人共享" : "团队文件 (公共协作)",
-                                UncPath = share.UncPath,
-                                Category = share.Category,
-                                IsPersonal = isPers,
-                                IsConfigured = true,
-                                IconGlyph = isPers ? "\uE77B" : "\uE716"
-                            });
-                        }
+                        var shares = await _connectionService.GetAccessibleTeamSharesAsync();
+                        foreach (var share in shares)
+                            Categories.Add(new CategoryItem { Title = "团队文件 / " + SmbAuthService.FnOsTeamShareDisplayName(PathHelper.ParseUncShare(share).ShareName),
+                                Subtitle = "SMB", UncPath = share, IsPersonal = false,
+                                IsConfigured = true, IconGlyph = "\uE716" });
+                        if (shares.Count == 0) LastErrorMessage = "团队文件需要管理员开启 SMB 并授权此账号访问。";
                     }
-                    catch { }
+                    catch (Exception ex) { LastErrorMessage = "团队文件暂不可用，请检查 SMB 服务和账号权限。"; App.LogCrashException(ex, "TeamBrowser"); }
 
                     IsPersonalSpaceGuidanceActive = false;
                     await NavigateToFolderAsync("我的文件");
@@ -390,6 +382,18 @@ namespace FNSyncPlus.WinUI.ViewModels
                 return;
             }
 
+            if (uncPath.StartsWith(@"\\"))
+            {
+                try { await _connectionService.ConnectTeamShareAsync(uncPath); }
+                catch (Exception ex)
+                {
+                    FolderItems.Clear(); HasWritePermission = false;
+                    LastErrorMessage = "无法访问共享，请检查 SMB 服务、账号权限或 Windows 网络会话。";
+                    App.LogCrashException(ex, "TeamBrowser.Connect");
+                    return;
+                }
+            }
+
             // 2. 传统 Windows SMB 共享导航通道
             var (serverName, shareName, parsedBase, isServerRoot) = PathHelper.ParseUncShare(uncPath);
             if (string.IsNullOrEmpty(baseShare) || isServerRoot)
@@ -493,6 +497,15 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         private async Task EvaluatePermissionAndSecurityAsync(string targetUnc)
         {
+            if (AllowReadOnlySelection)
+            {
+                HasWritePermission = false;
+                PermissionStatusText = "恢复只需读取权限";
+                SecurityTitle = "已连接共享";
+                SecurityDescription = "按当前账号权限读取备份。";
+                IsTeamShare = true;
+                return;
+            }
             var (canWrite, writeErr) = await _smbService.TestDirectoryWritePermissionAsync(targetUnc);
             HasWritePermission = canWrite;
             PermissionStatusText = canWrite ? "● 具备写入权限" : "▲ 只读无写入权限";
@@ -564,6 +577,7 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         public async Task<bool> CreateSubFolderAsync(string folderName)
         {
+            if (AllowReadOnlySelection) { LastErrorMessage = "恢复浏览不会创建 NAS 文件夹。"; return false; }
             if (string.IsNullOrWhiteSpace(folderName))
             {
                 LastErrorMessage = "文件夹名称不能为空。";
@@ -658,7 +672,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 return false;
             }
 
-            if (!HasWritePermission)
+            if (!HasWritePermission && !AllowReadOnlySelection)
             {
                 LastErrorMessage = "所选目录无写入权限。";
                 return false;

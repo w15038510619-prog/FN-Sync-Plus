@@ -65,6 +65,20 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _untrustedCertSubject = string.Empty;
 
         public bool IsConnected => _connectionService.IsConnected;
+        public bool ShowLoginForm => !IsConnected || EditingConnection;
+        public bool ConnectionHealthy => IsConnected;
+        public string ConnectionMessage => IsConnected ? "已连接" :
+            _connectionService.State == NasConnectionState.Connecting ? "正在连接…" :
+            _connectionService.State == NasConnectionState.ConnectionLost ? "连接已中断，正在尝试重新连接。" :
+            _connectionService.State == NasConnectionState.AuthenticationFailed ? "登录失败，请检查账号或重新验证。" : StatusMessage;
+        [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(ShowLoginForm))]
+        private bool _editingConnection;
+        [ObservableProperty] private bool _isSearching;
+        [ObservableProperty] private string _discoveryMessage = "";
+        private int _searchGeneration;
+        partial void OnStatusMessageChanged(string value) => OnPropertyChanged(nameof(ConnectionMessage));
+        [RelayCommand] private void SwitchAccount() { EditingConnection = true; Password = ""; }
         public int? CurrentUid => _connectionService.CurrentUid;
         public string PersonalRootDisplay => _connectionService.PersonalRootDisplay;
         public bool TwoFactorRequired => _connectionService.TwoFactorRequired;
@@ -94,6 +108,10 @@ namespace FNSyncPlus.WinUI.ViewModels
                         OnPropertyChanged(nameof(CurrentUid));
                         OnPropertyChanged(nameof(PersonalRootDisplay));
                         OnPropertyChanged(nameof(TwoFactorRequired));
+                        OnPropertyChanged(nameof(ConnectionHealthy));
+                        OnPropertyChanged(nameof(ConnectionMessage));
+                        OnPropertyChanged(nameof(ShowLoginForm));
+                        if (IsConnected) EditingConnection = false;
                     }
                 });
             };
@@ -122,26 +140,29 @@ namespace FNSyncPlus.WinUI.ViewModels
         [RelayCommand]
         public async Task SearchLanDevicesAsync()
         {
-            IsBusy = true;
-            StatusMessage = "正在搜索局域网候选设备，请核对自己的飞牛地址...";
+            int generation = System.Threading.Interlocked.Increment(ref _searchGeneration);
+            IsSearching = true;
+            DiscoveryMessage = "正在搜索设备…";
             try
             {
                 var devices = await _discoveryService.DiscoverNasDevicesAsync(NasAddress.Trim());
+                if (generation != _searchGeneration) return;
                 DiscoveredDevices.Clear();
                 foreach (var d in devices)
                 {
                     DiscoveredDevices.Add(d);
                 }
 
-                StatusMessage = $"搜索完成，找到 {DiscoveredDevices.Count} 台候选设备；登录前请核对地址。";
+                DiscoveryMessage = $"找到 {DiscoveredDevices.Count} 台设备。";
             }
             catch (Exception ex)
             {
-                StatusMessage = $"搜索异常: {ex.Message}";
+                if (generation == _searchGeneration) DiscoveryMessage = "设备搜索失败，可以直接填写 NAS 地址连接。";
+                App.LogCrashException(ex, "Device.Discovery");
             }
             finally
             {
-                IsBusy = false;
+                if (generation == _searchGeneration) IsSearching = false;
             }
         }
 

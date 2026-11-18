@@ -303,7 +303,14 @@ namespace FNSyncPlus.WinUI.ViewModels
                 // B. SMB 共享模式
                 else if (task.ProviderType == StorageProviderType.SmbShare)
                 {
-                    if (Directory.Exists(task.DestinationFolder))
+                    if (task.IsExperimentalBackup)
+                    {
+                        var provider = await _connectionService.GetTaskStorageAsync(task, default) ?? throw new IOException("请先连接创建任务的账号。");
+                        var inspected = await new VersionedManifestStore().InspectForRestoreAsync(provider, TaskManager.BackupTarget(task));
+                        manifest = inspected.Snapshot?.Manifest;
+                        invalidVersionRecords = inspected.HasInvalidRecords;
+                    }
+                    else if (Directory.Exists(task.DestinationFolder))
                     {
                         manifest = await _manifestManager.LoadManifestAsync(task.DestinationFolder);
                     }
@@ -311,7 +318,14 @@ namespace FNSyncPlus.WinUI.ViewModels
                 // C. 本地测试模式
                 else
                 {
-                    if (Directory.Exists(task.DestinationFolder))
+                    if (task.IsExperimentalBackup)
+                    {
+                        var provider = await _connectionService.GetTaskStorageAsync(task, default) ?? throw new IOException("请先连接创建任务的账号。");
+                        var inspected = await new VersionedManifestStore().InspectForRestoreAsync(provider, TaskManager.BackupTarget(task));
+                        manifest = inspected.Snapshot?.Manifest;
+                        invalidVersionRecords = inspected.HasInvalidRecords;
+                    }
+                    else if (Directory.Exists(task.DestinationFolder))
                     {
                         manifest = await _manifestManager.LoadManifestAsync(task.DestinationFolder);
                     }

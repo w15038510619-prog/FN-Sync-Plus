@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using FNSyncPlus.WinUI.Helpers;
 using FNSyncPlus.WinUI.Services;
 using FNSyncPlus.WinUI.ViewModels;
@@ -16,6 +17,7 @@ namespace FNSyncPlus.WinUI.Pages
         {
             ViewModel = AppServices.GetService<RestoreViewModel>();
             InitializeComponent();
+            Loaded += async (_, _) => { if (!AppServices.IsUiVisualAcceptance) await ViewModel.LoadKnownBackupsAsync(); };
 
             if (AppServices.IsUiVisualAcceptance &&
                 Array.IndexOf(Environment.GetCommandLineArgs(), "--restore-history-fixture") >= 0)
@@ -48,14 +50,16 @@ namespace FNSyncPlus.WinUI.Pages
             var history = ViewModel.SelectedHistory;
             var destination = ViewModel.LocalRestoreTarget;
             int policyIndex = ViewModel.ConflictPolicyIndex;
+            var selectedCurrent = ViewModel.SelectedCurrentPaths.ToHashSet(StringComparer.Ordinal);
+            var selectedHistories = ViewModel.SelectedHistoryItems.ToHashSet();
             if (package == null || (historical && history == null) || string.IsNullOrWhiteSpace(destination))
             {
                 ViewModel.RestoreStatusText = "请选择要恢复的版本和本地目标文件夹。";
                 return;
             }
 
-            string version = historical ? $"历史版本 · {history!.ArchivedAt}\n文件：{history.DisplayPath}" :
-                $"当前备份 · {package.LastUpdated.ToLocalTime():yyyy-MM-dd HH:mm:ss}\n快照：{package.VersionId ?? "传统备份清单"}";
+            string version = historical ? "历史版本\n" + string.Join("\n", ViewModel.SelectedHistoryItems.Select(h => h.DisplayPath + " · " + h.ArchivedAt)) :
+                $"当前备份 · {package.LastUpdated.ToLocalTime():yyyy-MM-dd HH:mm:ss}";
             string conflict = policyIndex switch
             {
                 1 => "覆盖已存在的同名文件",
@@ -64,7 +68,7 @@ namespace FNSyncPlus.WinUI.Pages
             };
             var detail = new TextBlock
             {
-                Text = $"{version}\n备份位置：{package.NasFolderUnc}\n恢复到：{destination}\n同名文件：{conflict}",
+                Text = $"{version}\n{(historical ? "" : ViewModel.CurrentRestoreLabel)}\n{string.Join("\n", ViewModel.SelectedCurrentPaths)}\n备份位置：{package.NasFolderUnc}\n恢复到：{destination}\n同名文件：{conflict}",
                 TextWrapping = TextWrapping.Wrap,
                 IsTextSelectionEnabled = true
             };
@@ -79,7 +83,8 @@ namespace FNSyncPlus.WinUI.Pages
                 };
                 if (await dialog.ShowAsync() != ContentDialogResult.Primary ||
                     package != ViewModel.SelectedPackage || history != ViewModel.SelectedHistory ||
-                    policyIndex != ViewModel.ConflictPolicyIndex || destination != ViewModel.LocalRestoreTarget) return;
+                    policyIndex != ViewModel.ConflictPolicyIndex || destination != ViewModel.LocalRestoreTarget ||
+                    !selectedCurrent.SetEquals(ViewModel.SelectedCurrentPaths) || !selectedHistories.SetEquals(ViewModel.SelectedHistoryItems)) return;
                 if (historical) await ViewModel.RestoreHistoryAsync();
                 else if (retry) await ViewModel.RetryFailedFilesAsync();
                 else await ViewModel.ExecuteRestoreAsync();
@@ -95,10 +100,39 @@ namespace FNSyncPlus.WinUI.Pages
         private async void BtnBrowseNasRestore_Click(object sender, RoutedEventArgs e)
         {
             var dialog = new Dialogs.NasBrowserDialog { XamlRoot = XamlRoot, Title = "选择备份目录或其上一级目录" };
+            dialog.ViewModel.AllowReadOnlySelection = true;
             if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
             string selected = !string.IsNullOrWhiteSpace(dialog.ViewModel.ConfirmedSelectedPath)
                 ? dialog.ViewModel.ConfirmedSelectedPath : dialog.ViewModel.CurrentUncPath;
-            if (!string.IsNullOrWhiteSpace(selected)) ViewModel.NasScanRoot = selected;
+            if (!string.IsNullOrWhiteSpace(selected)) { ViewModel.NasScanRoot = selected; await ViewModel.ScanPackagesAsync(); }
+        }
+
+        private void Files_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (ViewModel.RefreshingViews) return;
+            foreach (RestoreFileDisplayItem file in e.RemovedItems) ViewModel.SelectedCurrentPaths.Remove(file.OriginalPath);
+            foreach (RestoreFileDisplayItem file in e.AddedItems) ViewModel.SelectedCurrentPaths.Add(file.OriginalPath);
+            ViewModel.NotifySelectionChanged();
+        }
+        private void Folder_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (sender is ComboBox combo && combo.SelectedItem is string path) ViewModel.CurrentFolder = path;
+        }
+        private void History_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (ViewModel.RefreshingViews) return;
+            foreach (RestoreHistoryDisplayItem item in e.RemovedItems) ViewModel.SelectedHistoryItems.Remove(item);
+            foreach (RestoreHistoryDisplayItem item in e.AddedItems) ViewModel.SelectedHistoryItems.Add(item);
+            ViewModel.SelectedHistory = ViewModel.SelectedHistoryItems.FirstOrDefault();
+            ViewModel.NotifyHistorySelection();
+        }
+        private async void Details_Click(object sender, RoutedEventArgs e)
+        {
+            var text = string.Join("\n\n", System.Linq.Enumerable.Select(ViewModel.PackageFiles,
+                file => $"{file.OriginalRelPath}\n存储位置：{file.StoredRelPath}\nSHA-256：{file.Sha256}"));
+            await new ContentDialog { XamlRoot = XamlRoot, Title = "备份高级详情", CloseButtonText = "关闭",
+                Content = new ScrollViewer { MaxHeight = 360, Content = new TextBlock { Text = text,
+                    IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap } } }.ShowAsync();
         }
 
         private async void BtnBrowseLocalRestore_Click(object sender, RoutedEventArgs e)
