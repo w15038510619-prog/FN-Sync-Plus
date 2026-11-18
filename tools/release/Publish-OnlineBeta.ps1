@@ -92,6 +92,26 @@ try {
     if ((Get-Item -LiteralPath $remoteZip).Length -ne $zipSize -or (Get-Sha256 $remoteZip) -cne $zipHash) {
         throw 'The HTTPS ZIP does not match. The manifest has not been uploaded.'
     }
+    $publicArtifacts = @{
+        "FN-Sync-Plus-$version-Windows-x64-Setup.exe" = "FN-Sync-Plus-$version-Windows-x64-Setup.exe"
+        'SHA256SUMS.txt' = "SHA256SUMS-$version.txt"
+        'release-notes.md' = "release-notes-$version.md"
+        'rollback.md' = "rollback-$version.md"
+        'build-provenance.json' = "build-provenance-$version.json"
+    }
+    foreach ($localName in $publicArtifacts.Keys) {
+        $localFile = Join-Path $release $localName
+        if (!(Test-Path -LiteralPath $localFile -PathType Leaf)) { continue }
+        $remoteName = $publicArtifacts[$localName]
+        $artifactSize = (Get-Item -LiteralPath $localFile).Length
+        $artifactHash = Get-Sha256 $localFile
+        Send-StagedFile $localFile 'artifact.upload'
+        Invoke-Remote "$publisher artifact $identity --version $version --name $remoteName --size $artifactSize --sha256 $artifactHash"
+        $verified = Join-Path $download $remoteName
+        Invoke-Checked 'curl.exe' @('--fail','--silent','--show-error','--proto','=https','--max-time','600','--output',$verified,"$baseUrl/$remoteName")
+        if ((Get-Item -LiteralPath $verified).Length -ne $artifactSize -or (Get-Sha256 $verified) -cne $artifactHash) { throw "HTTPS artifact mismatch: $remoteName" }
+        Remove-Item -LiteralPath $verified
+    }
     Send-StagedFile $manifest 'manifest.upload'
     Invoke-Remote "$publisher manifest $artifact --minimum-client $minimum --manifest-sha256 $manifestHash"
 

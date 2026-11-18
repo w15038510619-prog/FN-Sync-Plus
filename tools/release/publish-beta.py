@@ -87,13 +87,14 @@ def verify_manifest(raw, public_key, stage):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('pin', 'zip', 'manifest'))
+    parser.add_argument('action', choices=('pin', 'zip', 'manifest', 'artifact'))
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
     parser.add_argument('--base-url')
     parser.add_argument('--channel', choices=('beta', 'stable'), default='beta')
     parser.add_argument('--stage', required=True)
     parser.add_argument('--key-sha256', required=True)
     parser.add_argument('--version')
+    parser.add_argument('--name')
     parser.add_argument('--minimum-client')
     parser.add_argument('--size', type=int)
     parser.add_argument('--sha256')
@@ -125,6 +126,26 @@ def main():
         release = version(args.version)
         require(args.size and args.size > 0 and re.fullmatch('[0-9a-f]{64}', args.sha256 or ''),
                 'Invalid package size or SHA-256.')
+        if args.action == 'artifact':
+            allowed = {f'FN-Sync-Plus-{args.version}-Windows-x64-Setup.exe',
+                       f'SHA256SUMS-{args.version}.txt', f'release-notes-{args.version}.md',
+                       f'rollback-{args.version}.md', f'build-provenance-{args.version}.json'}
+            require(args.name in allowed, 'Unexpected public artifact name.')
+            upload = stage / 'artifact.upload'
+            target = feed / args.name
+            require(upload.is_file() and upload.stat().st_size == args.size and file_hash(upload) == args.sha256,
+                    'Staged artifact size or SHA-256 mismatch.')
+            require(not target.is_symlink(), 'Public artifacts cannot be symbolic links.')
+            if target.exists():
+                require(target.is_file() and target.stat().st_size == args.size and file_hash(target) == args.sha256,
+                        'A different artifact already exists for this release.')
+            else:
+                upload.chmod(0o644)
+                os.link(upload, target)
+            upload.unlink()
+            print(f'Artifact available: {args.name} (SHA-256 {args.sha256}).')
+            return
+
         name = f'FN-Sync-Plus-{args.version}-x64.zip'
         package = feed / name
 

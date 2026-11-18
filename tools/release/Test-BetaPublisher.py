@@ -91,6 +91,18 @@ def main():
         promote_manifest(tampered, 'Verification failure')
         check(live.read_bytes() == placeholder, 'tampered manifest preserves the old feed')
 
+        extra = stage / 'artifact.upload'
+        extra.write_bytes(b'installer fixture')
+        extra_name = f'FN-Sync-Plus-{fields["version"]}-Windows-x64-Setup.exe'
+        extra_args = ['--version', fields['version'], '--name', extra_name, '--size', str(extra.stat().st_size), '--sha256', sha256(extra)]
+        run('artifact', extra_args)
+        check((feed / extra_name).read_bytes() == b'installer fixture', 'installer artifact is published after independent hash validation')
+        extra.write_bytes(b'corrupted fixture')
+        run('artifact', extra_args, 'Staged artifact size or SHA-256 mismatch.')
+        check((feed / extra_name).read_bytes() == b'installer fixture', 'corrupted upload cannot replace the published installer')
+        run('artifact', ['--version', fields['version'], '--name', '../manifest.json', '--size', '1', '--sha256', 'a' * 64], 'Unexpected public artifact name.')
+        check(live.read_bytes() == placeholder, 'artifact publication cannot overwrite the manifest or escape the feed')
+
         promote_manifest(manifest)
         history = root / '.beta-staging' / ('manifest-' + hashlib.sha256(placeholder).hexdigest() + '.json')
         check(live.read_bytes() == manifest and history.read_bytes() == placeholder,
