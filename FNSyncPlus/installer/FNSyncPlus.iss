@@ -55,7 +55,7 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-MinVersion=10.0
+MinVersion=10.0.17763
 ; 手工安装升级前，程序必须经托盘安全退出。
 CloseApplications=no
 #ifndef AcceptanceInstaller
@@ -264,7 +264,7 @@ end;
 // 卸载时提示配置仍在，避免用户以为备份或设置被删除。
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
-  if CurUninstallStep = usPostUninstall then
+  if (CurUninstallStep = usPostUninstall) and not UninstallSilent then
     MsgBox('程序已卸载。' + #13#10 + #13#10 +
            '用户配置与已保存的凭据仍保留在 %LOCALAPPDATA%\FNSyncPlus，' +
            'NAS 上的备份数据完全没有被修改。' + #13#10 +

@@ -28,7 +28,8 @@ param(
     [string]$VersionB = '0.6.0',
     [string]$Iscc = '',
     [string]$WorkRoot = '',
-    [switch]$VerifyUi
+    [switch]$VerifyUi,
+    [string]$ExistingSetupA = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -116,15 +117,19 @@ try {
 
     Write-Host ("安装验收目录：{0}" -f $WorkRoot)
 
-    $compileA = Invoke-Compile -Version $VersionA -Payload $PayloadA -OutDir (Join-Path $WorkRoot 'setup-a')
-    Record-Result -Name 'Inno Setup 编译 0.5.0 安装包' `
+    $compileA = if ($ExistingSetupA) {
+        [pscustomobject]@{ Code = 0; Setup = (Resolve-Path -LiteralPath $ExistingSetupA).Path; Output = 'Reusing baseline installer' }
+    } else {
+        Invoke-Compile -Version $VersionA -Payload $PayloadA -OutDir (Join-Path $WorkRoot 'setup-a')
+    }
+    Record-Result -Name "Inno Setup 编译 $VersionA 安装包" `
         -Passed ($compileA.Code -eq 0 -and (Test-Path $compileA.Setup)) `
         -Detail ("exit={0} {1}" -f $compileA.Code, $compileA.Setup)
     if (-not (Test-Path $compileA.Setup)) { throw "未生成安装包，终止后续步骤" }
 
     $exitA = Invoke-Setup -Setup $compileA.Setup -LogName 'install-a.log'
     $statusA = Get-Status -Root $target
-    Record-Result -Name '静默安装 0.5.0 后可解析到版本' `
+    Record-Result -Name "静默安装 $VersionA 后可解析到版本" `
         -Passed ($exitA -eq 0 -and $statusA.Code -eq 0 -and $statusA.Version -eq $VersionA) `
         -Detail ("setupExit={0} status={1} version={2}" -f $exitA, $statusA.Code, $statusA.Version)
 
@@ -133,12 +138,12 @@ try {
         -Detail ("app-{0} 存在，status={1}" -f $VersionA, $statusA.Code)
 
     $compileB = Invoke-Compile -Version $VersionB -Payload $PayloadB -OutDir (Join-Path $WorkRoot 'setup-b')
-    Record-Result -Name 'Inno Setup 编译 0.6.0 安装包' -Passed ($compileB.Code -eq 0 -and (Test-Path $compileB.Setup)) `
+    Record-Result -Name "Inno Setup 编译 $VersionB 安装包" -Passed ($compileB.Code -eq 0 -and (Test-Path $compileB.Setup)) `
         -Detail ("exit={0}" -f $compileB.Code)
 
     $exitB = Invoke-Setup -Setup $compileB.Setup -LogName 'install-b.log'
     $statusB = Get-Status -Root $target
-    Record-Result -Name '覆盖安装升级到 0.6.0' `
+    Record-Result -Name "覆盖安装升级到 $VersionB" `
         -Passed ($exitB -eq 0 -and $statusB.Code -eq 0 -and $statusB.Version -eq $VersionB) `
         -Detail ("setupExit={0} status={1} version={2}" -f $exitB, $statusB.Code, $statusB.Version)
 
@@ -173,7 +178,7 @@ try {
     $launcher = Join-Path $target 'FN_Sync_Plus.exe'
     $rollback = Run-Exe -Path $launcher -Arguments @('--layout', $target, '--rollback', '--no-launch')
     $afterRollback = Get-Status -Root $target
-    Record-Result -Name '安装升级后可回滚到 0.5.0' `
+    Record-Result -Name "安装升级后可回滚到 $VersionA" `
         -Passed ($rollback.Code -eq 0 -and $afterRollback.Version -eq $VersionA) `
         -Detail ("exit={0} version={1} {2}" -f $rollback.Code, $afterRollback.Version, ($rollback.Output.Trim() -split "`r?`n")[0])
 
