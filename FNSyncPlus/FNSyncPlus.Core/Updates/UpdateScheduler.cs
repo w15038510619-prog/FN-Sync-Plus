@@ -326,9 +326,6 @@ public sealed class UpdateScheduler : IDisposable
     private async Task<(bool Ok, VerifiedRelease? Release, string Error)> EnsureDownloadedAsync(VerifiedRelease release,
         CancellationToken token)
     {
-        if (_service.TryFindVerifiedPackage(release, out string existing))
-            return (true, release with { LocalPackagePath = existing }, "");
-
         var download = await _service.DownloadAsync(release, null, token).ConfigureAwait(false);
         if (!download.Result.Ok) return (false, null, download.Result.Error);
         return (true, download.Release, "");

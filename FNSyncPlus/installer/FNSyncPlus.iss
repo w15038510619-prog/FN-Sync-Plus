@@ -18,17 +18,29 @@
   #define PayloadDir "..\..\Release_WinUI\install"
 #endif
 
-#define AppName "FN Sync Plus"
+#ifdef AcceptanceInstaller
+  #define AppName "FN Sync Plus Installation Acceptance"
+  #define ApplicationId "FNSyncPlus.InstallerAcceptance"
+  #define ShellAppId "FNSyncPlus.Desktop.Acceptance"
+#else
+  #define AppName "FN Sync Plus"
+  #define ApplicationId "{{4E1C9F62-5F3B-4B7E-9E1C-2B7B0C6D51A1}"
+  #define ShellAppId "FNSyncPlus.Desktop"
+#endif
 #define AppPublisher "FN Sync Plus Project"
 #define LauncherName "FN_Sync_Plus.exe"
 
 [Setup]
-AppId={{4E1C9F62-5F3B-4B7E-9E1C-2B7B0C6D51A1}
+AppId={#ApplicationId}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
+#ifdef AcceptanceInstaller
+DefaultDirName={localappdata}\Programs\FNSyncPlus-InstallationAcceptance
+#else
 DefaultDirName={localappdata}\Programs\FNSyncPlus
+#endif
 DefaultGroupName={#AppName}
 UsePreviousAppDir=yes
 DisableProgramGroupPage=yes
@@ -44,8 +56,11 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
-; 升级时先请用户关闭程序；不自动重启，由更新器/用户决定何时启动
-CloseApplications=yes
+; 手工安装升级前，程序必须经托盘安全退出。
+CloseApplications=no
+#ifndef AcceptanceInstaller
+AppMutex=Global\FNSyncPlus_SingleInstance_Mutex_2026
+#endif
 RestartApplications=no
 AllowNoIcons=yes
 VersionInfoVersion={#AppVersion}
@@ -68,9 +83,9 @@ Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 Source: "..\..\docs\deployment-guide.md"; DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#LauncherName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#LauncherName}"
+Name: "{group}\{#AppName}"; Filename: "{app}\{#LauncherName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#LauncherName}"; AppUserModelID: "{#ShellAppId}"
 Name: "{group}\卸载 {#AppName}"; Filename: "{uninstallexe}"; IconFilename: "{app}\{#LauncherName}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#LauncherName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#LauncherName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#LauncherName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#LauncherName}"; AppUserModelID: "{#ShellAppId}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#LauncherName}"; Description: "启动 {#AppName}"; Flags: nowait postinstall skipifsilent

@@ -68,6 +68,10 @@ namespace FNSyncPlus.WinUI
                 // never take, signal or block the production single-instance mutex.
                 string? rootSuffix = AppStorageRoot.SingleInstanceSuffix();
                 if (rootSuffix != null) instanceName += rootSuffix;
+                int appIdResult = SetCurrentProcessExplicitAppUserModelID(
+                    isolatedLaunch || rootSuffix != null ? "FNSyncPlus.Desktop.Acceptance" : "FNSyncPlus.Desktop");
+                if (appIdResult < 0)
+                    System.Diagnostics.Debug.WriteLine($"Windows shell identity could not be set ({appIdResult:X8}).");
                 _singleInstance = new SingleInstanceCoordinator(instanceName);
                 if (!_singleInstance.IsPrimary)
                 {
@@ -220,6 +224,9 @@ namespace FNSyncPlus.WinUI
                 Exit();
             }
         }
+
+        [System.Runtime.InteropServices.DllImport("shell32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, ExactSpelling = true)]
+        private static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
 
         /// <summary>
         /// Runs one real handoff and writes its state (PIDs, lease ownership, exit request) to

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -44,6 +45,8 @@ namespace FNSyncPlus.WinUI.ViewModels
         private readonly RestoreEngine _restoreEngine;
         private readonly AppSettings _settings;
         private readonly NasConnectionService _connectionService;
+        private CancellationTokenSource? _restoreCancellation;
+        private (DiscoveredBackupPackage Package, string Target, int Policy)? _retryContext;
 
         public ObservableCollection<DiscoveredBackupPackage> DiscoveredPackages { get; } = new();
         public ObservableCollection<RestoreFileDisplayItem> PackageFiles { get; } = new();
@@ -74,13 +77,24 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(CanConfigureRestore))]
+        [NotifyPropertyChangedFor(nameof(CanRetryCurrentRestore))]
         private bool _isRestoring = false;
 
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(CanConfigureRestore))]
+        [NotifyPropertyChangedFor(nameof(CanRetryCurrentRestore))]
         private bool _isScanning = false;
 
         public bool CanConfigureRestore => !IsRestoring && !IsScanning;
+        public bool CanRetryCurrentRestore => CanConfigureRestore && HasFailedFiles && _retryContext is { } retry &&
+            retry.Package == SelectedPackage && retry.Target == LocalRestoreTarget && retry.Policy == ConflictPolicyIndex &&
+            FailedFilesList.Count > 0 && _connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider;
+
+        partial void OnLocalRestoreTargetChanged(string value) => OnPropertyChanged(nameof(CanRetryCurrentRestore));
+        partial void OnConflictPolicyIndexChanged(int value) => OnPropertyChanged(nameof(CanRetryCurrentRestore));
+
+        [RelayCommand]
+        private void CancelRestore() => _restoreCancellation?.Cancel();
 
         [ObservableProperty]
         private int _restoredFilesCount = 0;
@@ -95,6 +109,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private int _integrityVerifiedCount = 0;
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(CanRetryCurrentRestore))]
         private bool _hasFailedFiles = false;
 
         [ObservableProperty]
@@ -259,6 +274,11 @@ namespace FNSyncPlus.WinUI.ViewModels
             if (SelectedPackage == null) { RestoreStatusText = "请先检索并选择备份。"; return; }
             if (string.IsNullOrWhiteSpace(LocalRestoreTarget)) { RestoreStatusText = "请选择还原到本地的目标文件夹。"; return; }
 
+            using var cancellation = new CancellationTokenSource();
+            _restoreCancellation = cancellation;
+            var package = SelectedPackage;
+            var destination = LocalRestoreTarget;
+            _retryContext = (package, destination, ConflictPolicyIndex);
             IsRestoring = true;
             RestoreProgress = 0;
             RestoredFilesCount = 0;
@@ -282,7 +302,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 UIThreadHelper.RunOnUIThread(() =>
                 {
-                    double pct = rep.TotalFiles > 0 ? (double)rep.RestoredFiles / rep.TotalFiles * 100.0 : 0.0;
+                    double pct = rep.TotalFiles > 0 ? (double)(rep.RestoredFiles + rep.SkippedFiles + rep.FailedFiles) / rep.TotalFiles * 100.0 : 0.0;
                     RestoreProgress = pct;
                     RestoreStatusText = $"正在还原: {rep.CurrentFile} ({pct:F0}%)";
                     RestoredFilesCount = rep.RestoredFiles;
@@ -308,11 +328,11 @@ namespace FNSyncPlus.WinUI.ViewModels
                 RestoreProgressReport report;
                 if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
                 {
-                    report = await _restoreEngine.RunRestorePackageAsync(fnProvider, SelectedPackage, LocalRestoreTarget, policy);
+                    report = await _restoreEngine.RunRestorePackageAsync(fnProvider, package, destination, policy, cancellation.Token);
                 }
                 else
                 {
-                    report = await _restoreEngine.RunRestoreAsync(SelectedPackage.NasFolderUnc, LocalRestoreTarget, policy);
+                    report = await _restoreEngine.RunRestoreAsync(package.NasFolderUnc, destination, policy, cancellation.Token);
                 }
 
                 UIThreadHelper.RunOnUIThread(() =>
@@ -345,12 +365,13 @@ namespace FNSyncPlus.WinUI.ViewModels
                 UIThreadHelper.RunOnUIThread(() =>
                 {
                     DetailedErrorMessage = ex.ToString();
-                    RestoreStatusText = $"还原失败: [{ex.GetType().Name}] {ex.Message}";
+                    RestoreStatusText = "还原失败。请查看恢复报告，检查目标文件夹与 NAS 连接后重试。";
                     HasFailedFiles = true;
                 });
             }
             finally
             {
+                _restoreCancellation = null;
                 _restoreEngine.ProgressChanged -= OnProgress;
                 _restoreEngine.LogEmitted -= OnLog;
                 UIThreadHelper.RunOnUIThread(() =>
@@ -363,8 +384,10 @@ namespace FNSyncPlus.WinUI.ViewModels
         [RelayCommand]
         public async Task RetryFailedFilesAsync()
         {
-            if (!CanConfigureRestore || SelectedPackage == null || FailedFilesList.Count == 0 || string.IsNullOrWhiteSpace(LocalRestoreTarget)) return;
+            if (!CanRetryCurrentRestore || _retryContext is not { } retry) return;
 
+            using var cancellation = new CancellationTokenSource();
+            _restoreCancellation = cancellation;
             IsRestoring = true;
             RestoreStatusText = "正在重新恢复失败文件...";
             var targetFiles = FailedFilesList.Select(f => f.OriginalRel).ToList();
@@ -380,7 +403,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                         2 => ConflictResolution.RenameWithTimestamp,
                         _ => ConflictResolution.SkipExisting
                     };
-                    report = await _restoreEngine.RetryRestorePackageAsync(fnProvider, SelectedPackage, LocalRestoreTarget, targetFiles, policy);
+                    report = await _restoreEngine.RetryRestorePackageAsync(fnProvider, retry.Package, retry.Target, targetFiles, policy, cancellation.Token);
                 }
                 else
                 {
@@ -412,11 +435,12 @@ namespace FNSyncPlus.WinUI.ViewModels
                 UIThreadHelper.RunOnUIThread(() =>
                 {
                     DetailedErrorMessage = ex.ToString();
-                    RestoreStatusText = $"重试异常: {ex.Message}";
+                    RestoreStatusText = "重试失败。请检查目标文件夹与 NAS 连接。";
                 });
             }
             finally
             {
+                _restoreCancellation = null;
                 UIThreadHelper.RunOnUIThread(() =>
                 {
                     IsRestoring = false;
@@ -445,6 +469,9 @@ namespace FNSyncPlus.WinUI.ViewModels
                 2 => ConflictResolution.RenameWithTimestamp,
                 _ => ConflictResolution.SkipExisting
             };
+            using var cancellation = new CancellationTokenSource();
+            _restoreCancellation = cancellation;
+            _retryContext = null;
             IsRestoring = true;
             RestoreStatusText = "正在核对并恢复所选历史版本...";
             RestoreProgress = 0;
@@ -459,7 +486,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             RestoreLogs.Add($"所选历史版本：{displayPath}（{history.ArchivedAt.ToLocalTime():yyyy-MM-dd HH:mm:ss}）");
             try
             {
-                var report = await _restoreEngine.RestorePackageHistoryAsync(provider, package, destination, history, policy);
+                var report = await _restoreEngine.RestorePackageHistoryAsync(provider, package, destination, history, policy, cancellation.Token);
                 RestoredFilesCount = report.RestoredFiles;
                 SkippedFilesCount = report.SkippedFiles;
                 FailedFilesCount = report.FailedFiles;
@@ -476,11 +503,11 @@ namespace FNSyncPlus.WinUI.ViewModels
             catch (Exception ex)
             {
                 DetailedErrorMessage = ex.ToString();
-                RestoreStatusText = $"历史恢复失败: {ex.Message}";
+                RestoreStatusText = "历史恢复失败。请查看恢复报告，检查目标文件夹与 NAS 连接后重试。";
                 RestoreLogs.Add(RestoreStatusText);
                 HasFailedFiles = true;
             }
-            finally { IsRestoring = false; }
+            finally { _restoreCancellation = null; IsRestoring = false; }
         }
 
         [RelayCommand]

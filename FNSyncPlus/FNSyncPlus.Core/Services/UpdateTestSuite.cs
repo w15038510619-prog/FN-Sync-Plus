@@ -201,12 +201,12 @@ public sealed class UpdateTestSuite
             using var client = new UpdateClient(verifier, Settings(baseUrl), server.CreateClient());
             var check = await client.CheckAsync(new Version(0, 4, 0), identity, token).ConfigureAwait(false);
             var download = await client.DownloadAsync(check.Release!, downloadDir, token: token).ConfigureAwait(false);
-            bool cleaned = !File.Exists(download.FilePath + ".partial");
+            bool cleaned = !Directory.EnumerateFiles(downloadDir, "*.partial").Any();
             server.Set("/pkg.zip", package);
             return (!download.Ok && cleaned && download.Error.Contains("SHA-256", StringComparison.Ordinal), download.Error);
         });
 
-        await Case("断点续传从已有部分文件继续并发送 Range", async () =>
+        await Case("旧临时文件清除，下载只接受完整包", async () =>
         {
             Publish(BuildManifest());
             string downloadDir = Path.Combine(workspace, "download-resume");
@@ -218,9 +218,58 @@ public sealed class UpdateTestSuite
             using var client = new UpdateClient(verifier, Settings(baseUrl), server.CreateClient());
             var check = await client.CheckAsync(new Version(0, 4, 0), identity, token).ConfigureAwait(false);
             var download = await client.DownloadAsync(check.Release!, downloadDir, token: token).ConfigureAwait(false);
-            bool ok = download.Ok && server.SawRangeRequest &&
+            bool ok = download.Ok && !server.SawRangeRequest && !Directory.EnumerateFiles(downloadDir, "*.partial").Any() &&
                       Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(download.FilePath, token))) == packageHash;
             return (ok, $"ok={download.Ok} range={server.SawRangeRequest} {download.Error}");
+        });
+
+        await Case("重新验签与哈希后复用缓存，损坏缓存重新下载", async () =>
+        {
+            Publish(BuildManifest());
+            string directory = Path.Combine(workspace, "verified-cache");
+            using var client = new UpdateClient(verifier, Settings(baseUrl), server.CreateClient());
+            var check = await client.CheckAsync(new Version(0, 4, 0), identity, token);
+            var release = check.Release!;
+            var first = await client.DownloadAsync(release, directory, token: token);
+            server.Set("/pkg.zip", new byte[1]);
+            var cached = await client.DownloadAsync(release, directory, token: token);
+            var wrong = await client.DownloadAsync(release with { ManifestJson = "{}" }, directory, token: token);
+            await File.WriteAllBytesAsync(first.FilePath, new byte[package.Length], token);
+            server.Set("/pkg.zip", package);
+            var repaired = await client.DownloadAsync(release, directory, token: token);
+            return (first.Ok && cached.Ok && cached.Reused && !wrong.Ok && repaired.Ok && !repaired.Reused,
+                $"first={first.Ok} reused={cached.Reused} rejected={!wrong.Ok} repaired={repaired.Ok}");
+        });
+
+        await Case("已安装相同版本显示最新，安装验证仍拒绝重复版本", async () =>
+        {
+            Publish(BuildManifest());
+            using var client = new UpdateClient(verifier, Settings(baseUrl), server.CreateClient());
+            var check = await client.CheckAsync(new Version(0, 5, 0, 0), identity, token);
+            var direct = verifier.Verify(Encoding.UTF8.GetString(server.Get("/manifest.json")), identity,
+                UpdateChannel.Stable, new Version(0, 5, 0, 0), DateTimeOffset.UtcNow);
+            return (!check.HasUpdate && check.Error == "" && check.Notes.Contains("最新") && !direct.Ok, check.Notes);
+        });
+
+        await Case("下载取消及超时清除临时文件，随后可正常重试", async () =>
+        {
+            string target = Path.Combine(workspace, "cancel-download", "package.zip");
+            using var slowHttp = new HttpClient(new StalledDownloadHandler());
+            using var slow = new UpdateDownloader(slowHttp);
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
+            cancellation.CancelAfter(TimeSpan.FromMilliseconds(100));
+            bool canceled = false;
+            try { await slow.DownloadAsync(baseUrl + "/pkg.zip", target, packageHash, package.Length, token: cancellation.Token); }
+            catch (OperationCanceledException) { canceled = cancellation.IsCancellationRequested; }
+            bool cancelClean = !File.Exists(target) && !Directory.EnumerateFiles(Path.GetDirectoryName(target)!, "*.partial").Any();
+            var timeout = await slow.DownloadAsync(baseUrl + "/pkg.zip", target, packageHash, package.Length,
+                token: token, timeout: TimeSpan.FromMilliseconds(100));
+            bool timeoutClean = !File.Exists(target) && !Directory.EnumerateFiles(Path.GetDirectoryName(target)!, "*.partial").Any();
+            Publish(BuildManifest());
+            using var retry = new UpdateDownloader(server.CreateClient());
+            var result = await retry.DownloadAsync(baseUrl + "/pkg.zip", target, packageHash, package.Length, token: token);
+            return (canceled && cancelClean && !timeout.Ok && timeout.Error.Contains("超时") && timeoutClean && result.Ok,
+                $"canceled={canceled} cancelClean={cancelClean} timeoutClean={timeoutClean} retry={result.Ok}");
         });
 
         await Case("服务器返回超出清单大小的数据时中止", async () =>
@@ -440,6 +489,21 @@ public sealed class UpdateTestSuite
         await File.WriteAllTextAsync(Path.Combine(seed, "version.txt"), version, token);
         var outcome = await layout.InstallAsync(version, seed, _ => Task.FromResult(true), token).ConfigureAwait(false);
         if (!outcome.Ok) throw new InvalidOperationException("无法准备测试安装: " + outcome.Error);
+    }
+
+    private sealed class StalledDownloadHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new StalledStream()) });
+    }
+
+    private sealed class StalledStream : MemoryStream
+    {
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return 0;
+        }
     }
 
     private static byte[] BuildPackage(string sourceDirectory, string version)

@@ -36,10 +36,10 @@ namespace FNSyncPlus.WinUI
 
             // The version used to be a hard-coded string, so an upgraded install kept claiming the
             // old version. It now comes from the assembly that is actually running.
-            string product = "飞牛同步增强版" + ProductVersionText();
+            string product = $"飞牛同步增强版 v{FNSyncPlus.Core.Updates.UpdateService.DisplayVersion}";
             string title = AppServices.IsIsolatedTestSession
                 ? (_settings.IsVersionedBetaTestProfile ? product + " [隔离测试会话·新版配置]" : product + " [隔离测试会话]")
-                : AppServices.IsVersionedBetaSession ? product + " [新版备份试用]" : product + " [旧版引擎·仅供诊断]";
+                : AppServices.IsVersionedBetaSession ? product : product + " [旧版引擎·仅供诊断]";
             WindowHelper.ConfigureWindow(this, title, 1200, 780);
             AppTitleText.Text = title;
             _logService.TaskLogWriteFailed += OnTaskLogWriteFailed;
@@ -391,26 +391,6 @@ namespace FNSyncPlus.WinUI
                 Report();
             };
             page.Loaded += once;
-        }
-
-        /// <summary>Version shown in the title bar, taken from the running assembly plus its build suffix.</summary>
-        private static string ProductVersionText()
-        {
-            try
-            {
-                var assembly = typeof(MainWindow).Assembly;
-                var attributes = assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false);
-                string version = attributes.Length > 0
-                    ? ((System.Reflection.AssemblyInformationalVersionAttribute)attributes[0]).InformationalVersion
-                    : assembly.GetName().Version?.ToString(3) ?? string.Empty;
-                int metadata = version.IndexOf('+');
-                if (metadata > 0) version = version[..metadata];
-                return string.IsNullOrWhiteSpace(version) ? string.Empty : " v" + version;
-            }
-            catch (Exception)
-            {
-                return string.Empty;
-            }
         }
 
         /// <summary>

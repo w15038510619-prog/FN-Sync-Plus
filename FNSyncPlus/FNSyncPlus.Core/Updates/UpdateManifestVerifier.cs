@@ -83,7 +83,7 @@ public sealed class UpdateManifestVerifier
     /// caller can bind a download to exactly this release instead of trusting loose values.
     /// </summary>
     public ReleaseVerification VerifyRelease(string manifestJson, ClientUpdateIdentity client, UpdateChannel requestedChannel,
-        Version? currentVersion, DateTimeOffset now)
+        Version? currentVersion, DateTimeOffset now, bool allowCurrentForCheck = false)
     {
         if (string.IsNullOrWhiteSpace(manifestJson)) return ReleaseVerification.Fail("更新清单为空");
         UpdateManifest? manifest;
@@ -126,9 +126,10 @@ public sealed class UpdateManifestVerifier
         if (!Version.TryParse(manifest.Version, out var version)) return ReleaseVerification.Fail("版本号无效");
         if (!Version.TryParse(manifest.MinVersion, out _)) return ReleaseVerification.Fail("最低兼容版本无效");
         if (!Version.TryParse(manifest.MinCompatibleClient, out var minClient)) return ReleaseVerification.Fail("最低客户端版本无效");
-        if (currentVersion != null && version <= currentVersion)
+        if (currentVersion != null && (CompareVersions(version, currentVersion) < 0 ||
+            (!allowCurrentForCheck && CompareVersions(version, currentVersion) == 0)))
             return ReleaseVerification.Fail("更新清单不是更高版本，拒绝降级或重复安装");
-        if (currentVersion != null && currentVersion < minClient)
+        if (currentVersion != null && CompareVersions(currentVersion, minClient) < 0)
             return ReleaseVerification.Fail("当前客户端过旧，不能通过自动更新升级，请手动安装");
         if (!ChannelMatches(manifest.Channel, requestedChannel))
             return ReleaseVerification.Fail($"通道不匹配：清单为 {manifest.Channel}，请求为 {requestedChannel}");
@@ -139,6 +140,7 @@ public sealed class UpdateManifestVerifier
             return ReleaseVerification.Fail("更新包地址必须是 HTTPS");
         if (manifest.ReleasedAt > now.AddHours(24))
             return ReleaseVerification.Fail("更新清单发布时间异常");
+        if (manifest.Audience == null) return ReleaseVerification.Fail("更新清单受众字段无效");
         if (manifest.Audience.Count > 0 && !manifest.Audience.Contains(client.MachineGroup, StringComparer.OrdinalIgnoreCase) &&
             !manifest.Audience.Contains("*", StringComparer.Ordinal))
             return ReleaseVerification.Fail("该发布批次不面向当前客户端");
@@ -146,6 +148,13 @@ public sealed class UpdateManifestVerifier
             return ReleaseVerification.Fail("该发布批次尚未覆盖当前客户端");
         var channel = ChannelMatches(manifest.Channel, UpdateChannel.Beta) ? UpdateChannel.Beta : UpdateChannel.Stable;
         return new ReleaseVerification(true, "", manifest, channel);
+    }
+
+    internal static int CompareVersions(Version left, Version right)
+    {
+        static Version Normalize(Version version) =>
+            new(version.Major, version.Minor, Math.Max(0, version.Build), Math.Max(0, version.Revision));
+        return Normalize(left).CompareTo(Normalize(right));
     }
 
     /// <summary>

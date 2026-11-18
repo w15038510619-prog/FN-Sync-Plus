@@ -40,6 +40,14 @@ public sealed class UpdateSettings
     [JsonPropertyName("unattended_enabled")] public bool UnattendedEnabled { get; set; }
     [JsonPropertyName("machine_group")] public string MachineGroup { get; set; } = "";
     [JsonPropertyName("release_batch")] public int ReleaseBatch { get; set; }
+    [JsonPropertyName("proxy_url")] public string ProxyUrl { get; set; } = "";
+    [JsonPropertyName("connect_timeout_seconds")] public int ConnectTimeoutSeconds { get; set; } = 15;
+    [JsonPropertyName("check_timeout_seconds")] public int CheckTimeoutSeconds { get; set; } = 30;
+    [JsonPropertyName("download_timeout_minutes")] public int DownloadTimeoutMinutes { get; set; } = 120;
+
+    public static bool IsValidProxyUrl(string? value) => string.IsNullOrWhiteSpace(value) ||
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" &&
+        uri.UserInfo.Length == 0 && uri.AbsolutePath == "/" && uri.Query.Length == 0 && uri.Fragment.Length == 0;
 
     /// <summary>Newest version the background scheduler has already reported, so a restart does not
     /// re-notify (or re-download) the same release.</summary>
@@ -77,7 +85,7 @@ public sealed class UpdateClient : IDisposable
     {
         _verifier = verifier ?? throw new ArgumentNullException(nameof(verifier));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
-        _http = http ?? new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        _http = http ?? UpdateService.CreateHttpClient(settings);
         _ownsClient = http == null;
     }
 
@@ -98,8 +106,10 @@ public sealed class UpdateClient : IDisposable
         }
         try
         {
-            string json = await _http.GetStringAsync(uri, token).ConfigureAwait(false);
-            var verification = _verifier.VerifyRelease(json, identity, Channel, currentVersion, DateTimeOffset.UtcNow);
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            deadline.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(_settings.CheckTimeoutSeconds, 5, 300)));
+            string json = await _http.GetStringAsync(uri, deadline.Token).ConfigureAwait(false);
+            var verification = _verifier.VerifyRelease(json, identity, Channel, currentVersion, DateTimeOffset.UtcNow, allowCurrentForCheck: true);
             if (!verification.Ok)
             {
                 _settings.LastResult = verification.Error;
@@ -107,6 +117,11 @@ public sealed class UpdateClient : IDisposable
             }
             var manifest = verification.Manifest!;
             string version = manifest.Version;
+            if (UpdateManifestVerifier.CompareVersions(Version.Parse(version), currentVersion) == 0)
+            {
+                _settings.LastResult = $"当前已是最新版本 {version}。";
+                return UpdateCheckOutcome.No(false, version, _settings.LastResult, "");
+            }
             if (string.Equals(_settings.SkippedVersion, version, StringComparison.OrdinalIgnoreCase))
             {
                 _settings.LastResult = $"版本 {version} 已被用户跳过";
@@ -118,9 +133,14 @@ public sealed class UpdateClient : IDisposable
             return new UpdateCheckOutcome(true, version, manifest.Notes, "", release);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException)
+        {
+            _settings.LastResult = "检查更新超时，请检查网络或代理设置后重试。";
+            return UpdateCheckOutcome.No(false, "", "", _settings.LastResult);
+        }
         catch (Exception ex) when (ex is HttpRequestException or IOException or System.Text.Json.JsonException)
         {
-            _settings.LastResult = $"检查更新失败：{ex.Message}";
+            _settings.LastResult = "无法读取更新清单，请检查更新源、网络和证书后重试。";
             return UpdateCheckOutcome.No(false, "", "", _settings.LastResult);
         }
     }
@@ -131,24 +151,22 @@ public sealed class UpdateClient : IDisposable
     /// ones — there is no second manifest fetch that could point at a different package.
     /// </summary>
     public async Task<UpdateDownloadResult> DownloadAsync(VerifiedRelease release, string directory,
-        IProgress<long>? progress = null, CancellationToken token = default)
+        IProgress<long>? progress = null, CancellationToken token = default, Version? currentVersion = null)
     {
         ArgumentNullException.ThrowIfNull(release);
         var identity = new ClientUpdateIdentity(release.MachineGroup, release.ReleaseBatch);
-        // The current version is not re-checked here: the release was already accepted for this
-        // client. Re-verifying with "no current version" would weaken the downgrade rule, so pass
-        // the release's own predecessor boundary instead by skipping that check entirely.
-        var verification = _verifier.VerifyRelease(release.ManifestJson, identity, Channel, null, DateTimeOffset.UtcNow);
+        var verification = _verifier.VerifyRelease(release.ManifestJson, identity, Channel, currentVersion, DateTimeOffset.UtcNow);
         if (!verification.Ok) return new UpdateDownloadResult(false, "", verification.Error);
         var manifest = verification.Manifest!;
         if (!string.Equals(manifest.Version, release.Version, StringComparison.Ordinal) ||
             !string.Equals(manifest.Sha256, release.Sha256, StringComparison.OrdinalIgnoreCase) ||
-            manifest.Size != release.Size)
+            manifest.Size != release.Size || manifest.Url != release.PackageUrl || verification.Channel != release.Channel)
             return new UpdateDownloadResult(false, "", "已签名清单与待下载发布描述不一致，已拒绝下载");
 
         string path = Path.Combine(directory, $"FN-Sync-Plus-{release.Version}-x64.zip");
         using var downloader = new UpdateDownloader(_http);
-        var result = await downloader.DownloadAsync(manifest.Url, path, manifest.Sha256, manifest.Size, progress, token)
+        var result = await downloader.DownloadAsync(manifest.Url, path, manifest.Sha256, manifest.Size, progress, token,
+            TimeSpan.FromMinutes(Math.Clamp(_settings.DownloadTimeoutMinutes, 1, 480)))
             .ConfigureAwait(false);
         _settings.LastResult = result.Ok ? $"已下载 {release.Version}" : result.Error;
         return result;

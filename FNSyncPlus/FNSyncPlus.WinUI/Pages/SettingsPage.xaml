@@ -166,18 +166,21 @@
                         <TextBlock Text="{x:Bind ViewModel.UpdateSupportMessage, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
 
-                        <Grid ColumnSpacing="16">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="200" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                                <TextBlock Text="更新源地址（HTTPS）" FontSize="13" FontWeight="Medium" />
-                                <TextBlock Text="公司内网更新服务器的清单地址，例如 https://update.example.internal/fnsync/manifest.json" FontSize="11" TextWrapping="Wrap"
-                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <StackPanel Spacing="6">
+                            <TextBox Header="更新源地址（HTTPS）" Text="{x:Bind ViewModel.UpdateFeedUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     TextWrapping="Wrap" PlaceholderText="https://…/manifest.json" />
+                            <Button Content="复制更新源地址" Command="{x:Bind ViewModel.CopyUpdateSourceCommand}" />
+                        </StackPanel>
+
+                        <Expander Header="代理和超时" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                            <StackPanel Spacing="8">
+                                <TextBox Header="更新代理 URL" PlaceholderText="留空使用系统代理" TextWrapping="Wrap"
+                                         Text="{x:Bind ViewModel.UpdateProxyUrl, Mode=TwoWay}" />
+                                <NumberBox Header="连接超时（秒）" Minimum="2" Maximum="120" Value="{x:Bind ViewModel.ConnectTimeoutSeconds, Mode=TwoWay}" />
+                                <NumberBox Header="检查超时（秒）" Minimum="5" Maximum="300" Value="{x:Bind ViewModel.CheckTimeoutSeconds, Mode=TwoWay}" />
+                                <NumberBox Header="下载总超时（分钟）" Minimum="1" Maximum="480" Value="{x:Bind ViewModel.DownloadTimeoutMinutes, Mode=TwoWay}" />
                             </StackPanel>
-                            <TextBox Grid.Column="1" Text="{x:Bind ViewModel.UpdateFeedUrl, Mode=TwoWay}" FontSize="11" PlaceholderText="https://…/manifest.json" />
-                        </Grid>
+                        </Expander>
 
                         <Grid ColumnSpacing="16">
                             <Grid.ColumnDefinitions>
@@ -226,29 +229,33 @@
                                           IsEnabled="{x:Bind ViewModel.UnattendedSelectable, Mode=OneWay}" OnContent="" OffContent="" />
                         </Grid>
 
-                        <ProgressBar IsIndeterminate="True"
+                        <ProgressBar Value="{x:Bind ViewModel.DownloadProgress, Mode=OneWay}" Maximum="100"
                                      Visibility="{x:Bind ViewModel.ShowDownloadProgress, Mode=OneWay}" Height="4" />
 
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Button Command="{x:Bind ViewModel.CheckUpdateCommand}" IsEnabled="{x:Bind ViewModel.CanCheckUpdate, Mode=OneWay}">
+                        <Grid ColumnSpacing="8" RowSpacing="8">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                            <Button Command="{x:Bind ViewModel.CheckUpdateCommand}" IsEnabled="{x:Bind ViewModel.CanRunUpdate, Mode=OneWay}">
                                 <StackPanel Orientation="Horizontal" Spacing="6">
                                     <FontIcon Glyph="&#xE895;" FontSize="12" />
                                     <TextBlock Text="检查更新" FontSize="12" />
                                 </StackPanel>
                             </Button>
-                            <Button Command="{x:Bind ViewModel.DownloadUpdateCommand}">
+                            <Button Grid.Column="1" Command="{x:Bind ViewModel.DownloadUpdateCommand}" IsEnabled="{x:Bind ViewModel.CanRunUpdate, Mode=OneWay}">
                                 <StackPanel Orientation="Horizontal" Spacing="6">
                                     <FontIcon Glyph="&#xE896;" FontSize="12" />
                                     <TextBlock Text="下载更新包" FontSize="12" />
                                 </StackPanel>
                             </Button>
-                            <Button Command="{x:Bind ViewModel.InstallUpdateCommand}" IsEnabled="{x:Bind ViewModel.CanInstallUpdate, Mode=OneWay}">
+                            <Button Grid.Row="1" Command="{x:Bind ViewModel.InstallUpdateCommand}" IsEnabled="{x:Bind ViewModel.CanStartInstall, Mode=OneWay}">
                                 <StackPanel Orientation="Horizontal" Spacing="6">
                                     <FontIcon Glyph="&#xE777;" FontSize="12" />
                                     <TextBlock Text="安装并重启" FontSize="12" />
                                 </StackPanel>
                             </Button>
-                        </StackPanel>
+                            <Button Grid.Row="1" Grid.Column="1" Content="取消更新" Command="{x:Bind ViewModel.CancelUpdateCommand}"
+                                    Visibility="{x:Bind ViewModel.CanCancelUpdate, Mode=OneWay}" />
+                        </Grid>
 
                         <TextBlock Text="{x:Bind ViewModel.UpdateStatus, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
                                    Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
@@ -273,11 +280,11 @@
                             </Grid.ColumnDefinitions>
                             <StackPanel Grid.Column="0" Spacing="4">
                                 <TextBlock Text="飞牛同步增强版 (FN Sync Plus)" FontSize="13" FontWeight="SemiBold" />
-                                <TextBlock Text="测试构建版本：v0.4.0-beta (Windows App SDK / WinUI 3 原生桌面架构)" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                <TextBlock Text="注：当前阶段为 Beta 测试版，提供长文件名无损映射、多任务隔离、内置备份测试实验室等功能。" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextWrapping="Wrap" />
+                                <TextBlock Text="Windows 文件备份、版本历史和恢复" FontSize="11" TextWrapping="Wrap"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             </StackPanel>
                             <Border Grid.Column="1" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="8,4" VerticalAlignment="Center">
-                                <TextBlock Text="v0.4.0-beta" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                                <TextBlock Text="{x:Bind ViewModel.ProductVersion}" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
                             </Border>
                         </Grid>
                     </StackPanel>

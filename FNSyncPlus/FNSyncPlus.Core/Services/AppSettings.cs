@@ -130,7 +130,7 @@ namespace FNSyncPlus.Core.Services
             try
             {
                 using var stream = new FileStream(VersionedLegacySettingsPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-                using var reader = new StreamReader(stream);
+                using var reader = new StreamReader(stream, new System.Text.UTF8Encoding(false, true), detectEncodingFromByteOrderMarks: true);
                 return FromJson(reader.ReadToEnd());
             }
             catch (FileNotFoundException) { return null; }

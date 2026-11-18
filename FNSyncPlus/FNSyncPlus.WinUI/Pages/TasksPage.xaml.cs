@@ -110,7 +110,7 @@ namespace FNSyncPlus.WinUI.Pages
                 }
 
                 await new ContentDialog { Title = "查看旧任务", Content = new ScrollViewer { MaxHeight = 420,
-                    Content = new TextBlock { Text = text.ToString(), TextWrapping = TextWrapping.Wrap } },
+                    Content = new TextBlock { Text = text.ToString(), TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true } },
                     CloseButtonText = "知道了", XamlRoot = XamlRoot }.ShowAsync();
             }
             catch (Exception ex)
