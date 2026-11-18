@@ -30,6 +30,7 @@ internal static class Program
                 "keygen" => Keygen(Args.Parse(args)),
                 "sign" => Sign(Args.Parse(args)),
                 "verify" => Verify(Args.Parse(args)),
+                "verify-key" => VerifyKey(Args.Parse(args)),
                 "inspect" => Inspect(Args.Parse(args)),
                 _ => Usage()
             };
@@ -103,6 +104,27 @@ internal static class Program
         return 0;
     }
 
+    private static (Assembly Core, string Pem) ReadEmbeddedKey(string path, string? expectedVersion)
+    {
+        var core = Assembly.LoadFile(Path.GetFullPath(path));
+        using var embedded = core.GetManifestResourceStream(PinnedUpdateKey.ResourceName)
+            ?? throw new InvalidDataException("应用程序没有嵌入更新公钥");
+        using var reader = new StreamReader(embedded);
+        if (expectedVersion != null && core.GetName().Version?.ToString(3) != expectedVersion)
+            throw new InvalidDataException("应用程序程序集版本与预期不一致");
+        return (core, reader.ReadToEnd());
+    }
+
+    private static int VerifyKey(Args args)
+    {
+        if (args.Get("embedded-core") is not { } corePath || args.Get("public") is not { } publicPath) return Usage();
+        var (core, pem) = ReadEmbeddedKey(corePath, args.Get("build-version"));
+        if (pem.Trim() != File.ReadAllText(publicPath).Trim()) throw new InvalidDataException("应用程序嵌入了不同的更新公钥");
+        _ = UpdateManifestVerifier.FromPem(pem);
+        Console.WriteLine($"内嵌更新公钥与发布公钥一致（程序集 {core.GetName().Version}）");
+        return 0;
+    }
+
     private static int Verify(Args args)
     {
         string? manifestPath = args.Get("manifest");
@@ -112,13 +134,9 @@ internal static class Program
         string pem;
         if (corePath != null)
         {
-            var core = Assembly.LoadFile(Path.GetFullPath(corePath));
-            using var embedded = core.GetManifestResourceStream(PinnedUpdateKey.ResourceName)
-                ?? throw new InvalidDataException("应用程序没有嵌入更新公钥");
-            using var reader = new StreamReader(embedded);
-            pem = reader.ReadToEnd();
-            if (args.Get("build-version") is { } buildVersion && core.GetName().Version?.ToString(3) != buildVersion)
-                throw new InvalidDataException("应用程序程序集版本与预期不一致");
+            var embeddedKey = ReadEmbeddedKey(corePath, args.Get("build-version"));
+            var core = embeddedKey.Core;
+            pem = embeddedKey.Pem;
             if (args.Has("require-controlled-beta"))
             {
                 var type = core.GetType(typeof(UpdateSettings).FullName!, throwOnError: true)!;

@@ -44,11 +44,12 @@
     </PivotItem>
    </Pivot>
   </Grid>
-  <Border Grid.Row="3" Padding="14" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-   <StackPanel Spacing="8">
-    <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-     <TextBox Header="恢复到" Text="{x:Bind ViewModel.LocalRestoreTarget, Mode=TwoWay}" IsReadOnly="True" ToolTipService.ToolTip="{x:Bind ViewModel.LocalRestoreTarget, Mode=OneWay}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"/>
-     <Button Grid.Column="1" Content="选择文件夹…" Click="BtnBrowseLocalRestore_Click" VerticalAlignment="Bottom" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"/>
+  <Border Grid.Row="3" Padding="12,8" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+   <StackPanel Spacing="6">
+    <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+     <TextBlock Text="恢复到" VerticalAlignment="Center"/>
+     <TextBox Grid.Column="1" Text="{x:Bind ViewModel.LocalRestoreTarget, Mode=TwoWay}" IsReadOnly="True" ToolTipService.ToolTip="{x:Bind ViewModel.LocalRestoreTarget, Mode=OneWay}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"/>
+     <Button Grid.Column="2" Content="选择文件夹…" Click="BtnBrowseLocalRestore_Click" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"/>
     </Grid>
     <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <ComboBox SelectedIndex="{x:Bind ViewModel.ConflictPolicyIndex, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"><ComboBoxItem Content="同名文件跳过"/><ComboBoxItem Content="覆盖同名文件（需要确认）"/><ComboBoxItem Content="保留两份，自动改名"/></ComboBox>
@@ -59,7 +60,7 @@
       <Button x:Name="HistoryRestoreAction" Grid.Column="1" Content="{x:Bind ViewModel.HistoryRestoreLabel, Mode=OneWay}" Visibility="Collapsed" Click="BeginRestore_Click" Style="{ThemeResource AccentButtonStyle}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"/>
     </Grid>
     <ProgressBar Value="{x:Bind ViewModel.RestoreProgress, Mode=OneWay}" Height="4"/>
-    <TextBlock Text="{x:Bind ViewModel.RestoreStatusText, Mode=OneWay}" TextWrapping="Wrap" MaxLines="2"/>
+    <TextBlock Text="{x:Bind ViewModel.RestoreStatusText, Mode=OneWay}" FontSize="12" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind ViewModel.RestoreStatusText, Mode=OneWay}"/>
     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock FontSize="12"><Run Text="成功 "/><Run Text="{x:Bind ViewModel.RestoredFilesCount, Mode=OneWay}"/><Run Text="  已校验 "/><Run Text="{x:Bind ViewModel.IntegrityVerifiedCount, Mode=OneWay}"/><Run Text="  失败 "/><Run Text="{x:Bind ViewModel.FailedFilesCount, Mode=OneWay}"/><Run Text="  跳过 "/><Run Text="{x:Bind ViewModel.SkippedFilesCount, Mode=OneWay}"/></TextBlock><StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6"><Button Content="高级详情" Click="Details_Click"/><Button Content="导出报告" Command="{x:Bind ViewModel.ExportRestoreLogCommand}"/></StackPanel></Grid>
    </StackPanel>
   </Border>

@@ -96,6 +96,12 @@ try {
         if (Test-Path -LiteralPath $path) { throw "输出路径已存在，拒绝覆盖：$path" }
     }
 
+    # Compile the release tool before pinned payloads. Rebuilding it between publishes would
+    # rebuild Core without release properties and could pollute incremental resource outputs.
+    if ($UpdatePublicKeyPath -or $SignManifest) {
+        Invoke-Dotnet -Arguments @('build', '..\tools\FNSyncPlus.UpdateTool\FNSyncPlus.UpdateTool.csproj', '-c', 'Release')
+    }
+
     # 1. Application payload
     New-Item -ItemType Directory -Path $appDir -Force | Out-Null
     $commonPublish = @()
@@ -115,12 +121,9 @@ try {
     }
 
     if ($UpdatePublicKeyPath) {
-        $stagedCore = [Reflection.Assembly]::LoadFile((Join-Path $appDir 'FNSyncPlus.Core.dll'))
-        $stream = $stagedCore.GetManifestResourceStream('FNSyncPlus.update-public.pem')
-        if ($null -eq $stream) { throw 'Staged client is missing its pinned update key; refusing to package.' }
-        $reader = [IO.StreamReader]::new($stream)
-        try { $embeddedKey = $reader.ReadToEnd().Trim() } finally { $reader.Dispose() }
-        if ($embeddedKey -cne ([IO.File]::ReadAllText($UpdatePublicKeyPath)).Trim()) { throw 'Staged client pins a different update key.' }
+        # A child process releases the assembly before Windows PowerShell creates the ZIP.
+        Invoke-Dotnet -Arguments @('run', '--project', '..\tools\FNSyncPlus.UpdateTool\FNSyncPlus.UpdateTool.csproj', '-c', 'Release', '--no-build', '--',
+            'verify-key', '--embedded-core', (Join-Path $appDir 'FNSyncPlus.Core.dll'), '--public', $UpdatePublicKeyPath, '--build-version', $Version)
     }
 
     # 2. Never ship credentials or configuration
@@ -176,10 +179,10 @@ try {
         }
         $descriptorPath = Join-Path $OutputRoot 'descriptor.json'
         $descriptor | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $descriptorPath -Encoding utf8
-        Invoke-Dotnet -Arguments @('run', '--project', '..\tools\FNSyncPlus.UpdateTool\FNSyncPlus.UpdateTool.csproj', '-c', 'Release', '--',
+        Invoke-Dotnet -Arguments @('run', '--project', '..\tools\FNSyncPlus.UpdateTool\FNSyncPlus.UpdateTool.csproj', '-c', 'Release', '--no-build', '--',
             'sign', '--input', $descriptorPath, '--key', $SigningKeyPath, '--out', $manifestPath, '--package', $packagePath,
             '--version', $Version, '--channel', $Channel, '--url', "$ManifestBaseUrl/FN-Sync-Plus-$Version-x64.zip")
-        Invoke-Dotnet -Arguments @('run', '--project', '..\tools\FNSyncPlus.UpdateTool\FNSyncPlus.UpdateTool.csproj', '-c', 'Release', '--',
+        Invoke-Dotnet -Arguments @('run', '--project', '..\tools\FNSyncPlus.UpdateTool\FNSyncPlus.UpdateTool.csproj', '-c', 'Release', '--no-build', '--',
             'verify', '--manifest', $manifestPath, '--public', $UpdatePublicKeyPath, '--current', $MinimumClientVersion,
             '--channel', $Channel, '--batch', "$ReleaseBatch", '--group', $Audience)
     }
