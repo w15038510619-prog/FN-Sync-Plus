@@ -125,7 +125,8 @@ public static partial class AcceptanceCli
                 expected.SequenceEqual(await ReadLocalFilesAsync(currentPath, token));
             AddResult(results, "OwnCurrentHashes", currentOk, new { Expected = expected, Restored = await ReadLocalFilesAsync(currentPath, token) },
                 "Current paths, byte sizes and SHA-256 must match this device's synthetic source.");
-            var historical = backup.Manifest.History.SingleOrDefault(h => h.OriginalRel == "marker.txt" && h.Sha256 == initial.Single(e => e.Path == "marker.txt").Sha256);
+            var historical = backup.Manifest.History.SingleOrDefault(h => h.OriginalRel == "marker.txt" &&
+                string.Equals(h.Sha256, initial.Single(e => e.Path == "marker.txt").Sha256, StringComparison.OrdinalIgnoreCase));
             bool historyOk = false;
             if (historical != null)
             {
