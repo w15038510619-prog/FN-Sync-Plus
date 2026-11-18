@@ -284,6 +284,12 @@ function Capture-Scenario {
                 elseif ($null -ne $small) { $smallDetail = "probe failed: $($small.error)" }
                 Record-Result -Name ("{0}/{1}：最小窗口尺寸下界面仍然完整渲染" -f $ScenarioKey, $Page) `
                     -Passed ($smallOk -and [double]$small.content_coverage -ge 0.05) -Detail $smallDetail
+                if ($smallOk -and $Page -eq 'Restore') {
+                    $layout = Get-Content -LiteralPath (Join-Path $sessionDir 'ui-ready.json') -Raw -Encoding utf8 | ConvertFrom-Json
+                    Record-Result -Name ("{0}/Restore：最小窗口列表与恢复按钮可见" -f $ScenarioKey) `
+                        -Passed ($layout.restore_list_height -ge 80 -and $layout.restore_action_height -ge 30 -and $layout.restore_action_bottom -le $layout.restore_page_height) `
+                        -Detail ("listHeight={0} actionHeight={1} actionBottom={2} pageHeight={3}" -f $layout.restore_list_height,$layout.restore_action_height,$layout.restore_action_bottom,$layout.restore_page_height)
+                }
                 if ($smallOk) {
                     [void]$script:records.Add([pscustomobject]@{
                         session = $sessionId; pid = $process.id; page = "$Page(min)"; theme = $Theme

@@ -39,6 +39,16 @@ namespace FNSyncPlus.WinUI.Pages
         {
             if (CurrentRestoreActions == null || sender is not Pivot pivot) return;
             CurrentRestoreActions.Visibility = pivot.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
+            if (HistoryRestoreAction != null) HistoryRestoreAction.Visibility = pivot.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        public System.Collections.Generic.Dictionary<string, object?> VisualLayoutMetrics()
+        {
+            var files = RestoreTabs.SelectedIndex == 1 ? HistoryFileList : CurrentFileList;
+            FrameworkElement action = RestoreTabs.SelectedIndex == 1 ? HistoryRestoreAction : CurrentRestoreActions;
+            double bottom = action.TransformToVisual(this).TransformPoint(new Windows.Foundation.Point(0, 0)).Y + action.ActualHeight;
+            return new() { ["restore_list_height"] = files.ActualHeight, ["restore_action_height"] = action.ActualHeight,
+                ["restore_action_bottom"] = bottom, ["restore_page_height"] = ActualHeight };
         }
 
         private async void BeginRestore_Click(object sender, RoutedEventArgs e)

@@ -102,6 +102,9 @@ try {
     if ($SourceSha) { $commonPublish += "-p:SourceRevisionId=$SourceSha" }
     if ($ControlledOnlineBeta) { $commonPublish += '-p:ControlledOnlineBeta=true' }
     if ($UpdatePublicKeyPath) { $commonPublish += "-p:UpdatePublicKeyPath=$UpdatePublicKeyPath" }
+    # Changing the external pinned resource must never reuse an unpinned incremental assembly.
+    Invoke-Dotnet -Arguments (@('clean', 'FNSyncPlus.WinUI\FNSyncPlus.WinUI.csproj', '-c', 'Release',
+        '-p:RuntimeIdentifier=win-x64', '-p:WindowsPackageType=None', "-p:Version=$Version") + $commonPublish)
     Invoke-Dotnet -Arguments (@('publish', 'FNSyncPlus.WinUI\FNSyncPlus.WinUI.csproj', '-c', 'Release', '-r', 'win-x64',
         '--self-contained', 'true', '-p:WindowsPackageType=None', "-p:Version=$Version", '-o', $appDir) + $commonPublish)
     if ($Channel -eq 'beta') { Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'TEST_ONLY.txt') -Destination (Join-Path $appDir 'TEST_ONLY.txt') -Force }
@@ -109,6 +112,15 @@ try {
     $required = @('FNSyncPlus.WinUI.exe', 'resources.pri', 'hostfxr.dll', 'Microsoft.WindowsAppRuntime.Bootstrap.dll')
     foreach ($name in $required) {
         if (-not (Test-Path -LiteralPath (Join-Path $appDir $name) -PathType Leaf)) { throw "发布结果缺少 $name" }
+    }
+
+    if ($UpdatePublicKeyPath) {
+        $stagedCore = [Reflection.Assembly]::LoadFile((Join-Path $appDir 'FNSyncPlus.Core.dll'))
+        $stream = $stagedCore.GetManifestResourceStream('FNSyncPlus.update-public.pem')
+        if ($null -eq $stream) { throw 'Staged client is missing its pinned update key; refusing to package.' }
+        $reader = [IO.StreamReader]::new($stream)
+        try { $embeddedKey = $reader.ReadToEnd().Trim() } finally { $reader.Dispose() }
+        if ($embeddedKey -cne ([IO.File]::ReadAllText($UpdatePublicKeyPath)).Trim()) { throw 'Staged client pins a different update key.' }
     }
 
     # 2. Never ship credentials or configuration
@@ -182,6 +194,6 @@ try {
     Write-Host "更新包 SHA-256: $packageHash"
     Write-Host "更新包大小    : $packageSize"
     if (Test-Path -LiteralPath $manifestPath) { Write-Host "更新清单      : $manifestPath" }
-    Write-Host '这是受控试点候选版；未完成安全验收前不得用于正式资料的唯一备份。'
+    Write-Host "已生成 $Channel 候选产物；实际投运结论以本轮验收报告为准。"
 }
 finally { Pop-Location }

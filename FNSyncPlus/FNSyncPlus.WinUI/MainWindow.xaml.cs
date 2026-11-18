@@ -380,15 +380,16 @@ namespace FNSyncPlus.WinUI
                 try
                 {
                     var manager = AppServices.GetService<TaskManager>();
-                    UiVisualSignal.ReportPageReady(tag, new Dictionary<string, object?>
-                    {
-                        ["task_count"] = manager.Tasks.Count,
-                        ["nas_online"] = manager.IsNasOnline,
-                        ["tray_tooltip"] = _trayIcon?.DisplayText,
-                    });
+                    var metrics = page is Pages.RestorePage restore ? restore.VisualLayoutMetrics() : new Dictionary<string, object?>();
+                    metrics["task_count"] = manager.Tasks.Count;
+                    metrics["nas_online"] = manager.IsNasOnline;
+                    metrics["tray_tooltip"] = _trayIcon?.DisplayText;
+                    UiVisualSignal.ReportPageReady(tag, metrics);
+
                 }
                 catch (Exception ex) { App.LogCrashException(ex, "MainWindow.VisualPageReady"); }
             }));
+            page.SizeChanged += (_, _) => Report();
             if (page.IsLoaded)
             {
                 Report();

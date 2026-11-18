@@ -146,7 +146,7 @@ public sealed class UpdateManifestVerifier
             return ReleaseVerification.Fail("该发布批次不面向当前客户端");
         if (client.ReleaseBatch < manifest.Batch)
             return ReleaseVerification.Fail("该发布批次尚未覆盖当前客户端");
-        var channel = ChannelMatches(manifest.Channel, UpdateChannel.Beta) ? UpdateChannel.Beta : UpdateChannel.Stable;
+        var channel = string.Equals(manifest.Channel, "beta", StringComparison.OrdinalIgnoreCase) ? UpdateChannel.Beta : UpdateChannel.Stable;
         return new ReleaseVerification(true, "", manifest, channel);
     }
 

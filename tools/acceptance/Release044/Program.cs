@@ -73,6 +73,20 @@ async Task Chain(INasStorageProvider provider, string target, string label, dyna
 
 if (!args.Contains("--live"))
 {
+    await Check("Signed Stable manifest retains its actual channel", () =>
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var manifest = new FNSyncPlus.Core.Updates.UpdateManifest { Version = "0.4.4", Channel = "stable",
+            Url = "https://example.org/release.zip", Size = 1, Sha256 = new string('a', 64), ReleasedAt = DateTimeOffset.UtcNow };
+        string signed = FNSyncPlus.Core.Updates.UpdateManifestSigner.Sign(manifest, key);
+        var verifier = FNSyncPlus.Core.Updates.UpdateManifestVerifier.FromPem(key.ExportSubjectPublicKeyInfoPem());
+        foreach (var requested in new[] { FNSyncPlus.Core.Updates.UpdateChannel.Stable, FNSyncPlus.Core.Updates.UpdateChannel.Beta })
+        {
+            var verified = verifier.Verify(signed, new("", 0), requested, new Version(0, 4, 3), DateTimeOffset.UtcNow);
+            Require(verified.Ok && verified.Channel == FNSyncPlus.Core.Updates.UpdateChannel.Stable, "Stable was mislabeled Beta after verification");
+        }
+        return Task.CompletedTask;
+    });
     await Check("Native connection does not supply storage to local tasks", async () =>
     {
         var settings = new AppSettings { IsInMemoryOnly = true };
