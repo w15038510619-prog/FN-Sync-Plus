@@ -388,17 +388,8 @@ namespace FNSyncPlus.Tests
             Console.WriteLine($"  [GitHub CI 环境] 离线自动化测试: 通过 {_passed} 项, 失败 {_failed} 项, 安全跳过 {_skipped} 项");
             Console.WriteLine("  [真实 NAS 联机 PoC] 旧入口已停用，本次未执行真实 NAS 验证。");
             Console.WriteLine("--------------------------------------------------------------------------------");
-            Console.WriteLine("  飞牛 fnOS 账号个人空间接口验证状态矩阵:");
-            Console.WriteLine("    [已验证] user.login (RSA+AES 加密鉴权与 2FA)     : 100% 实测成功");
-            Console.WriteLine("    [已验证] file.ls (自动定位当前用户「我的文件」)     : 100% 实测成功");
-            Console.WriteLine("    [已验证] file.mkdir (创建个人空间子目录)          : 100% 实测成功");
-            Console.WriteLine("    [已验证] file.checkUpload (预检断点与 uploadName): 100% 实测成功");
-            Console.WriteLine("    [已验证] POST /upload (Trim-Sign 签名与分块流式) : 100% 实测成功");
-            Console.WriteLine("    [已验证] POST/GET /multiple-download (流式下载)  : 100% 实测成功");
-            Console.WriteLine("    [已验证] SHA-256 完整性 (逐字节端到端一致性)     : 100% 实测成功");
-            Console.WriteLine("    [已验证] file.del (沙盒测试标记目录受控清理)      : 100% 实测成功");
-            Console.WriteLine("    [待验证] file.rename / file.copy (远端重命名移动): 暂非备份核心，待验证");
-            Console.WriteLine("    [不适用] share.create (远端 SMB 共享配置)        : 原生个人空间无需此接口");
+            Console.WriteLine("  历史真实 NAS 验收证据见 docs/acceptance-status.md。");
+            Console.WriteLine("  本次真实 NAS 执行情况以以上各类别的通过、失败和跳过数量为准。");
             Console.WriteLine("================================================================================");
 
             return _failed == 0 ? 0 : 1;
