@@ -42,6 +42,7 @@ param(
     [string]$VersionA = '0.5.0',
     [string]$VersionB = '0.6.0',
     [string]$VersionC = '0.7.0',
+    [ValidateSet('beta','stable')][string]$Channel = $Channel,
     [switch]$ControlledOnlineBeta,
     [switch]$SkipBuilds
 )
@@ -229,7 +230,7 @@ function Write-SessionUpdatesJson {
     $sessionDir = Join-Path $testSessionsRoot "WinUiSession_$SessionId"
     $logsDir = Join-Path $sessionDir 'logs'
     New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
-    $updates = [ordered]@{ channel = 'beta'; auto_mode = 1; manifest_url = $Url;
+    $updates = [ordered]@{ channel = $Channel; auto_mode = 1; manifest_url = $Url;
                            release_batch = 0; machine_group = '' }
     [System.IO.File]::WriteAllText((Join-Path $logsDir 'updates.json'),
         ($updates | ConvertTo-Json), (New-Object System.Text.UTF8Encoding($false)))
@@ -281,7 +282,7 @@ try {
 
         $buildScript = Join-Path $repo 'FNSyncPlus\build-release.ps1'
         $commonBuild = @{
-            Dotnet = $dotnet; Channel = 'beta'; SkipTests = $true; ControlledOnlineBeta = $ControlledOnlineBeta
+            Dotnet = $dotnet; Channel = $Channel; SkipTests = $true; ControlledOnlineBeta = $ControlledOnlineBeta
             UpdatePublicKeyPath = $publicKey; MinimumClientVersion = $VersionA; SupportedDataFormat = 1
         }
         Write-Host "--- building A ($versionA, contains the https probe) ---"
@@ -602,7 +603,7 @@ try {
     Record-Result -Name "S3 构造 $versionC 缺陷更新包（载荷缺少核心程序集）" -Passed (Test-Path $packageC) `
         -Detail ("package={0}" -f $packageC)
     $descriptorC = Join-Path $WorkRoot 'build-c\descriptor.json'
-    [ordered]@{ schema = 1; product = 'FN Sync Plus'; channel = 'beta'; arch = 'x64'
+    [ordered]@{ schema = 1; product = 'FN Sync Plus'; channel = $Channel; arch = 'x64'
         version = $versionC; min_version = $VersionA; notes = "$versionC acceptance broken payload"
         batch = 0; audience = @('*'); min_compatible_client = $VersionA } |
         ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $descriptorC -Encoding utf8
@@ -610,7 +611,7 @@ try {
         'run', '--project', (Join-Path $repo 'tools\FNSyncPlus.UpdateTool\FNSyncPlus.UpdateTool.csproj'),
         '-c', 'Release', '--', 'sign', '--input', $descriptorC, '--key', $privateKey,
         '--out', (Join-Path $WorkRoot 'build-c\manifest.json'), '--package', $packageC,
-        '--version', $versionC, '--channel', 'beta', '--url', "$manifestBaseUrl/$packageCName")
+        '--version', $versionC, '--channel', $Channel, '--url', "$manifestBaseUrl/$packageCName")
     Record-Result -Name 'S3 缺陷包清单已用同一私钥签名（签名有效，缺陷在载荷）' -Passed ($signC.Code -eq 0) `
         -Detail ("exit={0}" -f $signC.Code)
     Copy-Item -LiteralPath (Join-Path $WorkRoot 'build-c\manifest.json') -Destination (Join-Path $contentDir 'manifest.json') -Force

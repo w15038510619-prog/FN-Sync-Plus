@@ -1,18 +1,20 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$ReleaseDirectory,
     [Parameter(Mandatory)][ValidatePattern('^[a-zA-Z_][a-zA-Z0-9_-]*@[a-zA-Z0-9][a-zA-Z0-9.-]*$')][string]$SshTarget,
     [ValidateRange(1,65535)][int]$SshPort = 22,
     [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$PublicKeySha256,
+    [ValidateSet('beta','stable')][string]$Channel = 'beta',
     [string]$Dotnet = 'dotnet',
     [switch]$ProvisionTrust,
     [switch]$PlanOnly
 )
 $ErrorActionPreference = 'Stop'
-$baseUrl = 'https://dev.sk-fj.com:8081/fnsync/beta'
+$baseUrl = "https://dev.sk-fj.com:8081/fnsync/$Channel"
 $remoteRoot = '/data/fnsync-updates/.beta-staging'
 $release = (Resolve-Path -LiteralPath $ReleaseDirectory).Path
-$public = Join-Path $release 'beta-update-public.pem'
+$public = Join-Path $release 'update-public.pem'
+if (!(Test-Path -LiteralPath $public)) { $public = Join-Path $release 'beta-update-public.pem' }
 $manifest = Join-Path $release 'manifest.json'
 $descriptor = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
 $version = [string]$descriptor.version
@@ -26,7 +28,7 @@ $name = "FN-Sync-Plus-$version-x64.zip"
 $zip = Join-Path $release $name
 $downloadUrl = "$baseUrl/$name"
 $manifestUrl = "$baseUrl/manifest.json"
-if ($descriptor.url -cne $downloadUrl -or $descriptor.channel -cne 'beta' -or $descriptor.arch -cne 'x64') {
+if ($descriptor.url -cne $downloadUrl -or $descriptor.channel -cne $Channel -or $descriptor.arch -cne 'x64') {
     throw 'The signed manifest does not target the expected Beta feed and payload.'
 }
 function Get-Sha256([string]$Path) { (Get-FileHash -LiteralPath $Path).Hash.ToLowerInvariant() }
@@ -44,7 +46,7 @@ if ((Get-Sha256 $public) -cne $keyHash -or $zipHash -ne $descriptor.sha256 -or $
 $tool = Join-Path $PSScriptRoot '..\FNSyncPlus.UpdateTool\FNSyncPlus.UpdateTool.csproj'
 function Test-SignedManifest([string]$Path) {
     Invoke-Checked $Dotnet @('run','--project',$tool,'-c','Release','--','verify','--manifest',$Path,
-        '--public',$public,'--current',$minimum,'--channel','beta')
+        '--public',$public,'--current',$minimum,'--channel',$Channel)
 }
 Test-SignedManifest $manifest
 Write-Host "SSH: $SshTarget port $SshPort"
@@ -72,10 +74,10 @@ function Send-StagedFile([string]$LocalPath, [string]$Name) {
 $download = Join-Path ([IO.Path]::GetTempPath()) "FNSyncPlus-Beta-Publish-$stageId"
 New-Item -ItemType Directory -Path $download | Out-Null
 try {
-    Invoke-Remote "command -v python3 >/dev/null && command -v openssl >/dev/null && test -d /data/fnsync-updates/beta && umask 077 && mkdir -p '$remoteRoot' && chmod 700 '$remoteRoot' && mkdir '$stage'"
+    Invoke-Remote "command -v python3 >/dev/null && command -v openssl >/dev/null && test -d /data/fnsync-updates/$Channel && umask 077 && mkdir -p '$remoteRoot' && chmod 700 '$remoteRoot' && mkdir '$stage'"
     Send-StagedFile (Join-Path $PSScriptRoot 'publish-beta.py') 'publish-beta.py'
     $publisher = "python3 '$stage/publish-beta.py'"
-    $identity = "--stage $stageId --key-sha256 $keyHash"
+    $identity = "--stage $stageId --key-sha256 $keyHash --channel $Channel"
     $artifact = "$identity --version $version --size $zipSize --sha256 $zipHash"
     if ($ProvisionTrust) {
         Send-StagedFile $public 'public.upload'
@@ -98,7 +100,7 @@ try {
         '--header','Cache-Control: no-cache','--output',$remoteManifest,$manifestUrl)
     if ((Get-Sha256 $remoteManifest) -cne $manifestHash) { throw 'The HTTPS manifest SHA-256 does not match.' }
     Test-SignedManifest $remoteManifest
-    Write-Host "Published and verified over HTTPS: Beta $version"
+    Write-Host "Published and verified over HTTPS: $Channel $version"
 } finally {
     foreach ($file in $name,'manifest.json') {
         $path = Join-Path $download $file

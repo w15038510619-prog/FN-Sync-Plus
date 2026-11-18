@@ -20,6 +20,10 @@ jobs:
   acceptance-https-update:
     name: Run Controlled Loopback HTTPS Update Acceptance
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [beta, stable]
 
     steps:
       - name: Checkout Code
@@ -43,7 +47,9 @@ jobs:
         run: |
           $timeout = if ("${{ inputs.prepare_timeout_sec }}" -ne "") { [int]"${{ inputs.prepare_timeout_sec }}" } else { 300 }
           $work = Join-Path $PWD '.acceptance\online-beta-ci'
-          & powershell.exe -ExecutionPolicy Bypass -File "tools\acceptance\https-update-acceptance.ps1" -DotnetPath "dotnet" -WorkRoot $work -PrepareTimeoutSeconds $timeout -VersionA 0.4.1 -VersionB 0.4.2 -VersionC 0.4.3 -ControlledOnlineBeta
+          $controlled = @{}
+          if ('${{ matrix.channel }}' -eq 'beta') { $controlled.ControlledOnlineBeta = $true }
+          & powershell.exe -ExecutionPolicy Bypass -File "tools\acceptance\https-update-acceptance.ps1" -DotnetPath "dotnet" -WorkRoot $work -PrepareTimeoutSeconds $timeout -VersionA 0.4.1 -VersionB 0.4.2 -VersionC 0.4.3 -Channel '${{ matrix.channel }}' @controlled
           if ($LASTEXITCODE -ne 0) {
             throw "HTTPS 端到端更新验收测试失败，退出码: $LASTEXITCODE"
           }
@@ -57,7 +63,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: https-update-acceptance-evidence
+          name: https-update-acceptance-evidence-${{ matrix.channel }}
           include-hidden-files: true
           path: |
             .acceptance/online-beta-ci/acceptance-result.json

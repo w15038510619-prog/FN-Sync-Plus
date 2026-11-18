@@ -41,14 +41,14 @@ def main():
         root = Path(scratch)
         stage_id = 'b' * 32
         stage = root / '.beta-staging' / stage_id
-        feed = root / 'beta'
+        feed = root / fields['channel']
         stage.mkdir(parents=True)
         feed.mkdir()
         placeholder = b'{"version":"0.0.0"}'
         live = feed / 'manifest.json'
         live.write_bytes(placeholder)
         publisher = Path(__file__).with_name('publish-beta.py')
-        common = ['--root', str(root), '--base-url', base_url, '--stage', stage_id,
+        common = ['--channel', fields['channel'], '--root', str(root), '--base-url', base_url, '--stage', stage_id,
                   '--key-sha256', sha256(args.public_key)]
         artifact = ['--version', fields['version'], '--minimum-client', fields['min_compatible_client'],
                     '--size', str(fields['size']), '--sha256', fields['sha256'].lower()]

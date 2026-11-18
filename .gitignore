@@ -42,3 +42,7 @@ $RECYCLE.BIN/
 .acceptance/
 pilot-acceptance/
 pilot-acceptance.zip
+
+# Generated Python bytecode
+__pycache__/
+*.py[cod]

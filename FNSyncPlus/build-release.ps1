@@ -27,10 +27,10 @@ param(
     [string]$Dotnet = 'dotnet',
     [ValidatePattern('^[a-fA-F0-9]{40}$')][string]$SourceSha,
     [string]$OutputRoot = (Join-Path $PSScriptRoot '..\Release_WinUI'),
-    [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$Version = '0.4.0',
+    [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$Version = '0.4.4',
     [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$MinimumClientVersion = '0.4.0',
     [switch]$ControlledOnlineBeta,
-    [ValidateSet('stable', 'beta')][string]$Channel = 'beta',
+    [ValidateSet('stable', 'beta')][string]$Channel = 'stable',
     [switch]$SkipTests,
     [switch]$SignManifest,
     [string]$SigningKeyPath = '',
@@ -69,7 +69,7 @@ if ($SignManifest) {
     if (!$SigningKeyPath -or !$UpdatePublicKeyPath) { throw 'Signing requires both the private and public key paths.' }
     $SigningKeyPath = (Resolve-Path -LiteralPath $SigningKeyPath).Path
     $repoPrefix = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path.TrimEnd('\') + '\'
-    if ($ControlledOnlineBeta -and ($SigningKeyPath.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+    if (($SigningKeyPath.StartsWith($repoPrefix, [StringComparison]::OrdinalIgnoreCase) -or
         $SigningKeyPath.StartsWith($OutputRoot.TrimEnd('\')+'\', [StringComparison]::OrdinalIgnoreCase))) {
         throw 'Keep the Beta signing private key outside the repository and output directory.'
     }
@@ -104,7 +104,7 @@ try {
     if ($UpdatePublicKeyPath) { $commonPublish += "-p:UpdatePublicKeyPath=$UpdatePublicKeyPath" }
     Invoke-Dotnet -Arguments (@('publish', 'FNSyncPlus.WinUI\FNSyncPlus.WinUI.csproj', '-c', 'Release', '-r', 'win-x64',
         '--self-contained', 'true', '-p:WindowsPackageType=None', "-p:Version=$Version", '-o', $appDir) + $commonPublish)
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'TEST_ONLY.txt') -Destination (Join-Path $appDir 'TEST_ONLY.txt') -Force
+    if ($Channel -eq 'beta') { Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'TEST_ONLY.txt') -Destination (Join-Path $appDir 'TEST_ONLY.txt') -Force }
 
     $required = @('FNSyncPlus.WinUI.exe', 'resources.pri', 'hostfxr.dll', 'Microsoft.WindowsAppRuntime.Bootstrap.dll')
     foreach ($name in $required) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Promote a signed UpdateTool Beta release from private staging into the HTTPS feed."""
+"""Promote a signed UpdateTool Beta or Stable release from private staging into the HTTPS feed."""
 
 import argparse
 import base64
@@ -89,7 +89,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('pin', 'zip', 'manifest'))
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
-    parser.add_argument('--base-url', default=DEFAULT_URL)
+    parser.add_argument('--base-url')
+    parser.add_argument('--channel', choices=('beta', 'stable'), default='beta')
     parser.add_argument('--stage', required=True)
     parser.add_argument('--key-sha256', required=True)
     parser.add_argument('--version')
@@ -98,12 +99,13 @@ def main():
     parser.add_argument('--sha256')
     parser.add_argument('--manifest-sha256')
     args = parser.parse_args()
+    args.base_url = args.base_url or f"https://dev.sk-fj.com:8081/fnsync/{args.channel}"
 
     require(re.fullmatch('[0-9a-f]{32}', args.stage), 'Invalid staging identifier.')
     require(re.fullmatch('[0-9a-f]{64}', args.key_sha256), 'Invalid public key fingerprint.')
     private = args.root / '.beta-staging'
     stage = private / args.stage
-    feed = args.root / 'beta'
+    feed = args.root / args.channel
     trusted = private / 'beta-update-public.pem'
     require(stage.is_dir() and feed.is_dir(), 'Feed and staging directories must exist.')
     require(stage.stat().st_dev == feed.stat().st_dev, 'Staging and feed must be on the same filesystem.')
@@ -147,7 +149,7 @@ def main():
         require(hashlib.sha256(raw).hexdigest() == args.manifest_sha256, 'Manifest transfer SHA-256 mismatch.')
         document = verify_manifest(raw, trusted, stage)
         require(document['schema'] == 1 and document['product'] == 'FN Sync Plus'
-                and document['channel'] == 'beta' and document['arch'] == 'x64'
+                and document['channel'] == args.channel and document['arch'] == 'x64'
                 and document['version'] == args.version, 'Manifest identity or version mismatch.')
         require(document['min_version'] == document['min_compatible_client'] == args.minimum_client
                 and version(args.minimum_client) < release, 'Manifest compatibility mismatch.')
@@ -169,7 +171,7 @@ def main():
                 os.link(live, history)
         upload.chmod(0o644)
         os.replace(upload, live)
-        print(f'Signed Beta manifest activated for {args.version}.')
+        print(f'Signed {args.channel} manifest activated for {args.version}.')
 
 
 if __name__ == '__main__':

@@ -29,7 +29,8 @@ param(
     [string]$Iscc = '',
     [string]$WorkRoot = '',
     [switch]$VerifyUi,
-    [string]$ExistingSetupA = ''
+    [string]$ExistingSetupA = '',
+    [string]$ProfileSource = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -107,6 +108,47 @@ function Invoke-Setup {
     return $process.ExitCode
 }
 
+# Optional real-profile copy: disable execution in the copy, retain task identifiers/targets,
+# and prove BOTH installed binaries actually load it. Never write the original profile.
+$probeRoot = Join-Path $WorkRoot 'profile-runtime'
+$probeConfig = Join-Path $probeRoot 'local\FNSyncPlus\versioned-beta\settings.json'
+$probeCredential = Join-Path (Split-Path -Parent $probeConfig) 'credentials.dat'
+if ($ProfileSource) {
+    $fixture = Get-Content -LiteralPath $ProfileSource -Raw -Encoding utf8 | ConvertFrom-Json -AsHashtable
+    $fixture.RememberCredentials = $false
+    $fixture.StartWithWindows = $false
+    foreach ($task in $fixture.Tasks) {
+        $task.enabled = $false
+        $task.auto_sync_enabled = $false
+        $task.realtime_watch_enabled = $false
+        $task.is_user_paused = $true
+    }
+    $expectedTasks = @($fixture.Tasks).Count
+    New-Item -ItemType Directory -Path (Split-Path -Parent $probeConfig) -Force | Out-Null
+    $fixture | ConvertTo-Json -Depth 40 | Set-Content -LiteralPath $probeConfig -Encoding utf8
+    Add-Type -AssemblyName System.Security.Cryptography.ProtectedData
+    $protected = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes('acceptance-only credential fixture'),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)
+    [IO.File]::WriteAllBytes($probeCredential,$protected)
+    $configBefore = (Get-FileHash -LiteralPath $probeConfig).Hash
+    $credentialBefore = (Get-FileHash -LiteralPath $probeCredential).Hash
+}
+function Test-InstalledProfile([string]$Version) {
+    if (!$ProfileSource) { return }
+    $originalRoot = $env:FNSYNC_DATA_ROOT
+    try {
+        $env:FNSYNC_DATA_ROOT = $probeRoot
+        $app = Join-Path $target "app-$Version\FNSyncPlus.WinUI.exe"
+        $process = Start-Process -FilePath $app -ArgumentList '--update-health-check' -WindowStyle Hidden -PassThru
+        if (!$process.WaitForExit(45000)) { throw 'Isolated installed profile probe did not exit.' }
+        $healthPath = Join-Path $target ".health\report-$Version.json"
+        $health = Get-Content -LiteralPath $healthPath -Raw -Encoding utf8 | ConvertFrom-Json
+        Record-Result -Name "$Version 安装的真实程序加载沿用配置" -Passed ($health.usable -and $health.task_count -eq $expectedTasks) -Detail "tasks=$($health.task_count) expected=$expectedTasks usable=$($health.usable)"
+        Record-Result -Name "$Version 配置及目标路径逐字节保留" -Passed ((Get-FileHash -LiteralPath $probeConfig).Hash -ceq $configBefore) -Detail 'SHA-256 before/after identical'
+        $clear = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($probeCredential),$null,[Security.Cryptography.DataProtectionScope]::CurrentUser)
+        Record-Result -Name "$Version DPAPI 测试数据文件保留且可解密" -Passed (((Get-FileHash -LiteralPath $probeCredential).Hash -ceq $credentialBefore) -and [Text.Encoding]::UTF8.GetString($clear) -ceq 'acceptance-only credential fixture') -Detail 'Synthetic DPAPI fixture; no production credential copied'
+    } finally { $env:FNSYNC_DATA_ROOT = $originalRoot }
+}
+
 try {
     if (-not (Test-Path -LiteralPath $Iscc)) { throw "找不到 ISCC.exe：$Iscc" }
     if (-not (Test-Path -LiteralPath (Join-Path $PayloadA 'current.json'))) { throw "载荷 A 无效：$PayloadA" }
@@ -137,6 +179,8 @@ try {
         -Passed ((Test-Path (Join-Path $target "app-$VersionA\FNSyncPlus.WinUI.exe")) -and $statusA.Code -eq 0) `
         -Detail ("app-{0} 存在，status={1}" -f $VersionA, $statusA.Code)
 
+    Test-InstalledProfile $VersionA
+
     $compileB = Invoke-Compile -Version $VersionB -Payload $PayloadB -OutDir (Join-Path $WorkRoot 'setup-b')
     Record-Result -Name "Inno Setup 编译 $VersionB 安装包" -Passed ($compileB.Code -eq 0 -and (Test-Path $compileB.Setup)) `
         -Detail ("exit={0}" -f $compileB.Code)
@@ -146,6 +190,8 @@ try {
     Record-Result -Name "覆盖安装升级到 $VersionB" `
         -Passed ($exitB -eq 0 -and $statusB.Code -eq 0 -and $statusB.Version -eq $VersionB) `
         -Detail ("setupExit={0} status={1} version={2}" -f $exitB, $statusB.Code, $statusB.Version)
+
+    Test-InstalledProfile $VersionB
 
     $keptOld = Test-Path (Join-Path $target "app-$VersionA\FNSyncPlus.WinUI.exe")
     Record-Result -Name '升级保留旧版本目录（可回滚）' -Passed $keptOld `

@@ -524,9 +524,20 @@ public sealed class UpdateService
         try
         {
             if (File.Exists(path))
-                return (JsonSerializer.Deserialize<UpdateSettings>(File.ReadAllText(path)) ?? new UpdateSettings()).ApplyReleasePolicy();
+            {
+                var settings = (JsonSerializer.Deserialize<UpdateSettings>(File.ReadAllText(path)) ?? new UpdateSettings()).ApplyReleasePolicy();
+                if (string.IsNullOrWhiteSpace(settings.ManifestUrl)) settings.ManifestUrl = UpdateSettings.DefaultStableManifestUrl;
+                if (CurrentVersion >= new Version(0, 4, 4) && !UpdateSettings.IsControlledOnlineBeta &&
+                    settings.ManifestUrl == "https://dev.sk-fj.com:8081/fnsync/beta/manifest.json")
+                {
+                    settings.ManifestUrl = UpdateSettings.DefaultStableManifestUrl;
+                    settings.Channel = "stable";
+                    settings.LastResult = "已切换到正式更新通道，高级选项中可以修改。";
+                }
+                return settings;
+            }
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException) { }
-        return new UpdateSettings();
+        return new UpdateSettings { ManifestUrl = UpdateSettings.DefaultStableManifestUrl };
     }
 }

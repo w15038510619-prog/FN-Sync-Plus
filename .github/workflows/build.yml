@@ -98,6 +98,9 @@ jobs:
         .\tools\acceptance\Test-TwoComputerPackage.ps1 -PackageDirectory $publish -OutputDirectory (Join-Path $env:RUNNER_TEMP 'fn-two-computer-package-tests')
         if ($LASTEXITCODE -ne 0) { throw 'Two-computer package offline validation failed.' }
 
+    - name: Run 0.4.4 Snapshot and Team Protocol Regressions
+      run: dotnet run --project tools/acceptance/Release044/Release044.csproj -c Release
+
     - name: Run Automated Tests
       run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release --no-build
 

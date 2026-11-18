@@ -33,6 +33,7 @@ public sealed class UpdateSettings
 
     [JsonPropertyName("channel")] public string Channel { get; set; } = IsControlledOnlineBeta ? "beta" : "stable";
     [JsonPropertyName("auto_mode")] public int AutoMode { get; set; } = (int)AutoUpdateMode.CheckOnly;
+    public const string DefaultStableManifestUrl = "https://dev.sk-fj.com:8081/fnsync/stable/manifest.json";
     [JsonPropertyName("manifest_url")] public string ManifestUrl { get; set; } = "";
     [JsonPropertyName("last_check")] public DateTimeOffset? LastCheckUtc { get; set; }
     [JsonPropertyName("last_result")] public string LastResult { get; set; } = "";
