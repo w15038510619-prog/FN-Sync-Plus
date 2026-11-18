@@ -17,7 +17,7 @@
 | 字段 | 作用 |
 |---|---|
 | `channel` | `stable` / `beta`。Stable 客户端永不接收 beta 清单；Beta 可接收两者 |
-| `version` / `min_version` | 必须严格大于当前版本，否则按降级拒绝 |
+| `version` / `min_version` | 安装版本必须严格大于当前版本。同版本检查在签名及策略验证通过后显示“当前已是最新版本” |
 | `min_compatible_client` | 客户端过旧时要求手工安装，不做跨代自动升级 |
 | `batch` / `audience` | 分批灰度：客户端 `ReleaseBatch` 小于清单 `batch` 时不升级；`audience` 不匹配也不升级 |
 | `url` | 必须 HTTPS |
@@ -26,7 +26,7 @@
 ## 3. 安装时序（关键安全点）
 
 1. 用户在「设置 → 软件更新」点击「安装并重启」。
-2. `UpdateService.PrepareInstallAsync`：
+2. `UpdateService.BeginInstallAsync`：
    - 进入维护状态（`TaskManager.EnterMaintenanceHold`），**不再启动新的备份任务**；
    - 等待正在运行的备份自然结束，最多等待预算时间；
    - 复查是否存在结果不明确的提交或未释放的锁；有则**拒绝**安装；

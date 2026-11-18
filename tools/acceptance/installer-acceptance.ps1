@@ -27,7 +27,8 @@ param(
     [string]$VersionA = '0.5.0',
     [string]$VersionB = '0.6.0',
     [string]$Iscc = '',
-    [string]$WorkRoot = ''
+    [string]$WorkRoot = '',
+    [switch]$VerifyUi
 )
 
 $ErrorActionPreference = 'Stop'
@@ -48,8 +49,12 @@ if ([string]::IsNullOrWhiteSpace($Iscc)) {
 }
 $iss = Join-Path $repo 'FNSyncPlus\installer\FNSyncPlus.iss'
 $target = Join-Path $WorkRoot 'app'
-$userConfig = Join-Path $env:LOCALAPPDATA 'FNSyncPlus'
-$appId = '{4E1C9F62-5F3B-4B7E-9E1C-2B7B0C6D51A1}'
+$userConfig = Join-Path $WorkRoot 'retained-profile'
+New-Item -ItemType Directory -Path $userConfig | Out-Null
+$profileFile = Join-Path $userConfig 'settings.json'
+'{"task_name":"保留测试任务","auto_sync":false}' | Set-Content -LiteralPath $profileFile -Encoding utf8
+$profileHash = (Get-FileHash -LiteralPath $profileFile -Algorithm SHA256).Hash
+$appId = 'FNSyncPlus.InstallerAcceptance_is1'
 
 $script:results = New-Object System.Collections.ArrayList
 function Record-Result {
@@ -88,7 +93,7 @@ function Get-Status {
 function Invoke-Compile {
     param([string]$Version, [string]$Payload, [string]$OutDir)
     New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
-    $run = Run-Exe -Path $Iscc -Arguments @("/DAppVersion=$Version", "/DPayloadDir=$Payload", "/O$OutDir", $iss)
+    $run = Run-Exe -Path $Iscc -Arguments @('/DAcceptanceInstaller=1', "/DAppVersion=$Version", "/DPayloadDir=$Payload", "/O$OutDir", $iss)
     $setup = Join-Path $OutDir "FN_Sync_Plus_${Version}_x64_setup.exe"
     return [pscustomobject]@{ Code = $run.Code; Setup = $setup; Output = $run.Output }
 }
@@ -96,8 +101,8 @@ function Invoke-Compile {
 function Invoke-Setup {
     param([string]$Setup, [string]$LogName)
     $log = Join-Path $WorkRoot $LogName
-    $process = Start-Process -FilePath $Setup -PassThru -Wait -ArgumentList @(
-        '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=$target", '/TASKS=', "/LOG=$log")
+    $process = Start-Process -FilePath $Setup -WindowStyle Hidden -PassThru -Wait -ArgumentList @(
+        '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR="{0}"' -f $target), '/TASKS=desktopicon', ('/LOG="{0}"' -f $log))
     return $process.ExitCode
 }
 
@@ -123,8 +128,7 @@ try {
         -Passed ($exitA -eq 0 -and $statusA.Code -eq 0 -and $statusA.Version -eq $VersionA) `
         -Detail ("setupExit={0} status={1} version={2}" -f $exitA, $statusA.Code, $statusA.Version)
 
-    $reportA = Read-JsonFile -Path (Join-Path $target ".health\report-$VersionA.json")
-    Record-Result -Name '安装目录内的启动器可正常启动（指针已指向本机目录）' `
+    Record-Result -Name '安装目录载荷存在且指针可解析' `
         -Passed ((Test-Path (Join-Path $target "app-$VersionA\FNSyncPlus.WinUI.exe")) -and $statusA.Code -eq 0) `
         -Detail ("app-{0} 存在，status={1}" -f $VersionA, $statusA.Code)
 
@@ -147,6 +151,25 @@ try {
         -Passed ($null -ne $previous -and $previous.version -eq $VersionA) `
         -Detail ("previous={0}" -f ($(if ($null -eq $previous) { 'null' } else { $previous.version })))
 
+    $shell = New-Object -ComObject WScript.Shell
+    $shellFiles = New-Object -ComObject Shell.Application
+    foreach ($shortcut in @(
+        (Join-Path ([Environment]::GetFolderPath('Desktop')) 'FN Sync Plus Installation Acceptance.lnk'),
+        (Join-Path ([Environment]::GetFolderPath('Programs')) 'FN Sync Plus Installation Acceptance\FN Sync Plus Installation Acceptance.lnk'))) {
+        $link = $shell.CreateShortcut($shortcut)
+        $item = $shellFiles.NameSpace((Split-Path $shortcut)).ParseName((Split-Path $shortcut -Leaf))
+        $identity = $item.ExtendedProperty('System.AppUserModel.ID')
+        Record-Result -Name ('安装快捷方式 ' + (Split-Path $shortcut -Leaf)) `
+            -Passed ((Test-Path $shortcut) -and $link.TargetPath -eq (Join-Path $target 'FN_Sync_Plus.exe') -and
+                $link.IconLocation.StartsWith((Join-Path $target 'FN_Sync_Plus.exe')) -and $identity -eq 'FNSyncPlus.Desktop.Acceptance') `
+            -Detail ("target={0} icon={1} identity={2}" -f $link.TargetPath, $link.IconLocation, $identity)
+    }
+    if ($VerifyUi) {
+        & (Join-Path $PSScriptRoot 'ui-visual-acceptance.ps1') -Payload (Join-Path $target "app-$VersionB") -OutRoot (Join-Path $WorkRoot 'installed-ui')
+        $uiReport = Read-JsonFile (Join-Path $WorkRoot 'installed-ui\ui-acceptance-result.json')
+        Record-Result -Name '安装升级后的真实 WinUI 页面验收' -Passed ($null -ne $uiReport -and $uiReport.failed -eq 0) -Detail 'installed-ui/ui-acceptance-result.json'
+    }
+
     $launcher = Join-Path $target 'FN_Sync_Plus.exe'
     $rollback = Run-Exe -Path $launcher -Arguments @('--layout', $target, '--rollback', '--no-launch')
     $afterRollback = Get-Status -Root $target
@@ -157,16 +180,16 @@ try {
     $uninstaller = Join-Path $target 'unins000.exe'
     $uninstallExit = -1
     if (Test-Path -LiteralPath $uninstaller) {
-        $p = Start-Process -FilePath $uninstaller -PassThru -Wait -ArgumentList @(
-            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$(Join-Path $WorkRoot 'uninstall.log')")
+        $p = Start-Process -FilePath $uninstaller -WindowStyle Hidden -PassThru -Wait -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/LOG="{0}"' -f (Join-Path $WorkRoot 'uninstall.log')))
         $uninstallExit = $p.ExitCode
     }
     $launcherGone = -not (Test-Path -LiteralPath $launcher)
     Record-Result -Name '卸载移除程序目录中的启动器' -Passed ($uninstallExit -eq 0 -and $launcherGone) `
         -Detail ("exit={0} launcherGone={1}" -f $uninstallExit, $launcherGone)
 
-    Record-Result -Name '卸载保留用户配置目录' -Passed (Test-Path -LiteralPath $userConfig) `
-        -Detail ("{0} 存在={1}" -f $userConfig, (Test-Path -LiteralPath $userConfig))
+    Record-Result -Name '卸载保留隔离配置原始字节' -Passed ((Test-Path -LiteralPath $profileFile) -and (Get-FileHash -LiteralPath $profileFile -Algorithm SHA256).Hash -eq $profileHash) `
+        -Detail ("SHA-256={0}" -f $profileHash)
 
     Record-Result -Name '卸载清除注册表卸载项' `
         -Passed (-not (Test-Path (Join-Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall" $appId))) `
@@ -179,7 +202,7 @@ try {
         -Detail ("setupExit={0} status={1} version={2}" -f $reinstallExit, $statusC.Code, $statusC.Version)
 
     if (Test-Path -LiteralPath (Join-Path $target 'unins000.exe')) {
-        $p = Start-Process -FilePath (Join-Path $target 'unins000.exe') -PassThru -Wait -ArgumentList @(
+        $p = Start-Process -FilePath (Join-Path $target 'unins000.exe') -WindowStyle Hidden -PassThru -Wait -ArgumentList @(
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
         Record-Result -Name '收尾：再次卸载' -Passed ($p.ExitCode -eq 0) -Detail ("exit={0}" -f $p.ExitCode)
     }

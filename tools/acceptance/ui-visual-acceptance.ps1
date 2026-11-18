@@ -47,7 +47,7 @@ $env:FNSYNC_STORAGE_AUDIT = Join-Path $OutRoot 'storage-audit.log'
 $testSessionsRoot = Join-Path $testDataRoot 'temp\FNSyncPlus_CodexTests'
 
 $dotnet = $null
-foreach ($candidate in @('D:\FNSyncPlus_Toolchain\dotnet\dotnet.exe', 'C:\Program Files\dotnet\dotnet.exe')) {
+foreach ($candidate in @('D:\dotnet\dotnet.exe', 'D:\FNSyncPlus_Toolchain\dotnet\dotnet.exe', 'C:\Program Files\dotnet\dotnet.exe')) {
     if (Test-Path -LiteralPath $candidate) { $dotnet = $candidate; break }
 }
 if (-not $dotnet) {
@@ -367,7 +367,10 @@ try {
 
         # C. 恢复中心：可恢复备份列表（隔离会话下为空列表状态）。
         Capture-Scenario -ScenarioKey $key -Page 'Restore' -View 'Restore' -Theme $theme `
-            -TaskNames @() -AlsoMinWindow $false
+            -TaskNames @() -AlsoMinWindow $true
+
+        Capture-Scenario -ScenarioKey ($key + '-history') -Page 'Restore' -View 'Restore' -Theme $theme `
+            -TaskNames @() -AlsoMinWindow $true -ExtraArgs @('--restore-history-fixture')
 
         # D. 设备页：连接状态界面。
         Capture-Scenario -ScenarioKey $key -Page 'Device' -View 'Device' -Theme $theme `

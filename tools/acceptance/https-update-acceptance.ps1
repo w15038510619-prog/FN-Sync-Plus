@@ -108,7 +108,7 @@ function Read-JsonFile {
 function Get-FileText {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
-    return (Get-Content -LiteralPath $Path -Raw)
+    return (Get-Content -LiteralPath $Path -Raw -Encoding UTF8)
 }
 
 # ---------------------------------------------------------------- process ownership

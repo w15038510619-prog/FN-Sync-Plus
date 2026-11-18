@@ -61,6 +61,9 @@ jobs:
     - name: Run P0 Remediation Suite
       run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release --no-build -- --p0-tests
 
+    - name: Run Update Cache and Transport Regressions
+      run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release --no-build -- --update-tests
+
     # 第四/五轮专项：存储隔离与文件系统完全限定路径/重解析点防护（审计零生产访问）。
     - name: Run Storage Isolation Acceptance
       run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release --no-build -- --storage-isolation-tests
