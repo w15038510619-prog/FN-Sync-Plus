@@ -58,6 +58,7 @@ namespace FNSyncPlus.Core.Services
     public class DiscoveredBackupPackage
     {
         public string PackageName { get; set; } = string.Empty;
+        public string Summary => $"{FileCount} 个文件 · {LastUpdated.ToLocalTime():yyyy-MM-dd HH:mm} · {(HasDamagedVersionRecords ? "部分记录需检查" : "可恢复")}";
         public string NasFolderUnc { get; set; } = string.Empty;
         public string OriginalSourceRoot { get; set; } = string.Empty;
         public int FileCount { get; set; }
@@ -135,9 +136,21 @@ namespace FNSyncPlus.Core.Services
             return manifest.IsNew ? null : PackageFromManifest(name, path, manifest);
         }
 
+        private static (INasStorageProvider, DiscoveredBackupPackage) BindSmbPackage(INasStorageProvider provider, DiscoveredBackupPackage package)
+        {
+            if (provider is not SmbStorageProvider || !Path.IsPathFullyQualified(package.NasFolderUnc)) return (provider, package);
+            string root = Path.GetFullPath(provider.RootDisplayPath).TrimEnd('\\');
+            string folder = Path.GetFullPath(package.NasFolderUnc).TrimEnd('\\');
+            if (!folder.Equals(root, StringComparison.OrdinalIgnoreCase) && !folder.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase))
+                throw new IOException("备份不属于当前共享位置。");
+            return (new SmbStorageProvider(rootUncPath: folder), new DiscoveredBackupPackage {
+                PackageName = package.PackageName, NasFolderUnc = "", VersionId = package.VersionId });
+        }
+
         public async Task<Manifest> ReadPackageManifestAsync(INasStorageProvider provider,
             DiscoveredBackupPackage package, CancellationToken cancellationToken = default)
         {
+            (provider, package) = BindSmbPackage(provider, package);
             ArgumentNullException.ThrowIfNull(provider);
             ArgumentNullException.ThrowIfNull(package);
             if (package.VersionId == null)
@@ -670,6 +683,7 @@ namespace FNSyncPlus.Core.Services
             ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
             CancellationToken cancellationToken = default)
         {
+            (provider, package) = BindSmbPackage(provider, package);
             var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
             if (manifest.IsNew) throw new InvalidDataException("备份清单已不存在，请重新扫描");
             return await RunRestoreManifestAsync(provider, package.NasFolderUnc, destination,
@@ -681,6 +695,7 @@ namespace FNSyncPlus.Core.Services
             ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
             CancellationToken cancellationToken = default)
         {
+            (provider, package) = BindSmbPackage(provider, package);
             var requested = new HashSet<string>(originalPaths, StringComparer.OrdinalIgnoreCase);
             var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
             if (manifest.IsNew) throw new InvalidDataException("备份清单已不存在，请重新扫描");
@@ -697,6 +712,7 @@ namespace FNSyncPlus.Core.Services
             ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
             CancellationToken cancellationToken = default)
         {
+            (provider, package) = BindSmbPackage(provider, package);
             ArgumentNullException.ThrowIfNull(requested);
             var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
             if (manifest.IsNew || manifest.History == null) throw new InvalidDataException("历史清单不可用，请重新扫描");

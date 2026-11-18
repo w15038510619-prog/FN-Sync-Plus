@@ -225,20 +225,6 @@ namespace FNSyncPlus.Core.Services
                 // 处理已有会话凭据冲突 (Error 1219)
                 if (result == ERROR_SESSION_CREDENTIAL_CONFLICT)
                 {
-                    // 先检查当前已有的 Windows 会话是否能够直接访问
-                    try
-                    {
-                        if (!string.IsNullOrEmpty(shareName))
-                        {
-                            string checkPath = $@"\\{serverAddress}\{shareName}";
-                            if (Directory.Exists(checkPath))
-                            {
-                                return (true, "已复用当前 Windows 会话连接成功");
-                            }
-                        }
-                    }
-                    catch { }
-
                     // 仅断开临时的 IPC$ 连接尝试重试一次，绝不断开用户的其他现有盘符或正常会话
                     WNetCancelConnection2($@"\\{serverAddress}\IPC$", 0, bForce: false);
                     result = WNetAddConnection2(ref nr, password, username, 0);
@@ -420,6 +406,14 @@ namespace FNSyncPlus.Core.Services
             });
         }
 
+        // fnOS advertises team roots in this distinct SMB namespace. Other exports can be
+        // personal-folder mappings or ordinary shares; accessibility alone is not a category.
+        public static bool IsFnOsTeamShare(string name) =>
+            name.StartsWith("团队文件-", StringComparison.Ordinal) && name.Length > "团队文件-".Length;
+
+        public static string FnOsTeamShareDisplayName(string name) =>
+            IsFnOsTeamShare(name) ? name["团队文件-".Length..] : name;
+
         public static NasShareCategory CategorizeShare(string shareName, string? username)
         {
             if (!string.IsNullOrEmpty(username))
@@ -445,7 +439,7 @@ namespace FNSyncPlus.Core.Services
                 return NasShareCategory.TeamShare;
             }
 
-            return NasShareCategory.TeamShare;
+            return NasShareCategory.SystemOrOther;
         }
 
         /// <summary>

@@ -63,6 +63,16 @@ namespace FNSyncPlus.Core.Services
         /// 统一 NAS 存储提供程序委托（由 NasConnectionService 或工厂提供）
         /// </summary>
         public Func<INasStorageProvider?>? StorageProviderSupplier { get; set; }
+        public Func<SyncTask, CancellationToken, Task<INasStorageProvider?>>? TaskStorageProviderSupplier { get; set; }
+        private static bool SupportsVersionedProvider(SyncTask task) => task.ProviderType == StorageProviderType.FnOsPersonal ||
+            task.ProviderType == StorageProviderType.SmbShare && task.DestinationFolder.StartsWith(@"\\", StringComparison.Ordinal);
+        public static string BackupTarget(SyncTask task)
+        {
+            if (task.ProviderType != StorageProviderType.SmbShare) return task.DestinationFolder;
+            var (_, _, root, isRoot) = PathHelper.ParseUncShare(task.DestinationFolder);
+            if (isRoot || root.Length >= task.DestinationFolder.Length) throw new InvalidOperationException("请选择团队共享内的独立备份子目录。");
+            return task.DestinationFolder[root.Length..].TrimStart('\\', '/').Replace('\\', '/');
+        }
 
         private bool _useExperimentalVersionedBackup;
         public bool UseExperimentalVersionedBackup
@@ -107,18 +117,18 @@ namespace FNSyncPlus.Core.Services
                 if (task.ExperimentalInitializationId != null &&
                     (!Guid.TryParseExact(task.ExperimentalInitializationId, "N", out var initializationId) || initializationId == Guid.Empty))
                     throw new InvalidOperationException("首次备份归属标识无效，已停止任务。");
-                if (settings.IsVersionedBetaProfile && (task.ProviderType != StorageProviderType.FnOsPersonal ||
+                if (settings.IsVersionedBetaProfile && (!SupportsVersionedProvider(task) ||
                     !string.Equals(task.BackupStorageFormat, IsolatedVersionedFormat, StringComparison.Ordinal)))
                     throw new InvalidOperationException("新版配置包含未明确迁移的旧任务，已阻止自动启动。");
                 if (task.BackupStorageFormat != null &&
-                    (!experimentalVersionedBackup || task.ProviderType != StorageProviderType.FnOsPersonal ||
+                    (!experimentalVersionedBackup || !SupportsVersionedProvider(task) ||
                      !string.Equals(task.BackupStorageFormat, IsolatedVersionedFormat, StringComparison.Ordinal)))
                     throw new InvalidOperationException("任务包含不支持的备份格式，已阻止旧同步引擎运行；请保留配置并使用对应版本处理。");
             }
             _useExperimentalVersionedBackup = experimentalVersionedBackup;
             if (experimentalVersionedBackup)
             {
-                foreach (var task in settings.Tasks.Where(t => t.ProviderType == StorageProviderType.FnOsPersonal))
+                foreach (var task in settings.Tasks.Where(SupportsVersionedProvider))
                 {
                     task.IsExperimentalBackup = true;
                     task.BackupStorageFormat = IsolatedVersionedFormat;
@@ -167,6 +177,14 @@ namespace FNSyncPlus.Core.Services
             if (!_settings.IsVersionedBetaProfile) return;
             var legacy = _settings.ReadVersionedLegacySettings();
             if (legacy == null) return;
+            if (task.ProviderType == StorageProviderType.SmbShare)
+            {
+                BackupTarget(task);
+                foreach (var old in legacy.Tasks.Where(t => t.ProviderType == StorageProviderType.SmbShare))
+                    if (PathHelper.ArePathsSameOrNested(task.DestinationFolder, old.DestinationFolder, out _))
+                        throw new InvalidOperationException("团队备份目标与旧任务重叠，请选择独立目录。");
+                return;
+            }
             if (!string.IsNullOrWhiteSpace(legacy.LegacySourceFolder) || !string.IsNullOrWhiteSpace(legacy.LegacyTargetShare))
                 throw new InvalidOperationException("旧程序存在尚未确认的单任务配置，不能判断目标是否重叠。");
             if (!PathHelper.IsSafeRelativePath(task.DestinationFolder)) throw new InvalidOperationException("新版备份目标路径无效");
@@ -196,12 +214,12 @@ namespace FNSyncPlus.Core.Services
         {
             if (task == null) throw new ArgumentNullException(nameof(task));
             _settings.EnsureIsolatedTestTask(task);
-            if (_settings.IsVersionedBetaProfile && (!UseExperimentalVersionedBackup || task.ProviderType != StorageProviderType.FnOsPersonal))
+            if (_settings.IsVersionedBetaProfile && (!UseExperimentalVersionedBackup || !SupportsVersionedProvider(task)))
                 throw new InvalidOperationException("新版试验配置仅接受飞牛版本化备份任务。");
             EnsureSeparateFromLegacyTasks(task);
             if (task.BackupStorageFormat != null || task.ExperimentalInitializationId != null)
                 throw new InvalidOperationException("不能把已有备份格式的任务作为新任务添加");
-            task.IsExperimentalBackup = UseExperimentalVersionedBackup && task.ProviderType == StorageProviderType.FnOsPersonal;
+            task.IsExperimentalBackup = UseExperimentalVersionedBackup && SupportsVersionedProvider(task);
             task.RequiresNewExperimentalBackup = task.IsExperimentalBackup;
             task.ExperimentalPendingInitialization = task.IsExperimentalBackup;
             if (!string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot) && !task.IsExperimentalBackup)
@@ -587,7 +605,7 @@ namespace FNSyncPlus.Core.Services
                 _owner = owner; _task = task; _gate = gate; _destination = task.DestinationFolder;
             }
 
-            private INasStorageProvider CheckedProvider()
+            private async Task<INasStorageProvider> CheckedProviderAsync()
             {
                 lock (_owner._taskLifecycleLock)
                 {
@@ -598,8 +616,8 @@ namespace FNSyncPlus.Core.Services
                     _owner._settings.EnsureIsolatedTestTask(_task);
                     _owner.EnsureSeparateFromLegacyTasks(_task);
                 }
-                var provider = _owner.StorageProviderSupplier?.Invoke();
-                if (provider == null || !provider.IsAuthenticated || provider.ProviderType != StorageProviderType.FnOsPersonal)
+                var provider = _owner.TaskStorageProviderSupplier != null ? await _owner.TaskStorageProviderSupplier(_task, _owner._managerCts.Token).ConfigureAwait(false) : _owner.StorageProviderSupplier?.Invoke();
+                if (provider == null || !provider.IsAuthenticated || provider.ProviderType != _task.ProviderType)
                     throw new InvalidOperationException("飞牛未连接，不能检查中断状态");
                 if (provider is FnOsPersonalStorageProvider fn &&
                     ((!string.IsNullOrWhiteSpace(_task.NasUsername) && !string.Equals(_task.NasUsername, fn.CurrentUsername, StringComparison.Ordinal)) ||
@@ -620,26 +638,26 @@ namespace FNSyncPlus.Core.Services
                 try
                 {
                     if (Volatile.Read(ref _closing) != 0) throw new ObjectDisposedException(nameof(IsolatedRecoverySession));
-                    return await operation(CheckedProvider(), _owner._managerCts.Token).ConfigureAwait(false);
+                    return await operation(await CheckedProviderAsync().ConfigureAwait(false), _owner._managerCts.Token).ConfigureAwait(false);
                 }
                 finally { _operation.Release(); }
             }
 
             public Task<ExperimentalProjectionRecoveryInspector.Inspection?> InspectAsync() =>
-                RunAsync((provider, token) => new ExperimentalProjectionRecoveryLocator().LocateAsync(provider, _destination, token));
+                RunAsync((provider, token) => new ExperimentalProjectionRecoveryLocator().LocateAsync(provider, BackupTarget(_task), token));
 
             public Task<ExperimentalStableLockRecovery.Inspection?> InspectStableLockAsync() =>
-                RunAsync((provider, token) => new ExperimentalStableLockRecovery().InspectAsync(provider, _destination, token));
+                RunAsync((provider, token) => new ExperimentalStableLockRecovery().InspectAsync(provider, BackupTarget(_task), token));
 
             public Task<ExperimentalInitializationLockRecovery.Inspection?> InspectInitializationLockAsync() =>
                 RunAsync((provider, token) => new ExperimentalInitializationLockRecovery().InspectAsync(provider, _task, token));
 
             public Task<ExperimentalProjectionRecovery.Recovered> RecoverAsync(
                 ExperimentalProjectionRecoveryInspector.Inspection expected, string acknowledgement) =>
-                RunAsync((provider, token) => new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(provider, _destination, expected, acknowledgement, token));
+                RunAsync((provider, token) => new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(provider, BackupTarget(_task), expected, acknowledgement, token));
 
             public Task ReleaseStableLockAsync(ExperimentalStableLockRecovery.Inspection expected, string acknowledgement) =>
-                RunAsync(async (provider, token) => { await new ExperimentalStableLockRecovery().ReleaseAfterOwnerStoppedAsync(provider, _destination, expected, acknowledgement, token).ConfigureAwait(false); return true; });
+                RunAsync(async (provider, token) => { await new ExperimentalStableLockRecovery().ReleaseAfterOwnerStoppedAsync(provider, BackupTarget(_task), expected, acknowledgement, token).ConfigureAwait(false); return true; });
 
             public Task ReleaseInitializationLockAsync(ExperimentalInitializationLockRecovery.Inspection expected, string acknowledgement) =>
                 RunAsync(async (provider, token) => { await new ExperimentalInitializationLockRecovery().ReleaseAfterOwnerStoppedAsync(provider, _task, expected, acknowledgement, token).ConfigureAwait(false); return true; });
@@ -794,7 +812,7 @@ namespace FNSyncPlus.Core.Services
         {
             taskToken.ThrowIfCancellationRequested();
             if ((_settings.IsVersionedBetaProfile && !task.IsExperimentalBackup) || (task.IsExperimentalBackup
-                ? !UseExperimentalVersionedBackup || task.ProviderType != StorageProviderType.FnOsPersonal ||
+                ? !UseExperimentalVersionedBackup || !SupportsVersionedProvider(task) ||
                   !string.Equals(task.BackupStorageFormat, IsolatedVersionedFormat, StringComparison.Ordinal)
                 : task.BackupStorageFormat != null))
             {
@@ -850,7 +868,9 @@ namespace FNSyncPlus.Core.Services
             }
 
             // The active fnOS connection must never redirect a local/SMB task into personal storage.
-            var provider = task.ProviderType == StorageProviderType.FnOsPersonal ? StorageProviderSupplier?.Invoke() : null;
+            var provider = TaskStorageProviderSupplier != null ? await TaskStorageProviderSupplier(task, taskToken).ConfigureAwait(false) :
+                task.ProviderType == StorageProviderType.FnOsPersonal ? StorageProviderSupplier?.Invoke() : null;
+            string target = task.IsExperimentalBackup ? BackupTarget(task) : task.DestinationFolder;
             if (task.ProviderType == StorageProviderType.FnOsPersonal &&
                 (!_isNasOnline || provider == null || provider.ProviderType != StorageProviderType.FnOsPersonal || !provider.IsAuthenticated))
             {
@@ -930,12 +950,12 @@ namespace FNSyncPlus.Core.Services
                     if (!task.RequiresNewExperimentalBackup &&
                         (!_isolatedProjections.ContainsKey(task.TaskId) || task.Strategy == BackupStrategy.Mirror))
                     {
-                        task.CurrentFile = "正在核验隔离备份的已有物理目录及发布记录";
+                        task.CurrentFile = "正在检查已有备份";
                         TaskStateChanged?.Invoke(task);
                         var discovery = new ExperimentalProjectionDiscovery();
                         var found = task.ExperimentalFirstPublicationPending
-                            ? await discovery.DiscoverFirstPublicationAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false)
-                            : await discovery.DiscoverAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false);
+                            ? await discovery.DiscoverFirstPublicationAsync(provider, target, taskToken).ConfigureAwait(false)
+                            : await discovery.DiscoverAsync(provider, target, taskToken).ConfigureAwait(false);
                         if (found != null) _isolatedProjections[task.TaskId] = new IsolatedProjectionState(found.Plan, found.Publication);
                     }
                     AppendTaskLog(task, "INFO", "隔离试验：正在准备版本化内容及物理候选目录。");
@@ -949,9 +969,9 @@ namespace FNSyncPlus.Core.Services
                     bool initializing = task.RequiresNewExperimentalBackup;
                     var result = initializing
                         ? string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot)
-                            ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId, task.MirrorDeletionEnabled).ConfigureAwait(false)
-                            : await experimental.CreateNewFromExistingAsync(provider, task.SourceFolder, task.DestinationFolder, task.ExperimentalExistingRoot, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId, task.MirrorDeletionEnabled).ConfigureAwait(false)
-                        : await experimental.RunAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay, task.MirrorDeletionEnabled,
+                            ? await experimental.CreateNewAsync(provider, task.SourceFolder, target, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId, task.MirrorDeletionEnabled).ConfigureAwait(false)
+                            : await experimental.CreateNewFromExistingAsync(provider, task.SourceFolder, target, task.ExperimentalExistingRoot, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId, task.MirrorDeletionEnabled).ConfigureAwait(false)
+                        : await experimental.RunAsync(provider, task.SourceFolder, target, taskToken, task.Strategy, settlingDelay, task.MirrorDeletionEnabled,
                             TakeConfirmedRenames(task.TaskId)).ConfigureAwait(false);
                     task.RequiresNewExperimentalBackup = false;
                     if (initializing)
@@ -964,37 +984,37 @@ namespace FNSyncPlus.Core.Services
                     if (result.ResumedInitialization && !_isolatedProjections.ContainsKey(task.TaskId))
                     {
                         var existingPublication = await new ExperimentalProjectionDiscovery()
-                            .DiscoverFirstPublicationAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false);
+                            .DiscoverFirstPublicationAsync(provider, target, taskToken).ConfigureAwait(false);
                         if (existingPublication != null)
                             _isolatedProjections[task.TaskId] = new IsolatedProjectionState(existingPublication.Plan, existingPublication.Publication);
                     }
                     bool hasPrevious = _isolatedProjections.TryGetValue(task.TaskId, out var previousProjection);
                     if (hasPrevious && previousProjection!.Plan.VersionId == result.Snapshot.Id)
                     {
-                        task.CurrentFile = "文件无变化，正在核验现有隔离物理目录";
+                        task.CurrentFile = "文件无变化，正在核验已有备份";
                         TaskStateChanged?.Invoke(task);
-                        await new ExperimentalFirstProjection().VerifyPublishedAsync(provider, task.DestinationFolder,
+                        await new ExperimentalFirstProjection().VerifyPublishedAsync(provider, target,
                             previousProjection!.Plan, previousProjection.Publication, taskToken).ConfigureAwait(false);
                     }
                     else
                     {
-                        task.CurrentFile = "正在准备并核验隔离候选目录";
+                        task.CurrentFile = "正在准备并校验新备份";
                         TaskStateChanged?.Invoke(task);
-                        var plan = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false);
+                        var plan = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, target, taskToken).ConfigureAwait(false);
                         if (plan.VersionId != result.Snapshot.Id)
                             throw new IOException("准备物理目录期间备份版本已变化，拒绝发布");
-                        task.CurrentFile = "正在核验并发布隔离物理目录";
+                        task.CurrentFile = "正在校验并完成备份";
                         TaskStateChanged?.Invoke(task);
                         ExperimentalFirstProjection.Published publication;
                         if (hasPrevious)
                         {
-                            var next = await new ExperimentalNextProjection().PublishAsync(provider, task.DestinationFolder,
+                            var next = await new ExperimentalNextProjection().PublishAsync(provider, target,
                                 previousProjection!.Plan, previousProjection.Publication, plan, taskToken).ConfigureAwait(false);
                             publication = next.Current;
                         }
                         else
                         {
-                            publication = await new ExperimentalFirstProjection().PublishAsync(provider, task.DestinationFolder, plan, taskToken).ConfigureAwait(false);
+                            publication = await new ExperimentalFirstProjection().PublishAsync(provider, target, plan, taskToken).ConfigureAwait(false);
                         }
                         _isolatedProjections[task.TaskId] = new IsolatedProjectionState(plan, publication);
                     }
@@ -1072,7 +1092,7 @@ namespace FNSyncPlus.Core.Services
                     task.State = TaskSyncState.Completed;
                     task.LastSuccessTime = DateTime.Now;
                     task.CurrentProgress = 100.0;
-                    string trialLabel = _settings.IsVersionedBetaProfile && !_settings.IsVersionedBetaTestProfile ? "新版备份试用" : "隔离试验";
+                    string trialLabel = (_settings.IsVersionedBetaTestProfile || (_settings.IsInMemoryOnly && !_settings.IsVersionedBetaProfile)) ? "隔离试验" : "备份";
                     task.CurrentFile = task.IsExperimentalBackup ? $"{trialLabel}已提交：复用 {reusedFiles}，上传 {report.UploadedFiles}；物理目录已发布" : "所有文件均已同步更新至最新状态";
                     task.LastSyncStatus = task.IsExperimentalBackup
                         ? $"{trialLabel}物理目录已发布（复用 {reusedFiles}，上传 {report.UploadedFiles}）"

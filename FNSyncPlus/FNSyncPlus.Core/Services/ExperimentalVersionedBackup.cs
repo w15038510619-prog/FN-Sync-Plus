@@ -525,6 +525,7 @@ public sealed class ExperimentalVersionedBackup
             foreach (var item in directory.EnumerateFileSystemInfos())
             {
                 token.ThrowIfCancellationRequested();
+                if (item is FileInfo && StableFileSnapshot.IsOfficeOwnerFile(item.Name)) continue;
                 if ((item.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException($"源目录包含链接或联接点: {item.Name}");
                 string relative = PathHelper.NormalizeRelPath(Path.GetRelativePath(root, item.FullName));
                 if (!PathHelper.IsSafeRelativePath(relative) || !names.Add(relative)) throw new InvalidDataException("源目录包含不安全或重复的路径");
@@ -579,7 +580,7 @@ public sealed class ExperimentalVersionedBackup
                     {
                         token.ThrowIfCancellationRequested();
                         string path = Path.Combine(root, file.RelativePath.Replace('/', Path.DirectorySeparatorChar));
-                        using var read = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                        using var read = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
                     }
                     if (Same(current, Capture())) return;
                     stableSince = clock.Elapsed;
@@ -599,7 +600,7 @@ public sealed class ExperimentalVersionedBackup
 
     private static async Task<SourceFile> HashSourceAsync(string relative, string fullPath, CancellationToken token)
     {
-        await using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read,
+        await using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete,
             128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         long size = stream.Length;
         long modified = File.GetLastWriteTimeUtc(fullPath).Ticks;

@@ -15,11 +15,12 @@ public sealed class ExperimentalInitializationLockRecovery
     {
         ArgumentNullException.ThrowIfNull(provider);
         ArgumentNullException.ThrowIfNull(task);
+        string destination = TaskManager.BackupTarget(task);
         if (!task.ExperimentalPendingInitialization || task.ExperimentalFirstPublicationPending ||
             !Guid.TryParseExact(task.ExperimentalInitializationId, "N", out var id) || id == Guid.Empty ||
-            string.IsNullOrWhiteSpace(task.SourceFolder) || !PathHelper.IsSafeRelativePath(task.DestinationFolder))
+            string.IsNullOrWhiteSpace(task.SourceFolder) || !PathHelper.IsSafeRelativePath(destination))
             throw new InvalidDataException("任务没有有效的首次备份归属信息，拒绝释放锁");
-        string root = provider is FnOsPersonalStorageProvider fn ? fn.NormalizeRelativePath(task.DestinationFolder) : PathHelper.NormalizeRelPath(task.DestinationFolder);
+        string root = provider is FnOsPersonalStorageProvider fn ? fn.NormalizeRelativePath(destination) : PathHelper.NormalizeRelPath(destination);
         string? existing = string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot) ? null : task.ExperimentalExistingRoot;
         if (existing != null) existing = ExperimentalVersionedBackup.ValidateReuseLocations(provider, root, existing).ExistingRoot;
         byte[] expected = ExperimentalVersionedBackup.InitializationOwnership(task.SourceFolder, root, existing, task.Strategy, task.ExperimentalInitializationId!);
