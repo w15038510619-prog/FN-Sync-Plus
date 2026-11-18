@@ -1,5 +1,7 @@
 # FN Sync Plus 0.4.4 交付与验收
 
+后续实际连接窗口发现并修复深色认证卡片文字问题，见 [0.4.5 配色补丁与专项验收](hotfix-0.4.5-theme-contrast.md)。0.4.4 原产物和本文历史证据保留；最新 UI 使用 0.4.5。
+
 2026-11-18。结论：**READY FOR PILOT**。产品版本和官方更新通道已为 0.4.4 Stable；此名称不代替投运条件的实际验收。真实个人文件、团队文件、WPS 保存后保持打开、安装升级及公网 HTTPS 更新已经执行。未具备的 Windows 代码签名及物理 DPI 条件见文末。
 
 应用和安装包的源码为 `57e762e41af0a4b61d89dadbe85a601ccb7f8b4f`。后续 `11e42925a877b915ded2613b33278cbe2650882f` 仅增加发布附属文件的校验与原子发布能力，不改变交付程序。工作分支仍为 `workbuddy/enterprise-release-readiness`，PR #4 保持 Draft，目标仍为 `codex/fix-backup-integrity`，没有合并 main 或创建 GitHub 正式 Release。
