@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Version = '0.4.5',
     [string]$MinimumClientVersion = '0.4.3',
