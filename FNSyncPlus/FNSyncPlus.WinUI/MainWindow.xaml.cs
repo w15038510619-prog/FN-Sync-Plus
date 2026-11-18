@@ -384,6 +384,10 @@ namespace FNSyncPlus.WinUI
                     metrics["task_count"] = manager.Tasks.Count;
                     metrics["nas_online"] = manager.IsNasOnline;
                     metrics["tray_tooltip"] = _trayIcon?.DisplayText;
+                    var caption = _appWindow.TitleBar.ButtonForegroundColor;
+                    var inactive = _appWindow.TitleBar.ButtonInactiveForegroundColor;
+                    metrics["caption_foreground"] = caption.HasValue ? $"{caption.Value.R:X2}{caption.Value.G:X2}{caption.Value.B:X2}" : "default";
+                    metrics["caption_inactive_foreground"] = inactive.HasValue ? $"{inactive.Value.R:X2}{inactive.Value.G:X2}{inactive.Value.B:X2}" : "default";
                     UiVisualSignal.ReportPageReady(tag, metrics);
 
                 }
@@ -414,6 +418,7 @@ namespace FNSyncPlus.WinUI
             {
                 bool dark = string.Equals(_settings.AppTheme, "Dark", StringComparison.OrdinalIgnoreCase);
                 if (Content is FrameworkElement root) root.RequestedTheme = dark ? ElementTheme.Dark : ElementTheme.Light;
+                WindowHelper.ApplyCaptionTheme(this, dark);
                 IconThemeToggle.Glyph = dark ? "\uE706" : "\uE708";
             }
             catch (Exception ex)
@@ -428,7 +433,8 @@ namespace FNSyncPlus.WinUI
             {
                 bool isDark = rootElement.ActualTheme == ElementTheme.Dark;
                 rootElement.RequestedTheme = isDark ? ElementTheme.Light : ElementTheme.Dark;
-                IconThemeToggle.Glyph = isDark ? "\uE706" : "\uE708"; // Sun / Moon
+                WindowHelper.ApplyCaptionTheme(this, !isDark);
+                IconThemeToggle.Glyph = isDark ? "\uE708" : "\uE706"; // Next available theme
                 try
                 {
                     _settings.AppTheme = isDark ? "Light" : "Dark";

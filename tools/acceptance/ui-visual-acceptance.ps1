@@ -190,7 +190,7 @@ function Wait-PageReady {
                 $ready = Get-Content -LiteralPath $readyPath -Raw | ConvertFrom-Json
                 $polls++
                 if ($ready.page -eq $Page -and $ready.ready -eq $true) {
-                    return [pscustomobject]@{ ok = $true; polls = $polls; waitedMs = [int]((Get-Date) - $began).TotalMilliseconds; taskCount = $ready.task_count; trayTooltip = $ready.tray_tooltip }
+                    return [pscustomobject]@{ ok = $true; polls = $polls; waitedMs = [int]((Get-Date) - $began).TotalMilliseconds; taskCount = $ready.task_count; trayTooltip = $ready.tray_tooltip; caption = $ready.caption_foreground; inactiveCaption = $ready.caption_inactive_foreground }
                 }
             } catch { }
         }
@@ -273,6 +273,12 @@ function Capture-Scenario {
 
             Record-Result -Name ("{0}/{1}：真实托盘提示版本与窗口标题一致" -f $ScenarioKey, $Page) `
                 -Passed ($ready.trayTooltip -ceq $default.title) -Detail ("tray={0}" -f $ready.trayTooltip)
+
+            $captionExpected = if ($Theme -eq 'Dark') { 'FFFFFF' } else { '000000' }
+            $inactiveExpected = if ($Theme -eq 'Dark') { 'B0B0B0' } else { '666666' }
+            Record-Result -Name ("{0}/{1}：标题栏按钮跟随主题并保持未激活状态对比度" -f $ScenarioKey, $Page) `
+                -Passed ($ready.caption -ceq $captionExpected -and $ready.inactiveCaption -ceq $inactiveExpected) `
+                -Detail ("active={0} inactive={1}" -f $ready.caption,$ready.inactiveCaption)
 
             if ($AlsoMinWindow) {
                 $smallPng = Join-Path $OutRoot ("{0}-{1}-min-{2}x{3}.png" -f $ScenarioKey, $Page, $MinWidth, $MinHeight)

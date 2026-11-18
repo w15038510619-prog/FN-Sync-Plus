@@ -58,6 +58,20 @@ namespace FNSyncPlus.WinUI.Helpers
             }
         }
 
+        public static void ApplyCaptionTheme(Window window, bool dark)
+        {
+            var id = Win32Interop.GetWindowIdFromWindow(WindowNative.GetWindowHandle(window));
+            var bar = AppWindow.GetFromWindowId(id).TitleBar;
+            bar.ButtonBackgroundColor = Colors.Transparent;
+            bar.ButtonInactiveBackgroundColor = Colors.Transparent;
+            bar.ButtonForegroundColor = dark ? Colors.White : Colors.Black;
+            bar.ButtonInactiveForegroundColor = dark ? ColorHelper.FromArgb(255, 176, 176, 176) : ColorHelper.FromArgb(255, 102, 102, 102);
+            bar.ButtonHoverForegroundColor = dark ? Colors.White : Colors.Black;
+            bar.ButtonPressedForegroundColor = dark ? Colors.White : Colors.Black;
+            bar.ButtonHoverBackgroundColor = dark ? ColorHelper.FromArgb(255, 58, 58, 58) : ColorHelper.FromArgb(255, 229, 229, 229);
+            bar.ButtonPressedBackgroundColor = dark ? ColorHelper.FromArgb(255, 80, 80, 80) : ColorHelper.FromArgb(255, 204, 204, 204);
+        }
+
         public static IntPtr GetHandle(Window window)
         {
             return WindowNative.GetWindowHandle(window);
