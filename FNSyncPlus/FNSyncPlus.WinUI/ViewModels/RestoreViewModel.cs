@@ -44,6 +44,7 @@ namespace FNSyncPlus.WinUI.ViewModels
     public partial class RestoreViewModel : ObservableObject
     {
         private readonly RestoreEngine _restoreEngine;
+        private readonly TaskManager _tasks;
         private readonly AppSettings _settings;
         private readonly NasConnectionService _connectionService;
         private CancellationTokenSource? _restoreCancellation;
@@ -122,8 +123,9 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private string _detailedErrorMessage = string.Empty;
 
-        public RestoreViewModel(RestoreEngine restoreEngine, AppSettings settings, NasConnectionService connectionService)
+        public RestoreViewModel(RestoreEngine restoreEngine, AppSettings settings, NasConnectionService connectionService, TaskManager tasks)
         {
+            _tasks = tasks;
             _restoreEngine = restoreEngine;
             _settings = settings;
             LocalRestoreTarget = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "FN-Restore-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
@@ -517,6 +519,8 @@ namespace FNSyncPlus.WinUI.ViewModels
             var directories = SelectedDirectoryPaths;
             if (string.IsNullOrWhiteSpace(LocalRestoreTarget)) { RestoreStatusText = "请选择还原到本地的目标文件夹。"; return; }
 
+            using var activity = _tasks.TryBeginFileRestore();
+            if (activity == null) { RestoreStatusText = "程序正在更新或关闭，请稍后再恢复文件。"; return; }
             using var cancellation = new CancellationTokenSource();
             _restoreCancellation = cancellation;
             var package = SelectedPackage!;
@@ -625,6 +629,8 @@ namespace FNSyncPlus.WinUI.ViewModels
         {
             if (!CanRetryCurrentRestore || _retryContext is not { } retry) return;
 
+            using var activity = _tasks.TryBeginFileRestore();
+            if (activity == null) { RestoreStatusText = "程序正在更新或关闭，请稍后再恢复文件。"; return; }
             using var cancellation = new CancellationTokenSource();
             _restoreCancellation = cancellation;
             IsRestoring = true;
@@ -697,6 +703,8 @@ namespace FNSyncPlus.WinUI.ViewModels
                 2 => ConflictResolution.RenameWithTimestamp,
                 _ => ConflictResolution.SkipExisting
             };
+            using var activity = _tasks.TryBeginFileRestore();
+            if (activity == null) { RestoreStatusText = "程序正在更新或关闭，请稍后再恢复文件。"; return; }
             using var cancellation = new CancellationTokenSource();
             _restoreCancellation = cancellation;
             _retryContext = null;

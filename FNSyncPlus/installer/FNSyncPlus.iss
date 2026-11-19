@@ -80,7 +80,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 ; 版本化安装目录：app-<version>\ + FN_Sync_Plus.exe + current.json + update.log
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "current.json,previous.json"
 ; 安装说明（如果存在）
-Source: "..\..\docs\stable-0.4.6-operations.md"; DestDir: "{app}\docs"; DestName: "deployment-guide.md"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\..\docs\stable-0.4.7-operations.md"; DestDir: "{app}\docs"; DestName: "deployment-guide.md"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#LauncherName}"; WorkingDir: "{app}"; IconFilename: "{app}\{#LauncherName}"; AppUserModelID: "{#ShellAppId}"

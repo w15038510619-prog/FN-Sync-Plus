@@ -9,7 +9,7 @@
     Title="飞牛同步增强版"
     mc:Ignorable="d">
 
-    <Grid>
+    <Grid KeyboardAcceleratorPlacementMode="Hidden">
         <Grid.RowDefinitions>
             <RowDefinition Height="44" />
             <RowDefinition Height="*" />
@@ -45,6 +45,25 @@
 
             <!-- Right: Theme Toggle -->
             <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
+                <Button x:Name="UpdateButton" AutomationProperties.Name="软件更新" Background="Transparent" BorderThickness="0">
+                    <StackPanel Orientation="Horizontal" Spacing="5">
+                        <FontIcon Glyph="&#xE895;" FontSize="14" />
+                        <TextBlock Text="{x:Bind Updates.UpdateButtonLabel,Mode=OneWay}" />
+                    </StackPanel>
+                    <Button.Flyout>
+                        <Flyout>
+                            <StackPanel Width="320" Spacing="10">
+                                <TextBlock Text="{x:Bind Updates.CurrentVersionText,Mode=OneWay}" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                                <TextBlock Text="{x:Bind Updates.UpdateSupportMessage,Mode=OneWay}" TextWrapping="Wrap" />
+                                <TextBlock Text="{x:Bind Updates.UpdateStatus,Mode=OneWay}" TextWrapping="Wrap" />
+                                <ProgressBar Value="{x:Bind Updates.DownloadProgress,Mode=OneWay}" Visibility="{x:Bind Updates.ShowDownloadProgress,Mode=OneWay}" />
+                                <Button Content="检查并下载更新" Command="{x:Bind Updates.DownloadUpdateCommand}" IsEnabled="{x:Bind Updates.CanRunUpdate,Mode=OneWay}" />
+                                <Button Content="安装并重启…" Click="InstallUpdate_Click" IsEnabled="{x:Bind Updates.CanStartInstall,Mode=OneWay}" />
+                                <Button Content="取消等待或下载" Command="{x:Bind Updates.CancelUpdateCommand}" Visibility="{x:Bind Updates.CanCancelUpdate,Mode=OneWay}" />
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
                 <Button Content="帮助" Click="Help_Click" Background="Transparent" BorderThickness="0" />
                 <Button Click="BtnThemeToggle_Click" ToolTipService.ToolTip="切换深色/浅色主题" Padding="6" Background="Transparent" BorderThickness="0">
                     <FontIcon x:Name="IconThemeToggle" Glyph="&#xE706;" FontSize="14" />

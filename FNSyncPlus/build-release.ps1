@@ -27,11 +27,12 @@ param(
     [string]$Dotnet = 'dotnet',
     [ValidatePattern('^[a-fA-F0-9]{40}$')][string]$SourceSha,
     [string]$OutputRoot = (Join-Path $PSScriptRoot '..\Release_WinUI'),
-    [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$Version = '0.4.6',
+    [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$Version = '0.4.7',
     [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$MinimumClientVersion = '0.4.0',
     [switch]$ControlledOnlineBeta,
     [ValidateSet('stable', 'beta')][string]$Channel = 'stable',
     [switch]$SkipTests,
+    [string]$ReleaseNotes = "",
     [switch]$SignManifest,
     [string]$SigningKeyPath = '',
     [string]$ManifestBaseUrl = '',
@@ -173,7 +174,7 @@ try {
         $descriptor = @{
             schema = 1; product = 'FN Sync Plus'; channel = $Channel; arch = 'x64'; version = $Version
             min_version = $MinimumClientVersion; released_at = (Get-Date).ToUniversalTime().ToString('o')
-            notes = "FN Sync Plus $Version ($Channel)"; url = "$ManifestBaseUrl/FN-Sync-Plus-$Version-x64.zip"
+            notes = $(if ($ReleaseNotes) { $ReleaseNotes } else { "FN Sync Plus $Version ($Channel)" }); url = "$ManifestBaseUrl/FN-Sync-Plus-$Version-x64.zip"
             sha256 = $packageHash; size = $packageSize; batch = $ReleaseBatch
             audience = @($Audience); min_compatible_client = $MinimumClientVersion; signature = ''
         }

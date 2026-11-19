@@ -73,7 +73,7 @@ public sealed class UpdateService
                 hasRunningWork: () => taskManager.HasRunningWork,
                 hasRunningOrQueuedWork: () => taskManager.HasRunningOrQueuedWork,
                 hasUnclearCommitOrLock: () => taskManager.HasUnclearCommitOrLock,
-                enterHold: () => taskManager.TryEnterMaintenanceHold(out var lease, "准备安装更新") ? lease : null,
+                enterHold: () => taskManager.TryEnterMaintenanceHold(out var lease, "准备安装更新", drainQueuedBackups: true) ? lease : null,
                 saveConfiguration: SaveOrThrowAsync,
                 log: Log);
         }

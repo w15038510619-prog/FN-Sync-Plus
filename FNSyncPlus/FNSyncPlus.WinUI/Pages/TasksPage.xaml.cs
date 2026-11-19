@@ -18,13 +18,11 @@ namespace FNSyncPlus.WinUI.Pages
         private bool _isShowingDetails = false;
         private bool _isEditingSettings = false;
         private bool _isInspectingInterruption = false;
-        private bool _isViewingLegacy = false;
 
         public TasksPage()
         {
             ViewModel = AppServices.GetService<TasksViewModel>();
             InitializeComponent();
-            BtnViewLegacyTasks.Visibility = AppServices.GetService<AppSettings>().IsVersionedBetaProfile ? Visibility.Visible : Visibility.Collapsed;
             BetaSafetyNotice.Visibility = Visibility.Collapsed;
 
             Loaded += OnPageLoaded;
@@ -70,45 +68,6 @@ namespace FNSyncPlus.WinUI.Pages
                 XamlRoot = this.XamlRoot ?? App.MainWindowInstance?.Content?.XamlRoot
             };
             await dialog.ShowAsync();
-        }
-
-        private async void BtnViewLegacyTasks_Click(object sender, RoutedEventArgs e)
-        {
-            if (_isViewingLegacy || XamlRoot == null) return;
-            _isViewingLegacy = true;
-            try
-            {
-                var settings = AppServices.GetService<AppSettings>();
-                var legacy = await Task.Run(settings.ReadVersionedLegacySettings);
-                var text = new StringBuilder();
-                text.AppendLine("旧任务仅供查看，不会自动运行。要继续备份，请在新版里新建任务。");
-                text.AppendLine("如果旧任务与新任务使用同一个备份目录，请停用旧任务。");
-                if (legacy == null || (legacy.Tasks.Count == 0 && string.IsNullOrWhiteSpace(legacy.LegacySourceFolder) && string.IsNullOrWhiteSpace(legacy.LegacyTargetShare)))
-                {
-                    text.AppendLine("\n没有找到本软件的旧任务。若之前使用飞牛官方同步，可在添加文件夹时选择飞牛上的已有目录。");
-                }
-                else
-                {
-
-                    if (!string.IsNullOrWhiteSpace(legacy.LegacySourceFolder) || !string.IsNullOrWhiteSpace(legacy.LegacyTargetShare))
-                        text.AppendLine($"\n旧单任务\n本地：{legacy.LegacySourceFolder}\n目标：{legacy.LegacyTargetShare}");
-                    foreach (var task in legacy.Tasks.Take(50))
-                    {
-                        if (task == null) { text.AppendLine("\n有一项旧任务无效，请先检查旧配置。"); continue; }
-                        text.AppendLine($"\n{task.TaskName}\n本地：{task.SourceFolder}\n目标：{task.DestinationFolder}");
-                    }
-                    if (legacy.Tasks.Count > 50) text.AppendLine($"\n另有 {legacy.Tasks.Count - 50} 项未在此列出。");
-                }
-
-                await new ContentDialog { Title = "查看旧任务", Content = new ScrollViewer { MaxHeight = 420,
-                    Content = new TextBlock { Text = text.ToString(), TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true } },
-                    CloseButtonText = "知道了", XamlRoot = XamlRoot }.ShowAsync();
-            }
-            catch (Exception ex)
-            {
-                await new ContentDialog { Title = "无法查看旧任务", Content = ex.Message, CloseButtonText = "知道了", XamlRoot = XamlRoot }.ShowAsync();
-            }
-            finally { _isViewingLegacy = false; }
         }
 
         private async void InspectInterruptedBackup(SyncTaskItemViewModel item)

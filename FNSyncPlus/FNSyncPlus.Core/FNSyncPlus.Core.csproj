@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>12</LangVersion>
-    <Version>0.4.6</Version>
+    <Version>0.4.7</Version>
     <DefineConstants Condition="'$(ControlledOnlineBeta)' == 'true'">$(DefineConstants);FNSYNC_CONTROLLED_ONLINE_BETA</DefineConstants>
     <!-- AssemblyVersion is derived from $(Version) on purpose. Hard-coding it made every build
          report 0.4.0.0 to the update client, so the release actually being installed could never be

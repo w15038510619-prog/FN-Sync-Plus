@@ -41,6 +41,60 @@ public sealed class MaintenanceLifecycleTestSuite
             }
         }
 
+        await Case("更新等待恢复和已排队备份完成，同时阻止新恢复", async () =>
+        {
+            using var harness = new ManagerHarness(Path.Combine(workspace, "update-drain"));
+            var manager = harness.Manager;
+            using var restore = manager.TryBeginFileRestore();
+            var running = harness.StartLongTask();
+            var queued = harness.StartQueuedTask();
+            var gate = harness.CreateGate(drainQueued: true);
+            var wait = gate.TryAcquireAsync(TimeSpan.FromSeconds(15), token);
+            bool blocked = restore != null && manager.IsMaintenanceHoldActive && manager.TryBeginFileRestore() == null;
+            harness.ReleaseLongTask();
+            bool drained = await harness.WaitForCompletionAsync(running, TimeSpan.FromSeconds(6)) &&
+                           await harness.WaitForCompletionAsync(queued, TimeSpan.FromSeconds(6));
+            bool waiting = !wait.IsCompleted;
+            restore?.Dispose();
+            var result = await wait;
+            result.Lease?.Release();
+            using var next = manager.TryBeginFileRestore();
+            return (blocked && drained && waiting && result.Granted && next != null,
+                $"blocked={blocked} drained={drained} waitedForRestore={waiting} granted={result.Granted}");
+        });
+
+        await Case("取消更新保留恢复并重新允许新恢复", async () =>
+        {
+            using var harness = new ManagerHarness(Path.Combine(workspace, "restore-wait-cancel"));
+            using var first = harness.Manager.TryBeginFileRestore();
+            using var cancel = new CancellationTokenSource();
+            var wait = harness.CreateGate(drainQueued: true).TryAcquireAsync(TimeSpan.FromSeconds(10), cancel.Token);
+            cancel.Cancel();
+            var result = await wait;
+            using var second = harness.Manager.TryBeginFileRestore();
+            return (!result.Granted && first != null && second != null && harness.Manager.HasRunningWork,
+                result.Readiness.Reason);
+        });
+
+        await Case("开机启动注册固定启动器并可关闭；测试配置无权配置自启动", () =>
+        {
+            string path = @"Software\FNSyncPlusAcceptance-" + Guid.NewGuid().ToString("N");
+            string launcher = Path.Combine(workspace, "安装 测试", "FN_Sync_Plus.exe");
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(path);
+                AppSettings.WriteStartupRegistration(key, launcher, true);
+                bool registered = AppSettings.MatchesStartupRegistration(key, launcher);
+                bool quoted = (string?)key.GetValue("FNSyncPlus") == $"\"{launcher}\"";
+                AppSettings.WriteStartupRegistration(key, launcher, false);
+                bool removed = key.GetValue("FNSyncPlus") == null;
+                bool isolated = AppSettings.CreateInMemory().InstalledStartupLauncher(workspace) == null;
+                return Task.FromResult((registered && quoted && removed && isolated,
+                    $"registered={registered} quoted={quoted} removed={removed} isolated={isolated}"));
+            }
+            finally { Microsoft.Win32.Registry.CurrentUser.DeleteSubKey(path, throwOnMissingSubKey: false); }
+        });
+
         await Case("首次进入维护状态获得租约，重复进入被拒绝且不抢占", async () =>
         {
             using var harness = new ManagerHarness(Path.Combine(workspace, "hold-once"));
@@ -309,11 +363,11 @@ public sealed class MaintenanceLifecycleTestSuite
             return task.State == TaskSyncState.Completed;
         }
 
-        public BackupActivityGate CreateGate() => new(
+        public BackupActivityGate CreateGate(bool drainQueued = false) => new(
             hasRunningWork: () => Manager.HasRunningWork,
             hasRunningOrQueuedWork: () => Manager.HasRunningOrQueuedWork,
             hasUnclearCommitOrLock: () => Manager.HasUnclearCommitOrLock,
-            enterHold: () => Manager.TryEnterMaintenanceHold(out MaintenanceLease lease, "测试") ? lease : null,
+            enterHold: () => Manager.TryEnterMaintenanceHold(out MaintenanceLease lease, "测试", drainQueued) ? lease : null,
             saveConfiguration: () => Task.CompletedTask);
 
         /// <summary>Builds a managed install layout with a dummy payload and (optionally) a broken updater.</summary>

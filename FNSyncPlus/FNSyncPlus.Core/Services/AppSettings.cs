@@ -368,6 +368,40 @@ namespace FNSyncPlus.Core.Services
             }
         }
 
+        private const string StartupKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+
+        public string? InstalledStartupLauncher(string appDirectory)
+        {
+            if (!IsVersionedBetaProfile || IsInMemoryOnly || IsolatedSessionPath != null || IsVersionedBetaTestProfile ||
+                HasIsolatedTestBoundary || !string.IsNullOrEmpty(CustomConfigPath) || AppStorageRoot.IsIsolatedTestRoot)
+                return null;
+            var root = FNSyncPlus.Core.Updates.VersionedInstallLayout.TryFindRootFromAppDirectory(appDirectory);
+            if (root == null) return null;
+            string launcher = Path.Combine(root, "FN_Sync_Plus.exe");
+            return File.Exists(launcher) ? launcher : null;
+        }
+
+        public static bool IsStartupRegistered(string launcher)
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(StartupKey);
+            return MatchesStartupRegistration(key, launcher);
+        }
+
+        internal static bool MatchesStartupRegistration(RegistryKey? key, string launcher) =>
+            string.Equals(key?.GetValue("FNSyncPlus") as string, $"\"{launcher}\"", StringComparison.OrdinalIgnoreCase);
+
+        public static void SetStartupRegistration(string launcher, bool enable)
+        {
+            using var key = Registry.CurrentUser.CreateSubKey(StartupKey, writable: true);
+            WriteStartupRegistration(key, launcher, enable);
+        }
+
+        internal static void WriteStartupRegistration(RegistryKey key, string launcher, bool enable)
+        {
+            if (enable) key.SetValue("FNSyncPlus", $"\"{launcher}\"", RegistryValueKind.String);
+            else key.DeleteValue("FNSyncPlus", throwOnMissingValue: false);
+        }
+
         public static void ApplyStartupRegistry(bool enable)
         {
             try

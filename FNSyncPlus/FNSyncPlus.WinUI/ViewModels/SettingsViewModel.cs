@@ -23,7 +23,30 @@ namespace FNSyncPlus.WinUI.ViewModels
         private readonly BackupCapacityAnalyzer _capacity = new();
         private CancellationTokenSource? _updateCts;
 
-        public bool CanConfigureStartup => !_settings.IsVersionedBetaProfile && !_settings.IsInMemoryOnly && _settings.IsolatedSessionPath == null;
+        private readonly string? _startupLauncher;
+        private bool _refreshingStartup;
+        public bool CanConfigureStartup => _startupLauncher != null;
+
+        partial void OnStartWithWindowsChanged(bool oldValue, bool newValue)
+        {
+            if (_refreshingStartup || _startupLauncher == null) return;
+            try
+            {
+                AppSettings.SetStartupRegistration(_startupLauncher, newValue);
+                _settings.StartWithWindows = newValue;
+                _settings.Save();
+                StatusNotice = newValue ? "下次登录 Windows 时会自动启动。" : "已关闭开机自动启动。";
+            }
+            catch (Exception ex)
+            {
+                App.LogCrashException(ex, "Settings.Startup");
+                _refreshingStartup = true;
+                try { StartWithWindows = AppSettings.IsStartupRegistered(_startupLauncher); }
+                catch { StartWithWindows = oldValue; }
+                finally { _refreshingStartup = false; }
+                StatusNotice = "无法保存开机启动设置，请检查当前 Windows 用户的启动项权限。";
+            }
+        }
 
         [ObservableProperty]
         private bool _startWithWindows;
@@ -60,7 +83,11 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty] private bool _canCancelUpdate;
 
         public bool CanRunUpdate => CanCheckUpdate && !IsUpdateBusy;
-        public bool CanStartInstall => CanInstallUpdate && !IsUpdateBusy;
+        public bool CanStartInstall => CanInstallUpdate && !IsUpdateBusy && ReadyVersion.Length > 0;
+        [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(CanStartInstall))]
+        private string _readyVersion = "";
+        [ObservableProperty] private string _updateButtonLabel = "更新";
         partial void OnIsUpdateBusyChanged(bool value)
         {
             OnPropertyChanged(nameof(CanRunUpdate));
@@ -69,12 +96,6 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         [ObservableProperty]
         private int _updateChannelIndex;
-
-        [ObservableProperty]
-        private int _updateModeIndex;
-
-        [ObservableProperty]
-        private bool _unattendedEnabled;
 
         [ObservableProperty]
         private bool _isUpdateBusy;
@@ -90,9 +111,6 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         [ObservableProperty]
         private bool _canInstallUpdate;
-
-        [ObservableProperty]
-        private string _installBlockedReason = string.Empty;
 
         // ---- 备份容量与保留策略（只读） ----
 
@@ -118,16 +136,21 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         public bool CanCheckUpdate => _updates.CanCheck;
 
-        [ObservableProperty]
-        private string _autoCheckStatus = "后台自动检查尚未开始。";
-
         private void OnSchedulerChanged(UpdateSchedulerEvent evt)
         {
             // Raised from a background thread; marshal before touching bound properties.
             Helpers.UIThreadHelper.RunOnUIThread(() =>
             {
-                AutoCheckStatus = $"{evt.Message}（{DateTime.Now:HH:mm}）";
-                if (!IsUpdateBusy && evt.Kind is ("available" or "ready" or "error")) UpdateStatus = evt.Message;
+                if (IsUpdateBusy) return;
+                ReadyVersion = evt.Kind == "ready" ? evt.Version : "";
+                UpdateButtonLabel = evt.Kind switch
+                {
+                    "ready" or "available" => "可更新",
+                    "downloading" => "下载中",
+                    "error" => "更新异常",
+                    _ => "更新"
+                };
+                UpdateStatus = evt.Message;
             });
         }
 
@@ -135,10 +158,6 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         /// <summary>Unattended install only makes sense for the unattended mode.</summary>
         public bool CanChangeUpdatePolicy => !UpdateSettings.IsControlledOnlineBeta;
-        public bool UnattendedSelectable => CanChangeUpdatePolicy && UpdateModeIndex == (int)AutoUpdateMode.UnattendedInstall;
-
-        partial void OnUpdateModeIndexChanged(int value) => OnPropertyChanged(nameof(UnattendedSelectable));
-
         partial void OnIsCapacityBusyChanged(bool value) => OnPropertyChanged(nameof(CanRunCapacity));
 
         partial void OnCapacityTaskIndexChanged(int value) => OnPropertyChanged(nameof(CanRunCapacity));
@@ -153,10 +172,11 @@ namespace FNSyncPlus.WinUI.ViewModels
             if (_scheduler != null)
             {
                 _scheduler.Changed += OnSchedulerChanged;
-                if (_scheduler.IsRunning) AutoCheckStatus = _scheduler.Status;
             }
 
-            _startWithWindows = CanConfigureStartup && settings.StartWithWindows;
+            _startupLauncher = settings.InstalledStartupLauncher(AppContext.BaseDirectory);
+            try { _startWithWindows = _startupLauncher != null && AppSettings.IsStartupRegistered(_startupLauncher); }
+            catch (Exception ex) { App.LogCrashException(ex, "Settings.ReadStartup"); }
             _minimizeToTray = settings.MinimizeToTray;
 
             _maxConcurrentSyncsIndex = settings.MaxConcurrentSyncs switch
@@ -169,6 +189,11 @@ namespace FNSyncPlus.WinUI.ViewModels
             };
 
             var update = _updates.Settings;
+            if (Version.TryParse(update.StagedVersion, out var staged) && staged > UpdateService.CurrentVersion)
+            {
+                ReadyVersion = update.StagedVersion!;
+                UpdateButtonLabel = "可更新";
+            }
             _currentVersionText = $"当前版本 {ProductVersion}";
             _updateFeedUrl = update.ManifestUrl;
             _updateProxyUrl = update.ProxyUrl ?? "";
@@ -183,14 +208,8 @@ namespace FNSyncPlus.WinUI.ViewModels
             if (AppServices.IsUiVisualAcceptance)
             {
                 UpdateStatus = "纯视觉验收模拟：发现新版本 9.9.9，已下载并校验（模拟数据，不联网，不会安装）";
-                AutoCheckStatus = "纯视觉验收模拟：后台检查已停止（离线模式）";
             }
-            _updateModeIndex = update.AutoMode is >= 0 and <= 2 ? update.AutoMode : 0;
-            _unattendedEnabled = update.UnattendedEnabled;
             _updateSupportMessage = _updates.SupportMessage;
-            _installBlockedReason = _updates.CanInstall
-                ? "安装将在备份任务安全结束后进行，程序会自动重启。"
-                : _updates.SupportMessage;
             _canInstallUpdate = _updates.CanInstall;
             _lastCheckText = update.LastCheckUtc is { } last
                 ? $"上次检查：{last.ToLocalTime():yyyy-MM-dd HH:mm}　结果：{update.LastResult}"
@@ -198,7 +217,13 @@ namespace FNSyncPlus.WinUI.ViewModels
             if (!AppServices.IsUiVisualAcceptance) _updateStatus = update.LastResult;
             else UpdateFeedUrl = "https://update.example.internal/fnsync/releases/windows-x64/manifest.json";
 
-            foreach (var task in settings.Tasks)
+        }
+
+        public void RefreshCapacityTasks()
+        {
+            CapacityTaskIndex = -1;
+            CapacityTasks.Clear();
+            foreach (var task in _settings.Tasks)
                 CapacityTasks.Add($"{task.TaskName} → {task.DestinationFolder}");
             if (CapacityTasks.Count > 0) CapacityTaskIndex = 0;
         }
@@ -265,7 +290,6 @@ namespace FNSyncPlus.WinUI.ViewModels
         [RelayCommand]
         public void SaveSettings()
         {
-            _settings.StartWithWindows = CanConfigureStartup && StartWithWindows;
             _settings.MinimizeToTray = MinimizeToTray;
             _settings.MaxConcurrentSyncs = MaxConcurrentSyncsIndex switch
             {
@@ -281,41 +305,10 @@ namespace FNSyncPlus.WinUI.ViewModels
         }
 
         [RelayCommand]
-        public async Task CheckUpdateAsync()
-        {
-            if (!_updates.CanCheck)
-            {
-                UpdateStatus = _updates.SupportMessage;
-                return;
-            }
-            if (IsUpdateBusy) return;
-            if (!SaveUpdateSettings()) return;
-            IsUpdateBusy = true;
-            UpdateStatus = "正在检查更新…";
-            try
-            {
-                var result = await _updates.CheckAsync().ConfigureAwait(true);
-                UpdateStatus = result.HasUpdate
-                    ? $"发现新版本 {result.Version}。{result.Notes}"
-                    : NoUpdateMessage(result);
-                LastCheckText = $"上次检查：{DateTime.Now:yyyy-MM-dd HH:mm}";
-            }
-            catch (Exception ex)
-            {
-                App.LogCrashException(ex, "Settings.CheckUpdate");
-                UpdateStatus = "检查更新失败，请查看更新日志后重试。";
-            }
-            finally
-            {
-                IsUpdateBusy = false;
-            }
-        }
-
-        [RelayCommand]
         public async Task DownloadUpdateAsync()
         {
             if (!_updates.CanCheck) { UpdateStatus = _updates.SupportMessage; return; }
-            await PrepareUpdateAsync(install: false);
+            await PrepareUpdateAsync(null);
         }
 
         private static string NoUpdateMessage(UpdateCheckOutcome result) =>
@@ -339,21 +332,16 @@ namespace FNSyncPlus.WinUI.ViewModels
         /// be replaced, so the updater is started first with our PID and it waits for a clean exit.
         /// A running backup is never killed: if it cannot finish in time the install is deferred.
         /// </summary>
-        [RelayCommand]
-        public async Task InstallUpdateAsync()
+        public async Task PrepareUpdateAsync(Func<string, string, Task<bool>>? confirmInstall)
         {
-            if (!_updates.CanInstall) { UpdateStatus = _updates.SupportMessage; return; }
-            await PrepareUpdateAsync(install: true);
-        }
-
-        private async Task PrepareUpdateAsync(bool install)
-        {
-            if (IsUpdateBusy || !SaveUpdateSettings()) return;
+            if (IsUpdateBusy) return;
             IsUpdateBusy = true;
             using var cancellation = new CancellationTokenSource();
             _updateCts = cancellation;
             CanCancelUpdate = true;
             var token = cancellation.Token;
+            UpdateButtonLabel = "检查中";
+            ReadyVersion = "";
             UpdateStatus = "正在获取并验证更新清单…";
             try
             {
@@ -364,6 +352,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                     return;
                 }
                 var release = check.Release!;
+                UpdateButtonLabel = "下载中";
                 UpdateStatus = $"正在检查本地更新包 v{release.Version}…";
                 DownloadProgress = 0;
                 ShowDownloadProgress = true;
@@ -384,12 +373,16 @@ namespace FNSyncPlus.WinUI.ViewModels
                 ShowDownloadProgress = false;
                 if (!download.Ok || verified == null) { UpdateStatus = download.Error; return; }
                 UpdateStatus = download.Reused ? "本地更新包已重新校验通过。" : "更新包已下载并通过校验。";
-                if (!install) return;
+                ReadyVersion = release.Version;
+                UpdateStatus = $"v{release.Version} 已下载并通过校验。{check.Notes}";
+                if (confirmInstall == null || !_updates.CanInstall) return;
+                if (!await confirmInstall(release.Version, check.Notes)) return;
 
                 // The session either owns the maintenance lease or has already released it; there is
                 // no path here that leaves backups paused without an install in progress.
-                UpdateStatus = "正在校验更新包并等待备份任务安全结束…";
-                using var session = await _updates.BeginInstallAsync(verified, TimeSpan.FromMinutes(10), token)
+                UpdateButtonLabel = "等待安装";
+                UpdateStatus = "正在等待已排队的备份和正在进行的恢复完成…";
+                using var session = await _updates.BeginInstallAsync(verified, TimeSpan.FromHours(24), token)
                     .ConfigureAwait(true);
                 if (!session.Plan.Ready)
                 {
@@ -433,17 +426,8 @@ namespace FNSyncPlus.WinUI.ViewModels
                 CanCancelUpdate = false;
                 ShowDownloadProgress = false;
                 _updateCts = null;
+                UpdateButtonLabel = ReadyVersion.Length == 0 ? "更新" : "可更新";
             }
-        }
-
-        [RelayCommand]
-        public void SkipVersion()
-        {
-            var settings = _updates.Settings;
-            if (string.IsNullOrWhiteSpace(settings.LastResult)) return;
-            settings.SkippedVersion = null;
-            _updates.Save();
-            UpdateStatus = "已取消跳过记录，下次检查将重新提示。";
         }
 
         private bool SaveUpdateSettings()
@@ -462,8 +446,6 @@ namespace FNSyncPlus.WinUI.ViewModels
             if (CanChangeUpdatePolicy)
             {
                 update.Channel = UpdateChannelIndex == 1 ? "beta" : "stable";
-                update.AutoMode = UpdateModeIndex;
-                update.UnattendedEnabled = UnattendedEnabled && UpdateModeIndex == (int)AutoUpdateMode.UnattendedInstall;
             }
             _updates.Save();
             return true;

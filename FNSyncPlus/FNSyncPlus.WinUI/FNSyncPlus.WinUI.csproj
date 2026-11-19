@@ -19,7 +19,7 @@
     <CsWinRTAotOptimizerEnabled>false</CsWinRTAotOptimizerEnabled>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>0.4.6</Version>
+    <Version>0.4.7</Version>
     <!-- Derived from $(Version) (see FNSyncPlus.Core.csproj): a pinned 0.4.0.0 made every build
          look identical to the update client and to the health report. -->
   </PropertyGroup>
@@ -32,6 +32,7 @@
     <Content Include="Assets\Square44x44Logo.targetsize-24_altform-unplated.png" />
     <Content Include="Assets\Square44x44Logo.targetsize-48_altform-lightunplated.png" />
     <Content Include="Assets\StoreLogo.png" />
+    <Content Include="Assets\Help\*.png" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets\BrandMark.png" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets\Wide310x150Logo.scale-200.png" />

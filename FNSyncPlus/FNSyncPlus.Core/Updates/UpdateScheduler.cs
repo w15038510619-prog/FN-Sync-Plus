@@ -228,6 +228,7 @@ public sealed class UpdateScheduler : IDisposable
             }
 
             // Download and notify, or unattended install: both need a verified local package.
+            Report("downloading", $"正在下载或校验 v{check.Version}…", check.Version);
             var staged = await EnsureDownloadedAsync(release, token).ConfigureAwait(false);
             if (!staged.Ok || staged.Release == null)
             {

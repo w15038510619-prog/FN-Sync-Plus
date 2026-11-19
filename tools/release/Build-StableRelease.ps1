@@ -1,6 +1,7 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Version = '0.4.6',
+    [string]$Version = '0.4.7',
+    [string]$ReleaseNotes = "",
     [string]$MinimumClientVersion = '0.4.3',
     [Parameter(Mandatory)][string]$OutputRoot,
     [Parameter(Mandatory)][string]$PublicKeyPath,
@@ -17,7 +18,7 @@ $base = 'https://dev.sk-fj.com:8081/fnsync/stable'
 $build = Join-Path $OutputRoot 'build'
 $delivery = Join-Path $OutputRoot 'delivery'
 if (Test-Path -LiteralPath $OutputRoot) { throw 'OutputRoot must be a fresh directory.' }
-& (Join-Path $repo 'FNSyncPlus\build-release.ps1') -Dotnet $Dotnet -Version $Version -MinimumClientVersion $MinimumClientVersion -SourceSha $sha -OutputRoot $build -Channel stable -SignManifest -SigningKeyPath $PrivateKeyPath -UpdatePublicKeyPath $PublicKeyPath -ManifestBaseUrl $base
+& (Join-Path $repo 'FNSyncPlus\build-release.ps1') -Dotnet $Dotnet -Version $Version -MinimumClientVersion $MinimumClientVersion -SourceSha $sha -OutputRoot $build -Channel stable -ReleaseNotes $ReleaseNotes -SignManifest -SigningKeyPath $PrivateKeyPath -UpdatePublicKeyPath $PublicKeyPath -ManifestBaseUrl $base
 New-Item -ItemType Directory -Path $delivery | Out-Null
 $core = Join-Path $build "install\app-$Version\FNSyncPlus.Core.dll"
 & $Dotnet run --project (Join-Path $repo 'tools\FNSyncPlus.UpdateTool') -c Release --no-build -- verify --manifest (Join-Path $build 'manifest.json') --embedded-core $core --build-version $Version --current $MinimumClientVersion --channel stable

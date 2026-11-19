@@ -19,6 +19,7 @@ namespace FNSyncPlus.WinUI
     public sealed partial class MainWindow : Window
     {
         public MainViewModel ViewModel { get; }
+        public SettingsViewModel Updates { get; }
         private readonly AppSettings _settings;
         private readonly AppWindow _appWindow;
         private readonly LogService _logService;
@@ -30,6 +31,7 @@ namespace FNSyncPlus.WinUI
         public MainWindow(string initialView = "Tasks", int wizardStep = 0)
         {
             ViewModel = AppServices.GetService<MainViewModel>();
+            Updates = AppServices.GetService<SettingsViewModel>();
             _settings = AppServices.GetService<AppSettings>();
             _logService = AppServices.GetService<LogService>();
             InitializeComponent();
@@ -325,14 +327,25 @@ namespace FNSyncPlus.WinUI
             }
         }
 
+        private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
+        {
+            UpdateButton.Flyout.Hide();
+            await Updates.PrepareUpdateAsync(async (version, notes) =>
+            {
+                var dialog = new ContentDialog
+                {
+                    XamlRoot = Content.XamlRoot, Title = $"安装 v{version} 并重启？",
+                    Content = $"{notes}\n\n已排队的同步和正在恢复的文件会先完成。等待期间暂缓开始新任务，可在顶部「更新」中取消等待。",
+                    PrimaryButtonText = "确认，任务结束后安装", CloseButtonText = "稍后再说",
+                    DefaultButton = ContentDialogButton.Close
+                };
+                return await dialog.ShowAsync() == ContentDialogResult.Primary;
+            });
+        }
+
         private async void Help_Click(object sender, RoutedEventArgs e)
         {
-            string text = ContentFrame.Content is RestorePage
-                ? "选择备份后，选择最新文件或历史版本。勾选文件或文件夹后恢复所选，也可单独恢复整个备份。请选择新的恢复文件夹，默认跳过已有文件。覆盖同名文件前请核对确认框。团队文件需要 NAS 开启 SMB 并授予当前账号权限。"
-                : "在 NAS 设备登录自己的账号，然后添加本地文件夹和独立备份位置。每个备份目标只使用一个客户端写入。任务详情中可以查看日志；恢复前建议选择空文件夹。保存后仍打开的文档可在允许读取时备份，独占锁定的文件会延后处理。";
-            await new Microsoft.UI.Xaml.Controls.ContentDialog { XamlRoot = Content.XamlRoot,
-                Title = "使用帮助", Content = new Microsoft.UI.Xaml.Controls.TextBlock { Text = text, TextWrapping = TextWrapping.Wrap },
-                CloseButtonText = "知道了" }.ShowAsync();
+            if (ContentFrame.Content is Page page) await PageHelp.For(page).ShowAsync();
         }
 
         public void NavigateToTag(string tag)

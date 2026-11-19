@@ -46,6 +46,22 @@ namespace FNSyncPlus.Core.Services
         private readonly Task _queueWorkerTask;
 
         private volatile bool _maintenanceHold;
+        private bool _drainQueuedBackups;
+        private bool _waitingForSlot;
+        private int _activeRestores;
+
+        public IDisposable? TryBeginFileRestore()
+        {
+            lock (_taskLifecycleLock)
+            {
+                if (_stopping || _maintenanceHold) return null;
+                _activeRestores++;
+                return new MaintenanceLease(Guid.NewGuid().ToString("N"), "恢复文件", _ =>
+                {
+                    lock (_taskLifecycleLock) _activeRestores--;
+                });
+            }
+        }
         private string? _maintenanceOwnerId;   // guarded by _taskLifecycleLock
         private volatile bool _isNasOnline = true;
         private bool _nasStateInitialized;
@@ -405,6 +421,16 @@ namespace FNSyncPlus.Core.Services
         {
             lock (_taskLifecycleLock)
             {
+                if (_drainQueuedBackups)
+                {
+                    var deferred = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+                    if (deferred != null)
+                    {
+                        deferred.LastSyncStatus = "正在准备更新，请在更新结束后同步";
+                        TaskStateChanged?.Invoke(deferred);
+                    }
+                    return;
+                }
                 if (_stopping || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId) || _runningCompletions.ContainsKey(taskId)) return;
                 var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
                 if (task == null || !task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing)
@@ -544,7 +570,7 @@ namespace FNSyncPlus.Core.Services
                     (!_settings.IsVersionedBetaTestProfile || _settings.HasIsolatedTestBoundary))) ||
                     !UseExperimentalVersionedBackup || !task.IsExperimentalBackup)
                     throw new InvalidOperationException("中断恢复仅支持新版备份任务");
-                if (_stopping || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId))
+                if (_maintenanceHold || _stopping || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId))
                     throw new InvalidOperationException("任务正在停止、移除或执行其他恢复操作");
                 _settings.EnsureIsolatedTestTask(task);
                 EnsureSeparateFromLegacyTasks(task);
@@ -699,7 +725,7 @@ namespace FNSyncPlus.Core.Services
                     bool held;
                     lock (_taskLifecycleLock)
                     {
-                        held = _maintenanceHold;
+                        held = _maintenanceHold && !_drainQueuedBackups;
                         if (!held && _taskQueue.TryDequeue(out taskId))
                         {
                             task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
@@ -710,6 +736,7 @@ namespace FNSyncPlus.Core.Services
                             {
                                 continue;
                             }
+                            _waitingForSlot = true;
                         }
                         else if (!held)
                         {
@@ -742,7 +769,8 @@ namespace FNSyncPlus.Core.Services
                         TaskCompletionSource completion;
                         lock (_taskLifecycleLock)
                         {
-                            if (_maintenanceHold)
+                            _waitingForSlot = false;
+                            if (_maintenanceHold && !_drainQueuedBackups)
                             {
                                 // The hold was taken while this item was waiting for a concurrency
                                 // slot. Put it back rather than dropping it, so the pending backup
@@ -1591,7 +1619,7 @@ namespace FNSyncPlus.Core.Services
         /// Returns false when another caller already holds the lease: a maintenance hold is never
         /// stolen, because the existing owner is the one responsible for releasing it.
         /// </summary>
-        public bool TryEnterMaintenanceHold(out MaintenanceLease lease, string reason = "准备安装更新")
+        public bool TryEnterMaintenanceHold(out MaintenanceLease lease, string reason = "准备安装更新", bool drainQueuedBackups = false)
         {
             lock (_taskLifecycleLock)
             {
@@ -1603,6 +1631,7 @@ namespace FNSyncPlus.Core.Services
                 string id = Guid.NewGuid().ToString("N");
                 _maintenanceOwnerId = id;
                 _maintenanceHold = true;
+                _drainQueuedBackups = drainQueuedBackups;
                 lease = new MaintenanceLease(id, reason, ReleaseMaintenanceLease);
             }
             _logService.LogTask(new TaskLogEntry
@@ -1628,6 +1657,7 @@ namespace FNSyncPlus.Core.Services
                 {
                     _maintenanceOwnerId = null;
                     _maintenanceHold = false;
+                    _drainQueuedBackups = false;
                 }
             }
             if (!released) return;
@@ -1655,7 +1685,8 @@ namespace FNSyncPlus.Core.Services
         /// </summary>
         public bool HasRunningWork
         {
-            get { lock (_taskLifecycleLock) return _runningCompletions.Count > 0; }
+            get { lock (_taskLifecycleLock) return _runningCompletions.Count > 0 || _activeRestores > 0 ||
+                (_drainQueuedBackups && (_waitingForSlot || !_taskQueue.IsEmpty)); }
         }
 
         /// <summary>True when any task is scanning, syncing, queued or still completing.</summary>
@@ -1665,7 +1696,7 @@ namespace FNSyncPlus.Core.Services
             {
                 lock (_taskLifecycleLock)
                 {
-                    if (_runningCompletions.Count > 0) return true;
+                    if (_activeRestores > 0 || _waitingForSlot || _runningCompletions.Count > 0) return true;
                     return _settings.Tasks.Any(t => t.IsRunning || t.State == TaskSyncState.Queued);
                 }
             }

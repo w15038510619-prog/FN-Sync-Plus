@@ -116,6 +116,10 @@ namespace FNSyncPlus.WinUI.Services
                 ? Path.Combine(settings.GetIsolatedLogDirectory(), "updates.json")
                 : Path.Combine(AppStorageRoot.LocalAppDataDir(), "updates.json");
             var updateSettings = UpdateService.LoadSettings(updateSettingsPath);
+            // On the desktop, fetching a release is automatic; restarting always needs a user.
+            if (!UpdateSettings.IsControlledOnlineBeta)
+                updateSettings.AutoMode = (int)AutoUpdateMode.DownloadAndNotify;
+            updateSettings.UnattendedEnabled = false;
             // Isolation hygiene: an isolated test session must not leak even log lines into the
             // production connection log, so the update log follows the session-aware log service.
             var updateLog = (Action<string>)(message => logService.LogConnection("INFO", "[update] " + message));
