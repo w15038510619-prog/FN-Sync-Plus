@@ -81,20 +81,21 @@
      <TextBox Grid.Column="1" Text="{x:Bind ViewModel.LocalRestoreTarget, Mode=TwoWay}" IsReadOnly="True" ToolTipService.ToolTip="{x:Bind ViewModel.LocalRestoreTarget, Mode=OneWay}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"/>
      <Button Grid.Column="2" Content="选择文件夹…" Click="BtnBrowseLocalRestore_Click" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"/>
     </Grid>
-    <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-     <ComboBox SelectedIndex="{x:Bind ViewModel.ConflictPolicyIndex, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"><ComboBoxItem Content="同名文件跳过"/><ComboBoxItem Content="覆盖同名文件（需要确认）"/><ComboBoxItem Content="保留两份，自动改名"/></ComboBox>
-     <Button Grid.Column="1" Content="取消恢复" Command="{x:Bind ViewModel.CancelRestoreCommand}" Visibility="{x:Bind ViewModel.IsRestoring, Mode=OneWay}"/>
-    </Grid>
     <Grid ColumnSpacing="8">
-     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-     <TextBlock Text="{x:Bind ViewModel.SelectionSummary, Mode=OneWay}" VerticalAlignment="Center" Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}"/>
-     <StackPanel x:Name="CurrentRestoreActions" Grid.Column="1" Orientation="Horizontal" Spacing="8" Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}">
+     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+     <ComboBox SelectedIndex="{x:Bind ViewModel.ConflictPolicyIndex, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"><ComboBoxItem Content="同名文件跳过"/><ComboBoxItem Content="覆盖同名文件（需要确认）"/><ComboBoxItem Content="保留两份，自动改名"/></ComboBox>
+     <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.SelectionSummary, Mode=OneWay}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                ToolTipService.ToolTip="{x:Bind ViewModel.SelectionSummary, Mode=OneWay}" Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}"/>
+     <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8">
+      <Button Content="取消恢复" Command="{x:Bind ViewModel.CancelRestoreCommand}" Visibility="{x:Bind ViewModel.IsRestoring, Mode=OneWay}"/>
+      <StackPanel x:Name="CurrentRestoreActions" Orientation="Horizontal" Spacing="8" Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}">
       <Button x:Name="RetryRestoreButton" Content="重试失败文件" Click="BeginRestore_Click" Visibility="{x:Bind ViewModel.CanRetryCurrentRestore, Mode=OneWay}"/>
       <Button x:Name="RestoreEntireButton" Content="恢复整个备份" Click="BeginRestore_Click" IsEnabled="{x:Bind ViewModel.CanRestoreEntireBackup, Mode=OneWay}"/>
       <Button Content="恢复所选" Click="BeginRestore_Click" Style="{ThemeResource AccentButtonStyle}" IsEnabled="{x:Bind ViewModel.CanRestoreSelection, Mode=OneWay}"/>
-     </StackPanel>
-     <Button x:Name="HistoryRestoreAction" Grid.Column="1" Content="恢复所选版本" Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay}"
+      </StackPanel>
+      <Button x:Name="HistoryRestoreAction" Content="恢复所选版本" Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay}"
              Click="BeginRestore_Click" Style="{ThemeResource AccentButtonStyle}" IsEnabled="{x:Bind ViewModel.CanRestoreHistory, Mode=OneWay}"/>
+     </StackPanel>
     </Grid>
     <ProgressBar Value="{x:Bind ViewModel.RestoreProgress, Mode=OneWay}" Height="4"/>
     <TextBlock Text="{x:Bind ViewModel.RestoreStatusText, Mode=OneWay}" FontSize="12" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind ViewModel.RestoreStatusText, Mode=OneWay}"/>
