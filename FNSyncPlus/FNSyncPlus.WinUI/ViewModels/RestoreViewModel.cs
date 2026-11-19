@@ -326,7 +326,12 @@ namespace FNSyncPlus.WinUI.ViewModels
             HistoryFilesList.Add(new(new ManifestHistoryEntry { OriginalRel = @"普通/\u7248\u672c\u8bf4\u660e.txt", ArchivedAt = DateTimeOffset.Now.AddDays(-1), Reason = "renamed", Size = 1 }));
             BuildBrowser(Array.Empty<string>());
             IsHistoryMode = history;
-            if (history) SetHistoryFile(_historyRoot.Descendants().First(item => !item.IsFolder));
+            if (history)
+            {
+                var file = _historyRoot.Descendants().First(item => !item.IsFolder);
+                OpenFolder(file.Parent!);
+                SetHistoryFile(file);
+            }
         }
 
         private async Task<INasStorageProvider> ProviderForPackageAsync(DiscoveredBackupPackage package) =>

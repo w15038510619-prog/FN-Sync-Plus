@@ -17,14 +17,16 @@ namespace FNSyncPlus.WinUI.Pages
         {
             ViewModel = AppServices.GetService<RestoreViewModel>();
             InitializeComponent();
-            Loaded += async (_, _) => { if (!AppServices.IsUiVisualAcceptance) await ViewModel.LoadKnownBackupsAsync(); };
-
             if (AppServices.IsUiVisualAcceptance)
                 {
-                bool history = Environment.GetCommandLineArgs().Contains("--restore-history-fixture");
-                ViewModel.LoadVisualFixture(history);
-                if (history) RestoreMode.SelectedItem = RestoreMode.Items[1];
+                Loaded += (_, _) => DispatcherQueue.TryEnqueue(() =>
+                {
+                    bool history = Environment.GetCommandLineArgs().Contains("--restore-history-fixture");
+                    RestoreMode.SelectedItem = RestoreMode.Items[history ? 1 : 0];
+                    ViewModel.LoadVisualFixture(history);
+                });
             }
+            else Loaded += async (_, _) => await ViewModel.LoadKnownBackupsAsync();
         }
 
         private void RestoreMode_SelectionChanged(SelectorBar sender, SelectorBarSelectionChangedEventArgs args) =>
@@ -77,7 +79,8 @@ namespace FNSyncPlus.WinUI.Pages
             FrameworkElement action = ViewModel.IsHistoryMode ? HistoryRestoreAction : CurrentRestoreActions;
             double bottom = action.TransformToVisual(this).TransformPoint(new Windows.Foundation.Point(0, 0)).Y + action.ActualHeight;
             return new() { ["restore_list_height"] = files.ActualHeight, ["restore_action_height"] = action.ActualHeight,
-                ["restore_action_bottom"] = bottom, ["restore_page_height"] = ActualHeight };
+                ["restore_action_bottom"] = bottom, ["restore_page_height"] = ActualHeight,
+                ["restore_history_mode"] = ViewModel.IsHistoryMode, ["restore_history_list_height"] = HistoryFileList.ActualHeight };
         }
 
         private async void BeginRestore_Click(object sender, RoutedEventArgs e)

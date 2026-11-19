@@ -298,9 +298,14 @@ function Capture-Scenario {
                     -Passed ($smallOk -and [double]$small.content_coverage -ge 0.05) -Detail $smallDetail
                 if ($smallOk -and $Page -eq 'Restore') {
                     $layout = Get-Content -LiteralPath (Join-Path $sessionDir 'ui-ready.json') -Raw -Encoding utf8 | ConvertFrom-Json
+                    $historyExpected = $ExtraArgs -contains '--restore-history-fixture'
                     Record-Result -Name ("{0}/Restore：最小窗口列表与恢复按钮可见" -f $ScenarioKey) `
-                        -Passed ($layout.restore_list_height -ge 80 -and $layout.restore_action_height -ge 30 -and $layout.restore_action_bottom -le $layout.restore_page_height) `
-                        -Detail ("listHeight={0} actionHeight={1} actionBottom={2} pageHeight={3}" -f $layout.restore_list_height,$layout.restore_action_height,$layout.restore_action_bottom,$layout.restore_page_height)
+                        -Passed ($layout.restore_list_height -ge 56 -and $layout.restore_action_height -ge 30 -and
+                            $layout.restore_action_bottom -le $layout.restore_page_height -and $layout.restore_history_mode -eq $historyExpected -and
+                            (-not $historyExpected -or $layout.restore_history_list_height -ge 32)) `
+                        -Detail ("listHeight={0} actionHeight={1} actionBottom={2} pageHeight={3} history={4} versionsHeight={5}" -f
+                            $layout.restore_list_height,$layout.restore_action_height,$layout.restore_action_bottom,$layout.restore_page_height,
+                            $layout.restore_history_mode,$layout.restore_history_list_height)
                 }
                 if ($smallOk) {
                     [void]$script:records.Add([pscustomobject]@{
