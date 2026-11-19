@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Version = '0.4.5',
+    [string]$Version = '0.4.6',
     [string]$MinimumClientVersion = '0.4.3',
     [Parameter(Mandatory)][string]$OutputRoot,
     [Parameter(Mandatory)][string]$PublicKeyPath,

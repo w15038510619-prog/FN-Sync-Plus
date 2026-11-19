@@ -100,6 +100,9 @@ jobs:
 
     - name: Run 0.4.4 Snapshot and Team Protocol Regressions
       run: dotnet run --project tools/acceptance/Release044/Release044.csproj -c Release
+    - name: Verify restore selection and nested layout
+      shell: pwsh
+      run: dotnet run --project tools/acceptance/Restore046 -c Release -- (Join-Path $env:RUNNER_TEMP 'fn-restore-046')
 
     - name: Run Automated Tests
       run: dotnet run --project FNSyncPlus/FNSyncPlus.Tests/FNSyncPlus.Tests.csproj -c Release --no-build

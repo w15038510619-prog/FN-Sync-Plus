@@ -152,7 +152,7 @@ namespace FNSyncPlus.WinUI
                     await deviceVm.LoginAsync();
                 };
             }
-            else if (initialView == "RestorePreview" || initialView == "RestoreCompleted")
+            else if (initialView == "RestorePreview")
             {
                 NavigateToTag("Restore");
                 bool ran = false;
@@ -163,15 +163,7 @@ namespace FNSyncPlus.WinUI
                     await System.Threading.Tasks.Task.Delay(500);
                     var restoreVm = AppServices.GetService<RestoreViewModel>();
                     await restoreVm.ScanPackagesAsync();
-                    if (initialView == "RestoreCompleted")
-                    {
-                        await System.Threading.Tasks.Task.Delay(500);
-                        if (restoreVm.SelectedPackage == null && restoreVm.DiscoveredPackages.Count > 0)
-                        {
-                            restoreVm.SelectedPackage = restoreVm.DiscoveredPackages[0];
-                        }
-                        await restoreVm.ExecuteRestoreAsync();
-                    }
+
                 };
             }
             else if (initialView == "TestLabReport")
@@ -336,7 +328,7 @@ namespace FNSyncPlus.WinUI
         private async void Help_Click(object sender, RoutedEventArgs e)
         {
             string text = ContentFrame.Content is RestorePage
-                ? "选择备份后，选择最新文件或历史版本。未选择文件时恢复全部最新文件。请选择新的恢复文件夹，默认跳过已有文件。覆盖同名文件前请核对确认框。团队文件需要 NAS 开启 SMB 并授予当前账号权限。"
+                ? "选择备份后，选择最新文件或历史版本。勾选文件或文件夹后恢复所选，也可单独恢复整个备份。请选择新的恢复文件夹，默认跳过已有文件。覆盖同名文件前请核对确认框。团队文件需要 NAS 开启 SMB 并授予当前账号权限。"
                 : "在 NAS 设备登录自己的账号，然后添加本地文件夹和独立备份位置。每个备份目标只使用一个客户端写入。任务详情中可以查看日志；恢复前建议选择空文件夹。保存后仍打开的文档可在允许读取时备份，独占锁定的文件会延后处理。";
             await new Microsoft.UI.Xaml.Controls.ContentDialog { XamlRoot = Content.XamlRoot,
                 Title = "使用帮助", Content = new Microsoft.UI.Xaml.Controls.TextBlock { Text = text, TextWrapping = TextWrapping.Wrap },

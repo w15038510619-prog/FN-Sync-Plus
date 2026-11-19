@@ -726,6 +726,26 @@ namespace FNSyncPlus.Core.Services
                 matches[0], cancellationToken, conflictResolution).ConfigureAwait(false);
         }
 
+        public async Task<RestoreProgressReport> RestorePackageSelectionAsync(INasStorageProvider provider,
+            DiscoveredBackupPackage package, string destination, IReadOnlyCollection<string> originalFiles,
+            IReadOnlyCollection<string> originalDirectories, ConflictResolution conflictResolution,
+            CancellationToken cancellationToken = default)
+        {
+            if (originalFiles.Count == 0 && originalDirectories.Count == 0)
+                throw new ArgumentException("请选择要恢复的文件或文件夹。");
+            (provider, package) = BindSmbPackage(provider, package);
+            var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
+            if (manifest.IsNew) throw new InvalidDataException("备份已不存在，请刷新。");
+            var files = originalFiles.ToHashSet(StringComparer.Ordinal);
+            var directories = originalDirectories.ToHashSet(StringComparer.Ordinal);
+            manifest.Files = manifest.Files.Where(f => files.Contains(f.OriginalRel)).ToList();
+            manifest.Directories = manifest.Directories.Where(d => directories.Contains(d.OriginalRel)).ToList();
+            if (manifest.Files.Count != files.Count || manifest.Directories.Count != directories.Count)
+                throw new InvalidDataException("所选内容与备份不一致，请刷新。");
+            return await RunRestoreFilteredAsync(provider, package.NasFolderUnc, destination,
+                manifest, conflictResolution, cancellationToken, restoreDirectories: true).ConfigureAwait(false);
+        }
+
         private async Task<RestoreProgressReport> RunRestoreManifestAsync(
             INasStorageProvider storageProvider,
             string nasBackupFolderRel,
@@ -965,10 +985,24 @@ namespace FNSyncPlus.Core.Services
             string localDestinationFolder,
             Manifest manifest,
             ConflictResolution conflictResolution,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool restoreDirectories = false)
         {
             var report = new RestoreProgressReport { TotalFiles = manifest.Files.Count };
             string longLocal = PathHelper.EnsureLongPathPrefix(localDestinationFolder);
+
+            if (restoreDirectories)
+            {
+                if (manifest.Directories.Any(d => !PathHelper.IsSafeRelativePath(d.OriginalRel)))
+                    throw new InvalidDataException("备份包含不安全的目录路径。");
+                foreach (var directory in manifest.Directories)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var target = Path.Combine(longLocal, ToLocalSeparators(PathHelper.NormalizeRelPath(directory.OriginalRel)));
+                    EnsureSafeRestoreDirectory(longLocal, target);
+                    report.RestoredDirectories++;
+                }
+            }
 
             foreach (var fileEntry in manifest.Files)
             {

@@ -27,7 +27,7 @@ param(
     [string]$Dotnet = 'dotnet',
     [ValidatePattern('^[a-fA-F0-9]{40}$')][string]$SourceSha,
     [string]$OutputRoot = (Join-Path $PSScriptRoot '..\Release_WinUI'),
-    [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$Version = '0.4.5',
+    [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$Version = '0.4.6',
     [ValidatePattern('^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$')][string]$MinimumClientVersion = '0.4.0',
     [switch]$ControlledOnlineBeta,
     [ValidateSet('stable', 'beta')][string]$Channel = 'stable',

@@ -19,30 +19,60 @@
    </StackPanel>
   </Border>
   <Grid Grid.Row="2" RowSpacing="6">
-   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-   <TextBox Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="搜索文件名或文件夹"/>
-   <Pivot Grid.Row="1" x:Name="RestoreTabs" SelectionChanged="RestoreTabs_SelectionChanged">
-    <PivotItem Header="恢复最新文件">
-     <Grid RowSpacing="6"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-      <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-       <Button Content="上一级" Command="{x:Bind ViewModel.FolderUpCommand}"/>
-       <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.CurrentFolder, Mode=OneWay}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-       <ComboBox Grid.Column="2" ItemsSource="{x:Bind ViewModel.Folders}" PlaceholderText="打开子文件夹" SelectionChanged="Folder_SelectionChanged" MaxWidth="260"/>
+   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+   <Grid ColumnSpacing="12">
+    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <SelectorBar x:Name="RestoreMode" SelectionChanged="RestoreMode_SelectionChanged">
+     <SelectorBarItem Text="恢复最新文件" IsSelected="True"/>
+     <SelectorBarItem Text="恢复历史版本"/>
+    </SelectorBar>
+    <TextBox Grid.Column="1" VerticalAlignment="Center" Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="搜索整个备份" AutomationProperties.Name="搜索整个备份"/>
+   </Grid>
+   <Grid Grid.Row="1" ColumnSpacing="8">
+    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <Button Content="上一级" Command="{x:Bind ViewModel.FolderUpCommand}" IsEnabled="{x:Bind ViewModel.CanGoUp, Mode=OneWay}"/>
+    <ScrollViewer Grid.Column="1" HorizontalScrollMode="Enabled" HorizontalScrollBarVisibility="Auto" VerticalScrollMode="Disabled" VerticalScrollBarVisibility="Disabled">
+     <ItemsControl ItemsSource="{x:Bind ViewModel.Breadcrumbs}">
+      <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal" Spacing="2"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+      <ItemsControl.ItemTemplate><DataTemplate x:DataType="vm:RestoreBrowserItem">
+       <Button Tag="{x:Bind}" Click="OpenFolder_Click" ToolTipService.ToolTip="{x:Bind DisplayPath}" MaxWidth="240">
+        <TextBlock Text="{x:Bind BreadcrumbLabel}" TextTrimming="CharacterEllipsis"/>
+       </Button>
+      </DataTemplate></ItemsControl.ItemTemplate>
+     </ItemsControl>
+    </ScrollViewer>
+   </Grid>
+   <Grid Grid.Row="2" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
+    <ListView x:Name="CurrentFileList" ItemsSource="{x:Bind ViewModel.BrowserItems}" SelectionMode="None" IsItemClickEnabled="True"
+              ItemClick="Browser_ItemClick" KeyDown="Browser_KeyDown" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" AutomationProperties.Name="备份文件和文件夹">
+     <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="MinHeight" Value="34"/></Style></ListView.ItemContainerStyle>
+     <ListView.ItemTemplate><DataTemplate x:DataType="vm:RestoreBrowserItem">
+      <Grid ColumnSpacing="8" DoubleTapped="BrowserRow_DoubleTapped" DataContext="{x:Bind}">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+       <CheckBox MinWidth="0" Padding="0" Tag="{x:Bind}" IsChecked="{x:Bind IsChecked, Mode=OneWay}" Click="BrowserCheck_Click"
+                 Visibility="{x:Bind CanCheck, Mode=OneWay}" AutomationProperties.Name="{x:Bind DisplayPath}"/>
+       <FontIcon Grid.Column="1" Glyph="{x:Bind Icon}" FontSize="16" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center"/>
+       <StackPanel Grid.Column="2" VerticalAlignment="Center" Padding="0,3">
+        <TextBlock Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind DisplayPath}"/>
+        <TextBlock Text="{x:Bind DisplayLocation}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis"
+                   Visibility="{x:Bind ShowLocation, Mode=OneWay}"/>
+       </StackPanel>
+       <Button Grid.Column="3" Content="›" Tag="{x:Bind}" Click="OpenFolder_Click" AutomationProperties.Name="打开文件夹" ToolTipService.ToolTip="打开文件夹"
+               Visibility="{x:Bind IsFolder, Converter={StaticResource BoolToVisibilityConverter}}" Padding="8,0"/>
       </Grid>
-      <ListView x:Name="CurrentFileList" Grid.Row="1" ItemsSource="{x:Bind ViewModel.VisibleFiles}" SelectionMode="Multiple" SelectionChanged="Files_SelectionChanged" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}">
-       <ListView.ItemTemplate><DataTemplate x:DataType="vm:RestoreFileDisplayItem"><StackPanel Padding="4"><TextBlock Text="{x:Bind OriginalRelPath}" TextWrapping="Wrap" ToolTipService.ToolTip="{x:Bind OriginalRelPath}"/><TextBlock Text="{x:Bind FormattedSize}" FontSize="11"/></StackPanel></DataTemplate></ListView.ItemTemplate>
-      </ListView>
-     </Grid>
-    </PivotItem>
-    <PivotItem Header="恢复历史版本">
-     <Grid RowSpacing="6"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <CalendarDatePicker Date="{x:Bind ViewModel.HistoryDate, Mode=TwoWay}" PlaceholderText="按日期筛选（可清除）"/>
-      <ListView x:Name="HistoryFileList" Grid.Row="1" ItemsSource="{x:Bind ViewModel.VisibleHistory}" SelectionMode="Multiple" SelectionChanged="History_SelectionChanged" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}">
-       <ListView.ItemTemplate><DataTemplate x:DataType="vm:RestoreHistoryDisplayItem"><StackPanel Padding="4"><TextBlock Text="{x:Bind DisplayPath}" TextWrapping="Wrap" ToolTipService.ToolTip="{x:Bind DisplayPath}"/><StackPanel Orientation="Horizontal" Spacing="10"><TextBlock Text="{x:Bind ArchivedAt}" FontSize="11"/><TextBlock Text="{x:Bind Reason}" FontSize="11"/><TextBlock Text="{x:Bind Size}" FontSize="11"/></StackPanel></StackPanel></DataTemplate></ListView.ItemTemplate>
-      </ListView>
-     </Grid>
-    </PivotItem>
-   </Pivot>
+     </DataTemplate></ListView.ItemTemplate>
+    </ListView>
+    <TextBlock Text="{x:Bind ViewModel.BrowserMessage, Mode=OneWay}" Visibility="{x:Bind ViewModel.ShowBrowserMessage, Mode=OneWay}" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"/>
+   </Grid>
+   <StackPanel Grid.Row="3" Spacing="4" Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay}">
+    <TextBlock Text="{x:Bind ViewModel.HistoryCaption, Mode=OneWay}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind ViewModel.HistoryCaption, Mode=OneWay}"/>
+    <ListView x:Name="HistoryFileList" MaxHeight="108" ItemsSource="{x:Bind ViewModel.VisibleHistory}" SelectedItem="{x:Bind ViewModel.SelectedHistory, Mode=TwoWay}"
+              SelectionMode="Single" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" AutomationProperties.Name="文件历史版本">
+     <ListView.ItemTemplate><DataTemplate x:DataType="vm:RestoreHistoryDisplayItem"><StackPanel Orientation="Horizontal" Spacing="12" Padding="4">
+      <TextBlock Text="{x:Bind ArchivedAt}"/><TextBlock Text="{x:Bind Reason}"/><TextBlock Text="{x:Bind Size}"/>
+     </StackPanel></DataTemplate></ListView.ItemTemplate>
+    </ListView>
+   </StackPanel>
   </Grid>
   <Border Grid.Row="3" Padding="12,8" CornerRadius="8" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
    <StackPanel Spacing="6">
@@ -53,11 +83,18 @@
     </Grid>
     <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <ComboBox SelectedIndex="{x:Bind ViewModel.ConflictPolicyIndex, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"><ComboBoxItem Content="同名文件跳过"/><ComboBoxItem Content="覆盖同名文件（需要确认）"/><ComboBoxItem Content="保留两份，自动改名"/></ComboBox>
-     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
-      <Button Content="取消" Command="{x:Bind ViewModel.CancelRestoreCommand}" Visibility="{x:Bind ViewModel.IsRestoring, Mode=OneWay}"/>
-      <StackPanel x:Name="CurrentRestoreActions" Orientation="Horizontal" Spacing="8"><Button x:Name="RetryRestoreButton" Content="重试失败文件" Click="BeginRestore_Click" IsEnabled="{x:Bind ViewModel.CanRetryCurrentRestore, Mode=OneWay}"/><Button Content="{x:Bind ViewModel.CurrentRestoreLabel, Mode=OneWay}" Click="BeginRestore_Click" Style="{ThemeResource AccentButtonStyle}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"/></StackPanel>
+     <Button Grid.Column="1" Content="取消恢复" Command="{x:Bind ViewModel.CancelRestoreCommand}" Visibility="{x:Bind ViewModel.IsRestoring, Mode=OneWay}"/>
+    </Grid>
+    <Grid ColumnSpacing="8">
+     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+     <TextBlock Text="{x:Bind ViewModel.SelectionSummary, Mode=OneWay}" VerticalAlignment="Center" Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}"/>
+     <StackPanel x:Name="CurrentRestoreActions" Grid.Column="1" Orientation="Horizontal" Spacing="8" Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}">
+      <Button x:Name="RetryRestoreButton" Content="重试失败文件" Click="BeginRestore_Click" Visibility="{x:Bind ViewModel.CanRetryCurrentRestore, Mode=OneWay}"/>
+      <Button x:Name="RestoreEntireButton" Content="恢复整个备份" Click="BeginRestore_Click" IsEnabled="{x:Bind ViewModel.CanRestoreEntireBackup, Mode=OneWay}"/>
+      <Button Content="恢复所选" Click="BeginRestore_Click" Style="{ThemeResource AccentButtonStyle}" IsEnabled="{x:Bind ViewModel.CanRestoreSelection, Mode=OneWay}"/>
      </StackPanel>
-      <Button x:Name="HistoryRestoreAction" Grid.Column="1" Content="{x:Bind ViewModel.HistoryRestoreLabel, Mode=OneWay}" Visibility="Collapsed" Click="BeginRestore_Click" Style="{ThemeResource AccentButtonStyle}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"/>
+     <Button x:Name="HistoryRestoreAction" Grid.Column="1" Content="恢复所选版本" Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay}"
+             Click="BeginRestore_Click" Style="{ThemeResource AccentButtonStyle}" IsEnabled="{x:Bind ViewModel.CanRestoreHistory, Mode=OneWay}"/>
     </Grid>
     <ProgressBar Value="{x:Bind ViewModel.RestoreProgress, Mode=OneWay}" Height="4"/>
     <TextBlock Text="{x:Bind ViewModel.RestoreStatusText, Mode=OneWay}" FontSize="12" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind ViewModel.RestoreStatusText, Mode=OneWay}"/>

@@ -74,20 +74,26 @@ namespace FNSyncPlus.WinUI.ViewModels
         private double _restoreProgress = 0;
 
         [ObservableProperty]
-        private string _restoreStatusText = "请点击上方按钮检索 NAS 备份包";
+        private string _restoreStatusText = "";
 
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(CanConfigureRestore))]
+        [NotifyPropertyChangedFor(nameof(CanRestoreSelection))]
+        [NotifyPropertyChangedFor(nameof(CanRestoreEntireBackup))]
+        [NotifyPropertyChangedFor(nameof(CanRestoreHistory))]
         [NotifyPropertyChangedFor(nameof(CanRetryCurrentRestore))]
         private bool _isRestoring = false;
 
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(CanConfigureRestore))]
+        [NotifyPropertyChangedFor(nameof(CanRestoreSelection))]
+        [NotifyPropertyChangedFor(nameof(CanRestoreEntireBackup))]
+        [NotifyPropertyChangedFor(nameof(CanRestoreHistory))]
         [NotifyPropertyChangedFor(nameof(CanRetryCurrentRestore))]
         private bool _isScanning = false;
 
         public bool CanConfigureRestore => !IsRestoring && !IsScanning;
-        public bool CanRetryCurrentRestore => CanConfigureRestore && HasFailedFiles && _retryContext is { } retry &&
+        public bool CanRetryCurrentRestore => PreviewUsable && HasFailedFiles && _retryContext is { } retry &&
             retry.Package == SelectedPackage && retry.Target == LocalRestoreTarget && retry.Policy == ConflictPolicyIndex &&
             FailedFilesList.Count > 0 && _connectionService.IsConnected;
 
@@ -119,16 +125,25 @@ namespace FNSyncPlus.WinUI.ViewModels
         public RestoreViewModel(RestoreEngine restoreEngine, AppSettings settings, NasConnectionService connectionService)
         {
             _restoreEngine = restoreEngine;
-            PackageFiles.CollectionChanged += (_, _) => { if (!_buildingPreview) RefreshFileViews(); };
-            HistoryFilesList.CollectionChanged += (_, _) => { if (!_buildingPreview) RefreshFileViews(); };
             _settings = settings;
             LocalRestoreTarget = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "FN-Restore-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
             _connectionService = connectionService;
 
             _connectionService.PropertyChanged += (sender, args) =>
             {
-                if (args.PropertyName == nameof(NasConnectionService.State) && _connectionService.IsConnected && DiscoveredPackages.Count == 0)
-                    UIThreadHelper.RunOnUIThread(async () => await LoadKnownBackupsAsync());
+                if (args.PropertyName == nameof(NasConnectionService.State))
+                    UIThreadHelper.RunOnUIThread(async () =>
+                    {
+                        if (!_connectionService.IsConnected)
+                        {
+                            _connectionEpoch++;
+                            _restoreCancellation?.Cancel();
+                            SelectedPackage = null;
+                            DiscoveredPackages.Clear();
+                            NotifyPreviewChanged();
+                        }
+                        else if (DiscoveredPackages.Count == 0) await LoadKnownBackupsAsync();
+                    });
                 if (args.PropertyName == nameof(NasConnectionService.CurrentStorageProvider) &&
                     _connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
                 {
@@ -154,42 +169,166 @@ namespace FNSyncPlus.WinUI.ViewModels
         }
 
         private bool _buildingPreview;
+        private bool _previewReady;
+        private bool _previewFailed;
         private int _previewGeneration;
-        [ObservableProperty] private bool _otherLocationsExpanded;
-        public ObservableCollection<RestoreFileDisplayItem> VisibleFiles { get; } = new();
+        private int _connectionEpoch;
+        private CancellationTokenSource? _previewCancellation;
+        private RestoreBrowserItem _latestRoot = new("备份", null, true);
+        private RestoreBrowserItem _historyRoot = new("备份", null, true);
+        private RestoreBrowserItem? _folder;
+        private RestoreBrowserItem? _historyFile;
+        private ILookup<string, RestoreHistoryDisplayItem>? _versions;
+        private readonly HashSet<RestoreBrowserItem> _checked = new();
+
+        public ObservableCollection<RestoreBrowserItem> BrowserItems { get; } = new();
+        public ObservableCollection<RestoreBrowserItem> Breadcrumbs { get; } = new();
         public ObservableCollection<RestoreHistoryDisplayItem> VisibleHistory { get; } = new();
-        public ObservableCollection<string> Folders { get; } = new();
-        public HashSet<string> SelectedCurrentPaths { get; } = new(StringComparer.Ordinal);
-        public HashSet<RestoreHistoryDisplayItem> SelectedHistoryItems { get; } = new();
-        public string HistoryRestoreLabel => $"恢复所选 {SelectedHistoryItems.Count} 条历史版本";
-        public void NotifyHistorySelection() => OnPropertyChanged(nameof(HistoryRestoreLabel));
-        public bool RefreshingViews { get; private set; }
-        public string CurrentRestoreLabel => SelectedCurrentPaths.Count > 0 ? $"恢复所选 {SelectedCurrentPaths.Count} 个文件" : "恢复全部最新文件";
-        public void NotifySelectionChanged() => OnPropertyChanged(nameof(CurrentRestoreLabel));
+        private bool PreviewUsable => CanConfigureRestore && _previewReady && _connectionService.IsConnected && SelectedPackage != null;
+        public bool CanRestoreSelection => PreviewUsable && _checked.Any(item => item.OriginalPath != null);
+        public bool CanRestoreEntireBackup => PreviewUsable && _latestRoot.Children.Count > 0;
+        public bool CanRestoreHistory => PreviewUsable && SelectedHistory != null && VisibleHistory.Contains(SelectedHistory);
+        public bool CanGoUp => _folder?.Parent != null;
+        public bool IsSearching => !string.IsNullOrWhiteSpace(SearchText);
+        public bool ShowBrowserMessage => BrowserItems.Count == 0;
+        public string BrowserMessage => _buildingPreview || IsScanning ? "正在读取备份…"
+            : _previewFailed ? "无法读取备份，请刷新后重试。"
+            : !_previewReady ? (_connectionService.IsConnected ? "请选择备份。" : "NAS 未连接，请先连接设备。")
+            : IsSearching ? "未找到匹配的文件或文件夹。"
+            : IsHistoryMode ? "这里没有历史版本。" : "此文件夹为空。";
+        public string SelectionSummary => $"已选 {_checked.Count(item => !item.IsFolder)} 个文件、{_checked.Count(item => item.IsFolder && item.Children.Count == 0)} 个空文件夹";
+        public string HistoryCaption => _historyFile == null ? "选择文件查看历史版本" : _historyFile.DisplayPath;
+        public string[] SelectedFilePaths => _checked.Where(item => !item.IsFolder).Select(item => item.OriginalPath!).ToArray();
+        public string[] SelectedDirectoryPaths => _checked.Where(item => item.IsFolder && item.OriginalPath != null).Select(item => item.OriginalPath!).ToArray();
+
         [ObservableProperty] private string _searchText = "";
-        [ObservableProperty] private string _currentFolder = "";
-        [ObservableProperty] private DateTimeOffset? _historyDate;
+        [ObservableProperty] private bool _isHistoryMode;
         partial void OnSearchTextChanged(string value) => RefreshFileViews();
-        partial void OnCurrentFolderChanged(string value) => RefreshFileViews();
-        partial void OnHistoryDateChanged(DateTimeOffset? value) => RefreshFileViews();
+        partial void OnIsHistoryModeChanged(bool value) => OpenFolder(value ? _historyRoot : _latestRoot);
+        partial void OnSelectedHistoryChanged(RestoreHistoryDisplayItem? value) => OnPropertyChanged(nameof(CanRestoreHistory));
+        partial void OnIsScanningChanged(bool value) => OnPropertyChanged(nameof(BrowserMessage));
+
+        private void NotifyPreviewChanged()
+        {
+            OnPropertyChanged(nameof(BrowserMessage));
+            OnPropertyChanged(nameof(ShowBrowserMessage));
+            OnPropertyChanged(nameof(CanRestoreSelection));
+            OnPropertyChanged(nameof(CanRestoreEntireBackup));
+            OnPropertyChanged(nameof(CanRestoreHistory));
+            OnPropertyChanged(nameof(CanRetryCurrentRestore));
+            OnPropertyChanged(nameof(SelectionSummary));
+        }
+
+        private static void AddBrowserPath(RestoreBrowserItem root, string rawPath, bool directory)
+        {
+            // Hierarchy is keyed by the original path segments. Formatting each label must not
+            // merge differently encoded paths or replace the identity sent to the restore engine.
+            var segments = (RestoreDisplayText.OriginalPath(rawPath) == rawPath ? rawPath.Replace('\\', '/') : rawPath)
+                .Split('/', StringSplitOptions.RemoveEmptyEntries);
+            var parent = root;
+            for (int i = 0; i < segments.Length; i++)
+            {
+                bool leaf = i == segments.Length - 1;
+                string part = segments[i];
+                bool folder = !leaf || directory;
+                string key = (folder ? "D:" : "F:") + part;
+                if (!parent.Children.TryGetValue(key, out var child))
+                    parent.Children.Add(key, child = new(part, parent, folder));
+                parent = child;
+                if (leaf) parent.OriginalPath = rawPath;
+            }
+        }
+
+        private void BuildBrowser(IEnumerable<string> directories)
+        {
+            string name = SelectedPackage?.PackageName ?? "备份";
+            _latestRoot = new(name, null, true);
+            _historyRoot = new(name, null, true);
+            foreach (var path in directories) AddBrowserPath(_latestRoot, path, directory: true);
+            foreach (var file in PackageFiles) AddBrowserPath(_latestRoot, file.OriginalPath, directory: false);
+            _versions = HistoryFilesList.ToLookup(item => item.Entry.OriginalRel, StringComparer.Ordinal);
+            foreach (var group in _versions) AddBrowserPath(_historyRoot, group.Key, directory: false);
+            OpenFolder(IsHistoryMode ? _historyRoot : _latestRoot);
+        }
+
+        public void OpenFolder(RestoreBrowserItem item)
+        {
+            if (!item.IsFolder) return;
+            _folder = item;
+            SetHistoryFile(null);
+            if (SearchText.Length > 0) SearchText = "";
+            else RefreshFileViews();
+        }
+
+        public void SetHistoryFile(RestoreBrowserItem? file)
+        {
+            _historyFile = file;
+            SelectedHistory = null;
+            VisibleHistory.Clear();
+            if (file?.OriginalPath is string path && _versions != null)
+                foreach (var version in _versions[path]) VisibleHistory.Add(version);
+            OnPropertyChanged(nameof(HistoryCaption));
+        }
+
         public void RefreshFileViews()
         {
-            RefreshingViews = true;
-            VisibleFiles.Clear(); VisibleHistory.Clear(); Folders.Clear();
-            string prefix = string.IsNullOrEmpty(CurrentFolder) ? "" : CurrentFolder.TrimEnd('/') + "/";
-            foreach (var file in PackageFiles.Where(f => f.OriginalRelPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+            BrowserItems.Clear();
+            Breadcrumbs.Clear();
+            var folder = _folder ?? (IsHistoryMode ? _historyRoot : _latestRoot);
+            var trail = new Stack<RestoreBrowserItem>();
+            for (var item = folder; item != null; item = item.Parent) trail.Push(item);
+            foreach (var item in trail) Breadcrumbs.Add(item);
+
+            var query = SearchText.Trim();
+            var root = IsHistoryMode ? _historyRoot : _latestRoot;
+            var rows = IsSearching ? root.Descendants().Skip(1).Where(item => item.DisplayPath.Contains(query, StringComparison.OrdinalIgnoreCase))
+                : folder.Children.Values;
+            foreach (var item in rows.OrderByDescending(item => item.IsFolder).ThenBy(item => item.Name, StringComparer.CurrentCultureIgnoreCase))
             {
-                string rest = file.OriginalRelPath[prefix.Length..];
-                int slash = rest.IndexOf('/');
-                if (slash >= 0 && !Folders.Contains(prefix + rest[..slash])) Folders.Add(prefix + rest[..slash]);
-                if ((slash < 0 || SearchText.Length > 0) && file.OriginalRelPath.Contains(SearchText, StringComparison.OrdinalIgnoreCase)) VisibleFiles.Add(file);
+                item.CanCheck = !IsHistoryMode;
+                item.ShowLocation = IsSearching && item.Parent?.Parent != null;
+                BrowserItems.Add(item);
             }
-            foreach (var file in HistoryFilesList.Where(f => f.DisplayPath.Contains(SearchText, StringComparison.OrdinalIgnoreCase) &&
-                (!HistoryDate.HasValue || f.Entry.ArchivedAt.ToLocalTime().Date == HistoryDate.Value.Date))) VisibleHistory.Add(file);
-            RefreshingViews = false;
-            NotifySelectionChanged();
+            OnPropertyChanged(nameof(CanGoUp));
+            OnPropertyChanged(nameof(IsSearching));
+            NotifyPreviewChanged();
         }
-        [RelayCommand] private void FolderUp() { int slash = CurrentFolder.LastIndexOf('/'); CurrentFolder = slash < 0 ? "" : CurrentFolder[..slash]; }
+
+        public void ToggleSelection(RestoreBrowserItem item)
+        {
+            bool select = item.IsChecked != true;
+            foreach (var child in item.Descendants()) SetChecked(child, select);
+            for (var folder = item.Parent; folder?.Parent != null; folder = folder.Parent)
+            {
+                bool? state = folder.Children.Values.All(child => child.IsChecked == true) ? true
+                    : folder.Children.Values.All(child => child.IsChecked == false) ? false : null;
+                SetChecked(folder, state);
+            }
+            NotifyPreviewChanged();
+        }
+
+        private void SetChecked(RestoreBrowserItem item, bool? value)
+        {
+            item.IsChecked = value;
+            if (value == true) _checked.Add(item);
+            else _checked.Remove(item);
+        }
+
+        [RelayCommand] private void FolderUp() { if (_folder?.Parent is { } parent) OpenFolder(parent); }
+
+        internal void LoadVisualFixture(bool history)
+        {
+            _buildingPreview = false;
+            _previewReady = true;
+            foreach (var path in new[] { "子目录/文件A.xlsx", "子目录/文件B.xlsx", "普通/文件C.xlsx", "普通/文件D.xlsx", "版本/二级/文件E.xlsx" })
+                PackageFiles.Add(new() { OriginalPath = path, OriginalRelPath = path, Size = 1 });
+            HistoryFilesList.Add(new(new ManifestHistoryEntry { OriginalRel = "普通/文件C.xlsx", ArchivedAt = DateTimeOffset.Now, Reason = "superseded", Size = 1 }));
+            HistoryFilesList.Add(new(new ManifestHistoryEntry { OriginalRel = @"普通/\u7248\u672c\u8bf4\u660e.txt", ArchivedAt = DateTimeOffset.Now.AddDays(-1), Reason = "renamed", Size = 1 }));
+            BuildBrowser(Array.Empty<string>());
+            IsHistoryMode = history;
+            if (history) SetHistoryFile(_historyRoot.Descendants().First(item => !item.IsFolder));
+        }
+
         private async Task<INasStorageProvider> ProviderForPackageAsync(DiscoveredBackupPackage package) =>
             package.NasFolderUnc.StartsWith(@"\\") ? await _connectionService.ConnectTeamShareAsync(package.NasFolderUnc) :
             _connectionService.CurrentStorageProvider ?? throw new IOException("请先连接 NAS。");
@@ -197,12 +336,16 @@ namespace FNSyncPlus.WinUI.ViewModels
         {
             if (!CanConfigureRestore) return;
             if (!_connectionService.IsConnected) { RestoreStatusText = "请先连接 NAS，再刷新备份。"; return; }
+            var epoch = _connectionEpoch;
             IsScanning = true;
+            SelectedPackage = null;
             try
             {
                 DiscoveredPackages.Clear();
                 foreach (var task in _settings.Tasks.Where(t => t.NasUsername == _connectionService.Username &&
-                    (!t.NasAccountUid.HasValue || t.NasAccountUid == _connectionService.CurrentUid)).ToArray())
+                    (!t.NasAccountUid.HasValue || t.NasAccountUid == _connectionService.CurrentUid) &&
+                    (string.IsNullOrWhiteSpace(t.NasDeviceId) || _connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider device &&
+                        device.MatchesServerAddress(t.NasDeviceId))).ToArray())
                 {
                     try
                     {
@@ -213,12 +356,14 @@ namespace FNSyncPlus.WinUI.ViewModels
                             found = await _restoreEngine.DiscoverBackupPackagesAsync(task.DestinationFolder);
                         }
                         else found = await _restoreEngine.DiscoverBackupPackagesAsync(_connectionService.CurrentStorageProvider!, task.DestinationFolder);
+                        if (epoch != _connectionEpoch) return;
                         foreach (var package in found.Where(p => !DiscoveredPackages.Any(x => x.NasFolderUnc == p.NasFolderUnc))) DiscoveredPackages.Add(package);
                     }
                     catch (Exception ex) { App.LogCrashException(ex, "Restore.LoadKnownBackup"); RestoreLogs.Add("有备份暂时无法读取，请检查连接与权限。"); }
                 }
+                if (epoch != _connectionEpoch) return;
                 SelectedPackage = DiscoveredPackages.FirstOrDefault();
-                RestoreStatusText = DiscoveredPackages.Count > 0 ? "请选择备份和要恢复的内容。" : "未找到可用备份，可浏览其他备份位置。";
+                if (SelectedPackage == null) RestoreStatusText = "未找到可用备份，可浏览其他备份位置。";
             }
             finally { IsScanning = false; }
         }
@@ -227,13 +372,16 @@ namespace FNSyncPlus.WinUI.ViewModels
         public async Task ScanPackagesAsync()
         {
             if (!CanConfigureRestore) return;
+            if (!_connectionService.IsConnected) { RestoreStatusText = "请先连接 NAS。"; return; }
             if (string.IsNullOrWhiteSpace(NasScanRoot))
             {
                 RestoreStatusText = "请输入有效的 NAS 扫描根目录。";
                 return;
             }
 
+            var epoch = _connectionEpoch;
             IsScanning = true;
+            SelectedPackage = null;
             RestoreStatusText = "正在从 NAS 备份根目录检索备份包清单...";
             DetailedErrorMessage = string.Empty;
             DiscoveredPackages.Clear();
@@ -256,6 +404,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                     packages = await _restoreEngine.DiscoverBackupPackagesAsync(NasScanRoot.Trim(), warnings: scanWarnings);
                 }
 
+                if (epoch != _connectionEpoch) return;
                 foreach (var p in packages)
                 {
                     DiscoveredPackages.Add(p);
@@ -288,73 +437,84 @@ namespace FNSyncPlus.WinUI.ViewModels
             }
         }
 
-        partial void OnSelectedPackageChanged(DiscoveredBackupPackage? value)
-        {
-            SelectedCurrentPaths.Clear(); SelectedHistoryItems.Clear(); NotifyHistorySelection();
-            CurrentFolder = "";
-            SelectedHistory = null;
-            if (value != null) OtherLocationsExpanded = false;
-            FailedFilesList.Clear();
-            HasFailedFiles = false;
-            LoadPackagePreview(value);
-        }
+        partial void OnSelectedPackageChanged(DiscoveredBackupPackage? value) => _ = LoadPackagePreview(value);
 
-        private async void LoadPackagePreview(DiscoveredBackupPackage? pkg)
+        private async Task LoadPackagePreview(DiscoveredBackupPackage? package)
         {
             int generation = ++_previewGeneration;
+            _previewCancellation?.Cancel();
+            _previewCancellation = null;
+            _previewReady = false;
+            _previewFailed = false;
+            _buildingPreview = package != null;
+            _checked.Clear();
+            _retryContext = null;
+            FailedFilesList.Clear();
+            HasFailedFiles = false;
+            RestoreProgress = 0;
+            RestoredFilesCount = SkippedFilesCount = FailedFilesCount = IntegrityVerifiedCount = 0;
+            DetailedErrorMessage = "";
+            RestoreStatusText = "";
             PackageFiles.Clear();
             HistoryFilesList.Clear();
-            RefreshFileViews();
-            if (pkg == null) return;
-            _buildingPreview = true;
+            BuildBrowser(Array.Empty<string>());
+            if (package == null) return;
 
+            using var cancellation = new CancellationTokenSource();
+            _previewCancellation = cancellation;
             try
             {
-                List<RestorePreviewItem> files;
-                var historyItems = new List<ManifestHistoryEntry>();
-                var provider = await ProviderForPackageAsync(pkg);
-                var manifest = await _restoreEngine.ReadPackageManifestAsync(provider, pkg);
-                if (generation != _previewGeneration || SelectedPackage != pkg) return;
+                var provider = await ProviderForPackageAsync(package);
+                var manifest = await _restoreEngine.ReadPackageManifestAsync(provider, package, cancellation.Token);
+                if (generation != _previewGeneration || !_connectionService.IsConnected) return;
                 if (manifest.IsNew) throw new InvalidDataException("备份已不存在，请刷新。");
-                files = manifest.Files.Select(f => new RestorePreviewItem { OriginalRelPath = f.OriginalRel,
-                    StoredRelPath = f.StoredRel, Size = f.Size, IsLongName = f.IsLongName, Sha256 = f.Sha256, ModTime = f.ModTimeIso }).ToList();
-                if (manifest.History != null) historyItems.AddRange(manifest.History);
 
-                if (!ReferenceEquals(SelectedPackage, pkg)) return;
-                foreach (var history in historyItems.OrderByDescending(h => h.ArchivedAt)) HistoryFilesList.Add(new RestoreHistoryDisplayItem(history));
-
-                foreach (var f in files)
-                {
-                    PackageFiles.Add(new RestoreFileDisplayItem
+                foreach (var history in (manifest.History ?? new List<ManifestHistoryEntry>()).OrderByDescending(item => item.ArchivedAt))
+                    HistoryFilesList.Add(new(history));
+                foreach (var file in manifest.Files)
+                    PackageFiles.Add(new()
                     {
-                        OriginalPath = f.OriginalRelPath,
-                        OriginalRelPath = RestoreDisplayText.OriginalPath(f.OriginalRelPath),
-                        StoredRelPath = f.StoredRelPath,
-                        Size = f.Size,
-                        IsLongName = f.IsLongName,
-                        Sha256 = f.Sha256
+                        OriginalPath = file.OriginalRel,
+                        OriginalRelPath = RestoreDisplayText.OriginalPath(file.OriginalRel),
+                        StoredRelPath = file.StoredRel,
+                        Size = file.Size,
+                        IsLongName = file.IsLongName,
+                        Sha256 = file.Sha256
                     });
-                }
+                BuildBrowser(manifest.Directories.Select(item => item.OriginalRel));
+                _previewReady = true;
             }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
             catch (Exception ex)
             {
-                if (!ReferenceEquals(SelectedPackage, pkg)) return;
+                if (generation != _previewGeneration) return;
                 DetailedErrorMessage = ex.ToString();
-                RestoreStatusText = "备份清单读取失败；悬停查看原因。";
+                PackageFiles.Clear();
+                HistoryFilesList.Clear();
+                BuildBrowser(Array.Empty<string>());
+                _previewFailed = _connectionService.IsConnected;
             }
-            finally { if (generation == _previewGeneration) { _buildingPreview = false; RefreshFileViews(); } }
+            finally
+            {
+                if (generation == _previewGeneration)
+                {
+                    _previewCancellation = null;
+                    _buildingPreview = false;
+                    NotifyPreviewChanged();
+                }
+            }
         }
 
-        [RelayCommand]
-        public async Task ExecuteRestoreAsync()
+        public async Task ExecuteRestoreAsync(bool entireBackup = false)
         {
-            if (!CanConfigureRestore) return;
-            if (SelectedPackage == null) { RestoreStatusText = "请先检索并选择备份。"; return; }
+            if (entireBackup ? !CanRestoreEntireBackup : !CanRestoreSelection) return;
+            var files = SelectedFilePaths;
+            var directories = SelectedDirectoryPaths;
             if (string.IsNullOrWhiteSpace(LocalRestoreTarget)) { RestoreStatusText = "请选择还原到本地的目标文件夹。"; return; }
 
             using var cancellation = new CancellationTokenSource();
             _restoreCancellation = cancellation;
-            var package = SelectedPackage;
+            var package = SelectedPackage!;
             var destination = LocalRestoreTarget;
             _retryContext = (package, destination, ConflictPolicyIndex);
             IsRestoring = true;
@@ -405,9 +565,9 @@ namespace FNSyncPlus.WinUI.ViewModels
 
                 RestoreProgressReport report;
                 var provider = await ProviderForPackageAsync(package);
-                report = SelectedCurrentPaths.Count > 0
-                    ? await _restoreEngine.RetryRestorePackageAsync(provider, package, destination, SelectedCurrentPaths.ToArray(), policy, cancellation.Token)
-                    : await _restoreEngine.RunRestorePackageAsync(provider, package, destination, policy, cancellation.Token);
+                report = entireBackup
+                    ? await _restoreEngine.RunRestorePackageAsync(provider, package, destination, policy, cancellation.Token)
+                    : await _restoreEngine.RestorePackageSelectionAsync(provider, package, destination, files, directories, policy, cancellation.Token);
 
                 UIThreadHelper.RunOnUIThread(() =>
                 {
@@ -521,12 +681,10 @@ namespace FNSyncPlus.WinUI.ViewModels
         [RelayCommand]
         public async Task RestoreHistoryAsync()
         {
-            if (!CanConfigureRestore) return;
-            if (SelectedPackage == null || SelectedHistory == null) { RestoreStatusText = "请先选择要恢复的历史版本。"; return; }
+            if (!CanRestoreHistory) return;
             if (string.IsNullOrWhiteSpace(LocalRestoreTarget)) { RestoreStatusText = "请选择还原到本地的目标文件夹。"; return; }
-            var package = SelectedPackage;
-            var histories = (SelectedHistoryItems.Count > 0 ? SelectedHistoryItems : new[] { SelectedHistory }.AsEnumerable())
-                .OrderByDescending(h => h.Entry.ArchivedAt).ToArray();
+            var package = SelectedPackage!;
+            var selected = SelectedHistory!;
             string destination = LocalRestoreTarget;
             var policy = ConflictPolicyIndex switch
             {
@@ -548,21 +706,17 @@ namespace FNSyncPlus.WinUI.ViewModels
             FailedFilesList.Clear();
             HasFailedFiles = false;
             RestoreLogs.Clear();
-            RestoreLogs.Add("所选历史版本：" + string.Join("；", histories.Select(h => h.DisplayPath + "（" + h.ArchivedAt + "）")));
+            RestoreLogs.Add($"所选历史版本：{selected.DisplayPath}（{selected.ArchivedAt}）");
             try
             {
                 var provider = await ProviderForPackageAsync(package);
-                int completed = 0;
-                foreach (var selected in histories)
-                {
-                    var report = await _restoreEngine.RestorePackageHistoryAsync(provider, package, destination, selected.Entry, policy, cancellation.Token);
-                    RestoredFilesCount += report.RestoredFiles;
-                    SkippedFilesCount += report.SkippedFiles;
-                    FailedFilesCount += report.FailedFiles;
-                    IntegrityVerifiedCount += report.IntegrityVerifiedFiles;
-                    RestoreProgress = ++completed * 100.0 / histories.Length;
-                    foreach (var item in report.FailedItems) RestoreLogs.Add($"[历史恢复失败] {RestoreDisplayText.OriginalPath(item.OriginalRel)}: {item.ErrorMessage}");
-                }
+                var report = await _restoreEngine.RestorePackageHistoryAsync(provider, package, destination, selected.Entry, policy, cancellation.Token);
+                RestoredFilesCount = report.RestoredFiles;
+                SkippedFilesCount = report.SkippedFiles;
+                FailedFilesCount = report.FailedFiles;
+                IntegrityVerifiedCount = report.IntegrityVerifiedFiles;
+                RestoreProgress = 100;
+                foreach (var item in report.FailedItems) RestoreLogs.Add($"[历史恢复失败] {RestoreDisplayText.OriginalPath(item.OriginalRel)}: {item.ErrorMessage}");
                 HasFailedFiles = FailedFilesCount > 0;
                 RestoreStatusText = $"历史恢复完成：成功 {RestoredFilesCount}，已校验 {IntegrityVerifiedCount}，跳过 {SkippedFilesCount}，失败 {FailedFilesCount}。";
                 RestoreLogs.Add(RestoreStatusText);

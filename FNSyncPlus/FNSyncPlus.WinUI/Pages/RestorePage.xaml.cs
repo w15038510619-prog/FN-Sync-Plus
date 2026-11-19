@@ -19,33 +19,62 @@ namespace FNSyncPlus.WinUI.Pages
             InitializeComponent();
             Loaded += async (_, _) => { if (!AppServices.IsUiVisualAcceptance) await ViewModel.LoadKnownBackupsAsync(); };
 
-            if (AppServices.IsUiVisualAcceptance &&
-                Array.IndexOf(Environment.GetCommandLineArgs(), "--restore-history-fixture") >= 0)
-            {
-                ViewModel.HistoryFilesList.Add(new(new FNSyncPlus.Core.Models.ManifestHistoryEntry
+            if (AppServices.IsUiVisualAcceptance)
                 {
-                    OriginalRel = "设计资料/季度报表.txt", ArchivedAt = DateTimeOffset.Now, Reason = "superseded", Size = 32
-                }));
-                ViewModel.HistoryFilesList.Add(new(new FNSyncPlus.Core.Models.ManifestHistoryEntry
-                {
-                    OriginalRel = @"项目资料/\u7248\u672c\u8bf4\u660e.txt", ArchivedAt = DateTimeOffset.Now.AddDays(-1),
-                    Reason = "renamed", Size = 24
-                }));
-                RestoreTabs.SelectedIndex = 1;
+                bool history = Environment.GetCommandLineArgs().Contains("--restore-history-fixture");
+                ViewModel.LoadVisualFixture(history);
+                if (history) RestoreMode.SelectedItem = RestoreMode.Items[1];
             }
         }
 
-        private void RestoreTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        private void RestoreMode_SelectionChanged(SelectorBar sender, SelectorBarSelectionChangedEventArgs args) =>
+            ViewModel.IsHistoryMode = sender.Items.Count > 1 && sender.SelectedItem == sender.Items[1];
+
+        private void OpenFolder_Click(object sender, RoutedEventArgs e)
         {
-            if (CurrentRestoreActions == null || sender is not Pivot pivot) return;
-            CurrentRestoreActions.Visibility = pivot.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
-            if (HistoryRestoreAction != null) HistoryRestoreAction.Visibility = pivot.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
+            if (sender is Button { Tag: RestoreBrowserItem folder }) ViewModel.OpenFolder(folder);
+        }
+
+        private void Browser_ItemClick(object sender, ItemClickEventArgs e)
+        {
+            if (ViewModel.IsHistoryMode && e.ClickedItem is RestoreBrowserItem { IsFolder: false } file)
+                ViewModel.SetHistoryFile(file);
+        }
+
+        private void BrowserRow_DoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
+        {
+            for (var element = e.OriginalSource as DependencyObject; element != null && !ReferenceEquals(element, sender);
+                element = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(element))
+            {
+                if (element is Button or CheckBox) return;
+            }
+            if (sender is FrameworkElement { DataContext: RestoreBrowserItem { IsFolder: true } folder })
+            {
+                ViewModel.OpenFolder(folder);
+                e.Handled = true;
+            }
+        }
+
+        private void Browser_KeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+        {
+            if (e.Key == Windows.System.VirtualKey.Enter &&
+                e.OriginalSource is ListViewItem { Content: RestoreBrowserItem { IsFolder: true } folder })
+            {
+                ViewModel.OpenFolder(folder);
+                e.Handled = true;
+            }
+        }
+
+        private void BrowserCheck_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is CheckBox { Tag: RestoreBrowserItem item } && !ViewModel.IsHistoryMode)
+                ViewModel.ToggleSelection(item);
         }
 
         public System.Collections.Generic.Dictionary<string, object?> VisualLayoutMetrics()
         {
-            var files = RestoreTabs.SelectedIndex == 1 ? HistoryFileList : CurrentFileList;
-            FrameworkElement action = RestoreTabs.SelectedIndex == 1 ? HistoryRestoreAction : CurrentRestoreActions;
+            var files = CurrentFileList;
+            FrameworkElement action = ViewModel.IsHistoryMode ? HistoryRestoreAction : CurrentRestoreActions;
             double bottom = action.TransformToVisual(this).TransformPoint(new Windows.Foundation.Point(0, 0)).Y + action.ActualHeight;
             return new() { ["restore_list_height"] = files.ActualHeight, ["restore_action_height"] = action.ActualHeight,
                 ["restore_action_bottom"] = bottom, ["restore_page_height"] = ActualHeight };
@@ -53,23 +82,29 @@ namespace FNSyncPlus.WinUI.Pages
 
         private async void BeginRestore_Click(object sender, RoutedEventArgs e)
         {
-            if (_confirming || !ViewModel.CanConfigureRestore) return;
-            bool historical = RestoreTabs.SelectedIndex == 1;
+            if (_confirming) return;
+            bool historical = ReferenceEquals(sender, HistoryRestoreAction);
             bool retry = ReferenceEquals(sender, RetryRestoreButton);
-            var package = ViewModel.SelectedPackage;
+            bool entire = ReferenceEquals(sender, RestoreEntireButton);
+            bool CanStart() => historical ? ViewModel.CanRestoreHistory : retry ? ViewModel.CanRetryCurrentRestore :
+                entire ? ViewModel.CanRestoreEntireBackup : ViewModel.CanRestoreSelection;
+            if (!CanStart()) return;
+            var package = ViewModel.SelectedPackage!;
             var history = ViewModel.SelectedHistory;
             var destination = ViewModel.LocalRestoreTarget;
             int policyIndex = ViewModel.ConflictPolicyIndex;
-            var selectedCurrent = ViewModel.SelectedCurrentPaths.ToHashSet(StringComparer.Ordinal);
-            var selectedHistories = ViewModel.SelectedHistoryItems.ToHashSet();
-            if (package == null || (historical && history == null) || string.IsNullOrWhiteSpace(destination))
+            var selectedFiles = ViewModel.SelectedFilePaths.ToHashSet(StringComparer.Ordinal);
+            var selectedFolders = ViewModel.SelectedDirectoryPaths.ToHashSet(StringComparer.Ordinal);
+            if (string.IsNullOrWhiteSpace(destination))
             {
-                ViewModel.RestoreStatusText = "请选择要恢复的版本和本地目标文件夹。";
+                ViewModel.RestoreStatusText = "请选择本地目标文件夹。";
                 return;
             }
 
-            string version = historical ? "历史版本\n" + string.Join("\n", ViewModel.SelectedHistoryItems.Select(h => h.DisplayPath + " · " + h.ArchivedAt)) :
+            string version = historical ? $"{history!.DisplayPath}\n{history.ArchivedAt} · {history.Reason}" :
                 $"当前备份 · {package.LastUpdated.ToLocalTime():yyyy-MM-dd HH:mm:ss}";
+            string scope = historical ? "" : entire ? $"整个备份（{ViewModel.PackageFiles.Count} 个文件及所有文件夹）" :
+                retry ? $"失败的 {ViewModel.FailedFilesList.Count} 个文件" : ViewModel.SelectionSummary;
             string conflict = policyIndex switch
             {
                 1 => "覆盖已存在的同名文件",
@@ -78,7 +113,7 @@ namespace FNSyncPlus.WinUI.Pages
             };
             var detail = new TextBlock
             {
-                Text = $"{version}\n{(historical ? "" : ViewModel.CurrentRestoreLabel)}\n{string.Join("\n", ViewModel.SelectedCurrentPaths)}\n备份位置：{package.NasFolderUnc}\n恢复到：{destination}\n同名文件：{conflict}",
+                Text = $"{package.PackageName}\n{version}\n{scope}\n恢复到：{destination}\n同名文件：{conflict}",
                 TextWrapping = TextWrapping.Wrap,
                 IsTextSelectionEnabled = true
             };
@@ -87,17 +122,17 @@ namespace FNSyncPlus.WinUI.Pages
             {
                 var dialog = new ContentDialog
                 {
-                    XamlRoot = XamlRoot, Title = historical ? "确认恢复历史版本" : retry ? "确认重试当前备份" : "确认恢复当前备份",
+                    XamlRoot = XamlRoot, Title = historical ? "确认恢复历史版本" : retry ? "确认重试当前备份" : entire ? "确认恢复整个备份" : "确认恢复所选",
                     Content = new ScrollViewer { Content = detail, MaxHeight = 340 },
                     PrimaryButtonText = "开始恢复", CloseButtonText = "返回", DefaultButton = ContentDialogButton.Close
                 };
                 if (await dialog.ShowAsync() != ContentDialogResult.Primary ||
                     package != ViewModel.SelectedPackage || history != ViewModel.SelectedHistory ||
                     policyIndex != ViewModel.ConflictPolicyIndex || destination != ViewModel.LocalRestoreTarget ||
-                    !selectedCurrent.SetEquals(ViewModel.SelectedCurrentPaths) || !selectedHistories.SetEquals(ViewModel.SelectedHistoryItems)) return;
+                    !CanStart() || !selectedFiles.SetEquals(ViewModel.SelectedFilePaths) || !selectedFolders.SetEquals(ViewModel.SelectedDirectoryPaths)) return;
                 if (historical) await ViewModel.RestoreHistoryAsync();
                 else if (retry) await ViewModel.RetryFailedFilesAsync();
-                else await ViewModel.ExecuteRestoreAsync();
+                else await ViewModel.ExecuteRestoreAsync(entire);
             }
             catch (Exception ex)
             {
@@ -117,25 +152,6 @@ namespace FNSyncPlus.WinUI.Pages
             if (!string.IsNullOrWhiteSpace(selected)) { ViewModel.NasScanRoot = selected; await ViewModel.ScanPackagesAsync(); }
         }
 
-        private void Files_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (ViewModel.RefreshingViews) return;
-            foreach (RestoreFileDisplayItem file in e.RemovedItems) ViewModel.SelectedCurrentPaths.Remove(file.OriginalPath);
-            foreach (RestoreFileDisplayItem file in e.AddedItems) ViewModel.SelectedCurrentPaths.Add(file.OriginalPath);
-            ViewModel.NotifySelectionChanged();
-        }
-        private void Folder_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (sender is ComboBox combo && combo.SelectedItem is string path) ViewModel.CurrentFolder = path;
-        }
-        private void History_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (ViewModel.RefreshingViews) return;
-            foreach (RestoreHistoryDisplayItem item in e.RemovedItems) ViewModel.SelectedHistoryItems.Remove(item);
-            foreach (RestoreHistoryDisplayItem item in e.AddedItems) ViewModel.SelectedHistoryItems.Add(item);
-            ViewModel.SelectedHistory = ViewModel.SelectedHistoryItems.FirstOrDefault();
-            ViewModel.NotifyHistorySelection();
-        }
         private async void Details_Click(object sender, RoutedEventArgs e)
         {
             var text = string.Join("\n\n", System.Linq.Enumerable.Select(ViewModel.PackageFiles,

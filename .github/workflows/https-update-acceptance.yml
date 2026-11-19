@@ -48,7 +48,7 @@ jobs:
           $timeout = if ("${{ inputs.prepare_timeout_sec }}" -ne "") { [int]"${{ inputs.prepare_timeout_sec }}" } else { 300 }
           $work = Join-Path $PWD '.acceptance\online-beta-ci'
           $versions = @('0.4.1','0.4.2','0.4.3')
-          if ('${{ matrix.channel }}' -eq 'stable') { $versions = @('0.4.3','0.4.4','0.4.5') }
+          if ('${{ matrix.channel }}' -eq 'stable') { $versions = @('0.4.5','0.4.6','0.4.7') }
           $harnessArgs = @('-ExecutionPolicy','Bypass','-File','tools\acceptance\https-update-acceptance.ps1',
             '-DotnetPath','dotnet','-WorkRoot',$work,'-PrepareTimeoutSeconds',"$timeout",'-VersionA',$versions[0],
             '-VersionB',$versions[1],'-VersionC',$versions[2],'-Channel','${{ matrix.channel }}')
