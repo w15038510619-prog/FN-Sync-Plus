@@ -38,12 +38,25 @@ namespace FNSyncPlus.WinUI
 
             // The version used to be a hard-coded string, so an upgraded install kept claiming the
             // old version. It now comes from the assembly that is actually running.
-            string product = $"飞牛同步增强版 v{FNSyncPlus.Core.Updates.UpdateService.DisplayVersion}";
+            string displayVer = FNSyncPlus.Core.Updates.UpdateService.DisplayVersion;
+            string product = $"飞牛同步增强版 v{displayVer}";
             string title = AppServices.IsIsolatedTestSession
                 ? (_settings.IsVersionedBetaTestProfile ? product + " [隔离测试会话·新版配置]" : product + " [隔离测试会话]")
                 : AppServices.IsVersionedBetaSession ? product : product + " [旧版引擎·仅供诊断]";
             WindowHelper.ConfigureWindow(this, title, 1200, 780);
-            AppTitleText.Text = title;
+            AppTitleText.Text = "飞牛同步增强版";
+            ToolTipService.SetToolTip(AppTitleText, title);
+            AppVersionTag.Text = $"v{displayVer}";
+            if (AppServices.IsIsolatedTestSession)
+            {
+                SessionTagText.Text = _settings.IsVersionedBetaTestProfile ? "隔离测试·新版" : "隔离测试";
+                SessionTagPill.Visibility = Visibility.Visible;
+            }
+            else if (!AppServices.IsVersionedBetaSession)
+            {
+                SessionTagText.Text = "旧版诊断";
+                SessionTagPill.Visibility = Visibility.Visible;
+            }
             ViewModel.AppTitle = title;
             _logService.TaskLogWriteFailed += OnTaskLogWriteFailed;
             _appWindow = AppWindow.GetFromWindowId(Microsoft.UI.Win32Interop.GetWindowIdFromWindow(WindowHelper.GetHandle(this)));
@@ -51,17 +64,21 @@ namespace FNSyncPlus.WinUI
             InitializeTrayIcon();
             _appWindow.Closing += OnAppWindowClosing;
             Closed += OnWindowClosed;
+            SizeChanged += (_, _) => UpdateTitleBarPadding();
             WindowHelper.SetMicaBackdrop(this);
             SetTitleBar(AppTitleBarDragArea);
+            UpdateTitleBarPadding();
             ApplyStoredTheme();
 
             ViewModel.RequestNavigate += NavigateToTag;
             ViewModel.RequestToggleTheme += ToggleAppTheme;
+            Updates.ThemeChangedRequested += ApplyThemeExplicit;
             ViewModel.PropertyChanged += (s, e) =>
             {
                 Helpers.UIThreadHelper.RunOnUIThread(() =>
                 {
-                    if (e.PropertyName == nameof(MainViewModel.IsNasConnected))
+                    if (e.PropertyName == nameof(MainViewModel.IsNasConnected) ||
+                        e.PropertyName == nameof(MainViewModel.ConnectionState))
                     {
                         UpdateNasDot();
                     }
@@ -124,6 +141,11 @@ namespace FNSyncPlus.WinUI
                         stepApplied = true;
                         await System.Threading.Tasks.Task.Delay(300);
                         var wizardVm = AppServices.GetService<AddFolderWizardViewModel>();
+                        if (AppServices.IsUiVisualAcceptance)
+                        {
+                            wizardVm.LoadVisualFixture(wizardStep);
+                            return;
+                        }
                         if (wizardVm.SelectedLocalFolders.Count == 0)
                         {
                             wizardVm.AddLocalFolder(@"D:\FNSync_GUI_Test_Folders\Project_Alpha");
@@ -311,6 +333,7 @@ namespace FNSyncPlus.WinUI
         private void OnWindowClosed(object sender, WindowEventArgs args)
         {
             _logService.TaskLogWriteFailed -= OnTaskLogWriteFailed;
+            Updates.ThemeChangedRequested -= ApplyThemeExplicit;
             try
             {
                 _trayIcon?.Dispose();
@@ -395,7 +418,10 @@ namespace FNSyncPlus.WinUI
                     metrics["caption_foreground"] = caption.HasValue ? $"{caption.Value.R:X2}{caption.Value.G:X2}{caption.Value.B:X2}" : "default";
                     metrics["caption_inactive_foreground"] = inactive.HasValue ? $"{inactive.Value.R:X2}{inactive.Value.G:X2}{inactive.Value.B:X2}" : "default";
                     UiVisualSignal.ReportPageReady(tag, metrics);
-
+                    if (Array.IndexOf(Environment.GetCommandLineArgs(), "--show-help-fixture") >= 0 && page is Page helpPage)
+                    {
+                        _ = PageHelp.For(helpPage).ShowAsync();
+                    }
                 }
                 catch (Exception ex) { App.LogCrashException(ex, "MainWindow.VisualPageReady"); }
             }));
@@ -414,6 +440,22 @@ namespace FNSyncPlus.WinUI
             page.Loaded += once;
         }
 
+        private void UpdateTitleBarPadding()
+        {
+            try
+            {
+                double scale = Content?.XamlRoot?.RasterizationScale ?? 1.0;
+                double rightInset = _appWindow.TitleBar.RightInset > 0
+                    ? _appWindow.TitleBar.RightInset / Math.Max(1.0, scale)
+                    : 144.0;
+                AppTitleBar.Padding = new Thickness(14, 0, Math.Max(144.0, rightInset + 8), 0);
+            }
+            catch
+            {
+                AppTitleBar.Padding = new Thickness(14, 0, 148, 0);
+            }
+        }
+
         /// <summary>
         /// Applies the theme the user saved last time. The setting used to be written but never read,
         /// so a dark-mode user got a light window on every launch until they toggled it again.
@@ -423,9 +465,8 @@ namespace FNSyncPlus.WinUI
             try
             {
                 bool dark = string.Equals(_settings.AppTheme, "Dark", StringComparison.OrdinalIgnoreCase);
-                if (Content is FrameworkElement root) root.RequestedTheme = dark ? ElementTheme.Dark : ElementTheme.Light;
-                WindowHelper.ApplyCaptionTheme(this, dark);
-                IconThemeToggle.Glyph = dark ? "\uE706" : "\uE708";
+                ApplyThemeVisuals(dark);
+                Updates.SyncThemeFromShell(dark);
             }
             catch (Exception ex)
             {
@@ -433,23 +474,35 @@ namespace FNSyncPlus.WinUI
             }
         }
 
+        private void ApplyThemeVisuals(bool dark)
+        {
+            if (Content is FrameworkElement root) root.RequestedTheme = dark ? ElementTheme.Dark : ElementTheme.Light;
+            WindowHelper.ApplyCaptionTheme(this, dark);
+            IconThemeToggle.Glyph = dark ? "\uE706" : "\uE708";
+            ToolTipService.SetToolTip(BtnThemeToggle, dark ? "切换为浅色主题" : "切换为深色主题");
+        }
+
+        private void ApplyThemeExplicit(bool dark)
+        {
+            ApplyThemeVisuals(dark);
+            try
+            {
+                _settings.AppTheme = dark ? "Dark" : "Light";
+                _settings.Save();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"保存主题失败: {ex.Message}");
+            }
+        }
+
         private void ToggleAppTheme()
         {
             if (Content is FrameworkElement rootElement)
             {
-                bool isDark = rootElement.ActualTheme == ElementTheme.Dark;
-                rootElement.RequestedTheme = isDark ? ElementTheme.Light : ElementTheme.Dark;
-                WindowHelper.ApplyCaptionTheme(this, !isDark);
-                IconThemeToggle.Glyph = isDark ? "\uE708" : "\uE706"; // Next available theme
-                try
-                {
-                    _settings.AppTheme = isDark ? "Light" : "Dark";
-                    _settings.Save();
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"保存主题失败: {ex.Message}");
-                }
+                bool nextDark = rootElement.ActualTheme != ElementTheme.Dark;
+                ApplyThemeExplicit(nextDark);
+                Updates.SyncThemeFromShell(nextDark);
             }
         }
 
@@ -471,9 +524,14 @@ namespace FNSyncPlus.WinUI
         {
             Helpers.UIThreadHelper.RunOnUIThread(() =>
             {
-                DotNasStatus.Fill = ViewModel.IsNasConnected
-                    ? new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 16, 185, 129))
-                    : new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 148, 163, 184));
+                var color = ViewModel.ConnectionState switch
+                {
+                    NasConnectionState.Connected => Windows.UI.Color.FromArgb(255, 16, 185, 129),
+                    NasConnectionState.Connecting => Windows.UI.Color.FromArgb(255, 245, 158, 11),
+                    NasConnectionState.AuthenticationFailed or NasConnectionState.ConnectionLost => Windows.UI.Color.FromArgb(255, 239, 68, 68),
+                    _ => Windows.UI.Color.FromArgb(255, 148, 163, 184)
+                };
+                DotNasStatus.Fill = new Microsoft.UI.Xaml.Media.SolidColorBrush(color);
             });
         }
 

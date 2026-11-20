@@ -5,6 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:controls="using:FNSyncPlus.WinUI.Controls"
     xmlns:vm="using:FNSyncPlus.WinUI.ViewModels"
     Title="飞牛同步增强版"
     mc:Ignorable="d">
@@ -15,58 +16,205 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <!-- 1. CUSTOM TITLE BAR -->
-        <Grid x:Name="AppTitleBar" Grid.Row="0" Background="Transparent" Padding="16,0,140,0">
+        <!-- 1. MODERN WINDOWS 11 FLUENT TITLE BAR -->
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Background="Transparent" Padding="14,0,144,0" ColumnSpacing="10">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" MinWidth="140" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <!-- Brand Icon & Title (Drag Area) -->
-            <StackPanel x:Name="AppTitleBarDragArea" Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
-                <Image Width="24" Height="24" Source="ms-appx:///Assets/BrandMark.png" Stretch="Uniform" />
-                <TextBlock x:Name="AppTitleText" Text="飞牛同步增强版" FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-            </StackPanel>
+            <!-- Drag Region: Brand Icon + Product Name + Subtle Version/Session Tag -->
+            <Grid x:Name="AppTitleBarDragArea" Grid.Column="0" Background="Transparent" VerticalAlignment="Stretch">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
+                    <Image Width="20" Height="20" Source="ms-appx:///Assets/BrandMark.png" Stretch="Uniform" VerticalAlignment="Center" />
+                    <TextBlock
+                        x:Name="AppTitleText"
+                        Text="飞牛同步增强版"
+                        FontWeight="SemiBold"
+                        FontSize="12"
+                        VerticalAlignment="Center"
+                        TextTrimming="CharacterEllipsis"
+                        Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                    <Border
+                        x:Name="VersionPill"
+                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                        CornerRadius="4"
+                        Padding="6,1"
+                        VerticalAlignment="Center">
+                        <TextBlock
+                            x:Name="AppVersionTag"
+                            Text="v0.4.7"
+                            FontSize="10"
+                            FontWeight="Medium"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </Border>
+                    <Border
+                        x:Name="SessionTagPill"
+                        Visibility="Collapsed"
+                        Background="{ThemeResource StatusWarningBackgroundBrush}"
+                        BorderBrush="{ThemeResource StatusWarningBorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="4"
+                        Padding="6,1"
+                        VerticalAlignment="Center">
+                        <TextBlock
+                            x:Name="SessionTagText"
+                            FontSize="10"
+                            FontWeight="SemiBold"
+                            Foreground="{ThemeResource StatusWarningForegroundBrush}" />
+                    </Border>
+                </StackPanel>
+            </Grid>
 
-            <!-- Center: Connected NAS Status Pill Button -->
-            <StackPanel Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center">
-                <Button x:Name="BtnNasStatusPill" Click="BtnNasStatusPill_Click"
-                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                        BorderThickness="1" CornerRadius="14" Padding="12,4"
-                        ToolTipService.ToolTip="点击配置 NAS 设备连接">
-                    <StackPanel Orientation="Horizontal" Spacing="8">
-                        <Ellipse x:Name="DotNasStatus" Width="8" Height="8" Fill="#94A3B8" VerticalAlignment="Center" />
-                        <TextBlock Text="{x:Bind ViewModel.NasStatusText, Mode=OneWay}" FontSize="11" FontWeight="Medium" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+            <!-- Right Action Cluster: NAS Status Pill + Update + Help + Theme -->
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Spacing="4">
+                <!-- NAS Status Pill -->
+                <Button
+                    x:Name="BtnNasStatusPill"
+                    Click="BtnNasStatusPill_Click"
+                    Height="28"
+                    Padding="10,0"
+                    Margin="0,0,4,0"
+                    CornerRadius="14"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    ToolTipService.ToolTip="{x:Bind ViewModel.NasStatusTooltip, Mode=OneWay}">
+                    <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
+                        <Ellipse x:Name="DotNasStatus" Width="7" Height="7" Fill="#94A3B8" VerticalAlignment="Center" />
+                        <TextBlock
+                            Text="{x:Bind ViewModel.NasStatusText, Mode=OneWay}"
+                            FontSize="11"
+                            FontWeight="Medium"
+                            MaxWidth="210"
+                            TextTrimming="CharacterEllipsis"
+                            VerticalAlignment="Center"
+                            Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
                     </StackPanel>
                 </Button>
-            </StackPanel>
 
-            <!-- Right: Theme Toggle -->
-            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="8">
-                <Button x:Name="UpdateButton" AutomationProperties.Name="软件更新" Background="Transparent" BorderThickness="0">
-                    <StackPanel Orientation="Horizontal" Spacing="5">
-                        <FontIcon Glyph="&#xE895;" FontSize="14" />
-                        <TextBlock Text="{x:Bind Updates.UpdateButtonLabel,Mode=OneWay}" />
+                <!-- Software Update Trigger + State-Driven Flyout -->
+                <Button
+                    x:Name="UpdateButton"
+                    Style="{StaticResource TitleBarActionButtonStyle}"
+                    AutomationProperties.Name="软件更新"
+                    ToolTipService.ToolTip="检查与管理软件更新">
+                    <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                        <Grid VerticalAlignment="Center">
+                            <FontIcon Glyph="&#xE895;" FontSize="13" />
+                            <Ellipse
+                                Width="6"
+                                Height="6"
+                                Fill="{ThemeResource AccentFillColorDefaultBrush}"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Top"
+                                Margin="0,-2,-2,0"
+                                Visibility="{x:Bind Updates.HasUpdateAttention, Mode=OneWay}" />
+                        </Grid>
+                        <TextBlock Text="{x:Bind Updates.UpdateButtonLabel, Mode=OneWay}" FontSize="12" VerticalAlignment="Center" />
                     </StackPanel>
                     <Button.Flyout>
-                        <Flyout>
-                            <StackPanel Width="320" Spacing="10">
-                                <TextBlock Text="{x:Bind Updates.CurrentVersionText,Mode=OneWay}" Style="{ThemeResource SubtitleTextBlockStyle}" />
-                                <TextBlock Text="{x:Bind Updates.UpdateSupportMessage,Mode=OneWay}" TextWrapping="Wrap" />
-                                <TextBlock Text="{x:Bind Updates.UpdateStatus,Mode=OneWay}" TextWrapping="Wrap" />
-                                <ProgressBar Value="{x:Bind Updates.DownloadProgress,Mode=OneWay}" Visibility="{x:Bind Updates.ShowDownloadProgress,Mode=OneWay}" />
-                                <Button Content="检查并下载更新" Command="{x:Bind Updates.DownloadUpdateCommand}" IsEnabled="{x:Bind Updates.CanRunUpdate,Mode=OneWay}" />
-                                <Button Content="安装并重启…" Click="InstallUpdate_Click" IsEnabled="{x:Bind Updates.CanStartInstall,Mode=OneWay}" />
-                                <Button Content="取消等待或下载" Command="{x:Bind Updates.CancelUpdateCommand}" Visibility="{x:Bind Updates.CanCancelUpdate,Mode=OneWay}" />
+                        <Flyout Placement="BottomEdgeAlignedRight">
+                            <StackPanel Width="310" Spacing="12" Padding="2">
+                                <!-- Header: Status Headline + Version -->
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock
+                                        Grid.Column="0"
+                                        Text="{x:Bind Updates.UpdateHeadline, Mode=OneWay}"
+                                        Style="{StaticResource CardTitleTextStyle}"
+                                        TextWrapping="Wrap"
+                                        VerticalAlignment="Center" />
+                                    <controls:StatusBadge
+                                        Grid.Column="1"
+                                        Text="{x:Bind Updates.ProductVersion}"
+                                        Tone="{x:Bind Updates.UpdateStatusTone, Mode=OneWay}"
+                                        ShowDot="False" />
+                                </Grid>
+
+                                <!-- Contextual Status Description -->
+                                <TextBlock
+                                    Text="{x:Bind Updates.UpdateDetailText, Mode=OneWay}"
+                                    Style="{StaticResource CardSubtitleTextStyle}"
+                                    TextWrapping="Wrap" />
+
+                                <!-- Support Notice (only when updates are restricted/unmanaged) -->
+                                <Border
+                                    Visibility="{x:Bind Updates.ShowUpdateSupportNotice, Mode=OneWay}"
+                                    Style="{StaticResource InsetSurfaceStyle}">
+                                    <TextBlock
+                                        Text="{x:Bind Updates.UpdateSupportMessage, Mode=OneWay}"
+                                        Style="{StaticResource CaptionTextStyle}"
+                                        TextWrapping="Wrap" />
+                                </Border>
+
+                                <!-- Download Progress (only when downloading) -->
+                                <ProgressBar
+                                    Value="{x:Bind Updates.DownloadProgress, Mode=OneWay}"
+                                    Visibility="{x:Bind Updates.ShowDownloadProgress, Mode=OneWay}"
+                                    Height="4" />
+
+                                <!-- State-Driven Action Buttons -->
+                                <StackPanel Spacing="8">
+                                    <Button
+                                        Content="安装并重启…"
+                                        Click="InstallUpdate_Click"
+                                        Style="{StaticResource PrimaryActionButtonStyle}"
+                                        HorizontalAlignment="Stretch"
+                                        Visibility="{x:Bind Updates.CanStartInstall, Mode=OneWay}"
+                                        IsEnabled="{x:Bind Updates.CanStartInstall, Mode=OneWay}" />
+
+                                    <Button
+                                        Content="检查并下载更新"
+                                        Command="{x:Bind Updates.DownloadUpdateCommand}"
+                                        Style="{StaticResource PrimaryActionButtonStyle}"
+                                        HorizontalAlignment="Stretch"
+                                        Visibility="{x:Bind Updates.ShowCheckUpdateButton, Mode=OneWay}"
+                                        IsEnabled="{x:Bind Updates.CanRunUpdate, Mode=OneWay}" />
+
+                                    <Button
+                                        Content="重新检查更新"
+                                        Command="{x:Bind Updates.DownloadUpdateCommand}"
+                                        Style="{StaticResource SecondaryActionButtonStyle}"
+                                        HorizontalAlignment="Stretch"
+                                        Visibility="{x:Bind Updates.ShowRecheckUpdateButton, Mode=OneWay}"
+                                        IsEnabled="{x:Bind Updates.CanRunUpdate, Mode=OneWay}" />
+
+                                    <Button
+                                        Content="取消等待或下载"
+                                        Command="{x:Bind Updates.CancelUpdateCommand}"
+                                        Style="{StaticResource SecondaryActionButtonStyle}"
+                                        HorizontalAlignment="Stretch"
+                                        Visibility="{x:Bind Updates.CanCancelUpdate, Mode=OneWay}" />
+                                </StackPanel>
                             </StackPanel>
                         </Flyout>
                     </Button.Flyout>
                 </Button>
-                <Button Content="帮助" Click="Help_Click" Background="Transparent" BorderThickness="0" />
-                <Button Click="BtnThemeToggle_Click" ToolTipService.ToolTip="切换深色/浅色主题" Padding="6" Background="Transparent" BorderThickness="0">
-                    <FontIcon x:Name="IconThemeToggle" Glyph="&#xE706;" FontSize="14" />
+
+                <!-- Page Help Trigger -->
+                <Button
+                    x:Name="BtnHelp"
+                    Click="Help_Click"
+                    Style="{StaticResource TitleBarActionButtonStyle}"
+                    ToolTipService.ToolTip="查看当前页面使用帮助">
+                    <StackPanel Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xE897;" FontSize="13" />
+                        <TextBlock Text="帮助" FontSize="12" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+
+                <!-- Theme Switcher -->
+                <Button
+                    x:Name="BtnThemeToggle"
+                    Click="BtnThemeToggle_Click"
+                    Style="{StaticResource TitleBarActionButtonStyle}"
+                    Padding="7,4"
+                    ToolTipService.ToolTip="切换深色 / 浅色主题">
+                    <FontIcon x:Name="IconThemeToggle" Glyph="&#xE706;" FontSize="13" />
                 </Button>
             </StackPanel>
         </Grid>
@@ -76,7 +224,8 @@
             x:Name="NavView"
             Grid.Row="1"
             PaneDisplayMode="Auto"
-            OpenPaneLength="210"
+            OpenPaneLength="196"
+            ExpandedModeThresholdWidth="1040"
             IsBackButtonVisible="Collapsed"
             IsSettingsVisible="False"
             SelectionChanged="NavView_SelectionChanged">
@@ -108,7 +257,7 @@
             </NavigationView.FooterMenuItems>
 
             <!-- Content Area inside NavigationView -->
-            <Grid Padding="0,4,0,0">
+            <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
@@ -121,7 +270,7 @@
                     Title="{x:Bind ViewModel.InfoBarTitle, Mode=OneWay}"
                     Message="{x:Bind ViewModel.InfoBarMessage, Mode=OneWay}"
                     Severity="{x:Bind ViewModel.InfoBarSeverity, Mode=OneWay}"
-                    Margin="16,0,16,8" />
+                    Margin="28,8,28,0" />
 
                 <Frame x:Name="ContentFrame" Grid.Row="1" />
             </Grid>

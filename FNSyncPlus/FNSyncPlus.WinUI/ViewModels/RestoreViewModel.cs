@@ -38,7 +38,14 @@ namespace FNSyncPlus.WinUI.ViewModels
             "superseded" => "修改前",
             _ => "历史版本"
         };
-        public string Size => $"{Entry.Size:N0} B";
+        public string ReasonTone => Entry.Reason switch
+        {
+            "renamed" => "Warning",
+            "deleted" => "Error",
+            "superseded" => "Info",
+            _ => "Neutral"
+        };
+        public string Size => RestoreBrowserItem.FormatFileSize(Entry.Size);
     }
 
     public partial class RestoreViewModel : ObservableObject
@@ -72,6 +79,7 @@ namespace FNSyncPlus.WinUI.ViewModels
         private int _conflictPolicyIndex = 0; // 0=Skip, 1=Overwrite, 2=Timestamp
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(ShowRestoreProgress))]
         private double _restoreProgress = 0;
 
         [ObservableProperty]
@@ -83,6 +91,8 @@ namespace FNSyncPlus.WinUI.ViewModels
         [NotifyPropertyChangedFor(nameof(CanRestoreEntireBackup))]
         [NotifyPropertyChangedFor(nameof(CanRestoreHistory))]
         [NotifyPropertyChangedFor(nameof(CanRetryCurrentRestore))]
+        [NotifyPropertyChangedFor(nameof(ShowRestoreProgress))]
+        [NotifyPropertyChangedFor(nameof(ShowResultStats))]
         private bool _isRestoring = false;
 
         [ObservableProperty]
@@ -94,6 +104,8 @@ namespace FNSyncPlus.WinUI.ViewModels
         private bool _isScanning = false;
 
         public bool CanConfigureRestore => !IsRestoring && !IsScanning;
+        public bool ShowRestoreProgress => IsRestoring || RestoreProgress > 0;
+        public bool ShowResultStats => IsRestoring || RestoredFilesCount > 0 || SkippedFilesCount > 0 || FailedFilesCount > 0 || IntegrityVerifiedCount > 0;
         public bool CanRetryCurrentRestore => PreviewUsable && HasFailedFiles && _retryContext is { } retry &&
             retry.Package == SelectedPackage && retry.Target == LocalRestoreTarget && retry.Policy == ConflictPolicyIndex &&
             FailedFilesList.Count > 0 && _connectionService.IsConnected;
@@ -105,15 +117,19 @@ namespace FNSyncPlus.WinUI.ViewModels
         private void CancelRestore() => _restoreCancellation?.Cancel();
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(ShowResultStats))]
         private int _restoredFilesCount = 0;
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(ShowResultStats))]
         private int _skippedFilesCount = 0;
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(ShowResultStats))]
         private int _failedFilesCount = 0;
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(ShowResultStats))]
         private int _integrityVerifiedCount = 0;
 
         [ObservableProperty]
@@ -198,8 +214,20 @@ namespace FNSyncPlus.WinUI.ViewModels
             : !_previewReady ? (_connectionService.IsConnected ? "请选择备份。" : "NAS 未连接，请先连接设备。")
             : IsSearching ? "未找到匹配的文件或文件夹。"
             : IsHistoryMode ? "这里没有历史版本。" : "此文件夹为空。";
-        public string SelectionSummary => $"已选 {_checked.Count(item => !item.IsFolder)} 个文件、{_checked.Count(item => item.IsFolder && item.Children.Count == 0)} 个空文件夹";
-        public string HistoryCaption => _historyFile == null ? "选择文件查看历史版本" : _historyFile.DisplayPath;
+        public string SelectionSummary
+        {
+            get
+            {
+                int files = _checked.Count(item => !item.IsFolder);
+                int emptyFolders = _checked.Count(item => item.IsFolder && item.Children.Count == 0);
+                if (files == 0 && emptyFolders == 0) return "尚未勾选文件";
+                return emptyFolders > 0 ? $"已选 {files} 个文件、{emptyFolders} 个空文件夹" : $"已选 {files} 个文件";
+            }
+        }
+        public string SelectionBadgeTone => _checked.Any(item => item.OriginalPath != null) ? "Accent" : "Neutral";
+        public string CurrentFolderCountText => !_previewReady ? "" : IsSearching ? $"找到 {BrowserItems.Count} 项" : $"共 {BrowserItems.Count} 项";
+        public string HistoryCaption => _historyFile == null ? "点击上方文件查看历史版本" : _historyFile.DisplayPath;
+        public string HistoryCountText => VisibleHistory.Count > 0 ? $"{VisibleHistory.Count} 个历史版本" : "";
         public string[] SelectedFilePaths => _checked.Where(item => !item.IsFolder).Select(item => item.OriginalPath!).ToArray();
         public string[] SelectedDirectoryPaths => _checked.Where(item => item.IsFolder && item.OriginalPath != null).Select(item => item.OriginalPath!).ToArray();
 
@@ -219,9 +247,11 @@ namespace FNSyncPlus.WinUI.ViewModels
             OnPropertyChanged(nameof(CanRestoreHistory));
             OnPropertyChanged(nameof(CanRetryCurrentRestore));
             OnPropertyChanged(nameof(SelectionSummary));
+            OnPropertyChanged(nameof(SelectionBadgeTone));
+            OnPropertyChanged(nameof(CurrentFolderCountText));
         }
 
-        private static void AddBrowserPath(RestoreBrowserItem root, string rawPath, bool directory)
+        private static void AddBrowserPath(RestoreBrowserItem root, string rawPath, bool directory, long size = 0)
         {
             // Hierarchy is keyed by the original path segments. Formatting each label must not
             // merge differently encoded paths or replace the identity sent to the restore engine.
@@ -237,7 +267,11 @@ namespace FNSyncPlus.WinUI.ViewModels
                 if (!parent.Children.TryGetValue(key, out var child))
                     parent.Children.Add(key, child = new(part, parent, folder));
                 parent = child;
-                if (leaf) parent.OriginalPath = rawPath;
+                if (leaf)
+                {
+                    parent.OriginalPath = rawPath;
+                    if (!folder && size > 0) parent.FileSizeBytes = size;
+                }
             }
         }
 
@@ -247,9 +281,9 @@ namespace FNSyncPlus.WinUI.ViewModels
             _latestRoot = new(name, null, true);
             _historyRoot = new(name, null, true);
             foreach (var path in directories) AddBrowserPath(_latestRoot, path, directory: true);
-            foreach (var file in PackageFiles) AddBrowserPath(_latestRoot, file.OriginalPath, directory: false);
+            foreach (var file in PackageFiles) AddBrowserPath(_latestRoot, file.OriginalPath, directory: false, size: file.Size);
             _versions = HistoryFilesList.ToLookup(item => item.Entry.OriginalRel, StringComparer.Ordinal);
-            foreach (var group in _versions) AddBrowserPath(_historyRoot, group.Key, directory: false);
+            foreach (var group in _versions) AddBrowserPath(_historyRoot, group.Key, directory: false, size: group.First().Entry.Size);
             OpenFolder(IsHistoryMode ? _historyRoot : _latestRoot);
         }
 
@@ -270,6 +304,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             if (file?.OriginalPath is string path && _versions != null)
                 foreach (var version in _versions[path]) VisibleHistory.Add(version);
             OnPropertyChanged(nameof(HistoryCaption));
+            OnPropertyChanged(nameof(HistoryCountText));
         }
 
         public void RefreshFileViews()
@@ -322,10 +357,19 @@ namespace FNSyncPlus.WinUI.ViewModels
         {
             _buildingPreview = false;
             _previewReady = true;
-            foreach (var path in new[] { "子目录/文件A.xlsx", "子目录/文件B.xlsx", "普通/文件C.xlsx", "普通/文件D.xlsx", "版本/二级/文件E.xlsx" })
-                PackageFiles.Add(new() { OriginalPath = path, OriginalRelPath = path, Size = 1 });
-            HistoryFilesList.Add(new(new ManifestHistoryEntry { OriginalRel = "普通/文件C.xlsx", ArchivedAt = DateTimeOffset.Now, Reason = "superseded", Size = 1 }));
-            HistoryFilesList.Add(new(new ManifestHistoryEntry { OriginalRel = @"普通/\u7248\u672c\u8bf4\u660e.txt", ArchivedAt = DateTimeOffset.Now.AddDays(-1), Reason = "renamed", Size = 1 }));
+            var fixtureFiles = new (string Path, long Size)[]
+            {
+                ("子目录/文件A.xlsx", 145_920),
+                ("子目录/文件B.xlsx", 528_384),
+                ("普通/文件C.xlsx", 1_942_016),
+                ("普通/文件D.xlsx", 84_480),
+                ("版本/二级/文件E.xlsx", 312_320)
+            };
+            foreach (var (path, size) in fixtureFiles)
+                PackageFiles.Add(new() { OriginalPath = path, OriginalRelPath = path, Size = size });
+            HistoryFilesList.Add(new(new ManifestHistoryEntry { OriginalRel = "普通/文件C.xlsx", ArchivedAt = DateTimeOffset.Now, Reason = "superseded", Size = 1_840_128 }));
+            HistoryFilesList.Add(new(new ManifestHistoryEntry { OriginalRel = "普通/文件C.xlsx", ArchivedAt = DateTimeOffset.Now.AddDays(-2), Reason = "superseded", Size = 1_612_800 }));
+            HistoryFilesList.Add(new(new ManifestHistoryEntry { OriginalRel = @"普通/\u7248\u672c\u8bf4\u660e.txt", ArchivedAt = DateTimeOffset.Now.AddDays(-1), Reason = "renamed", Size = 4_608 }));
             BuildBrowser(Array.Empty<string>());
             IsHistoryMode = history;
             if (history)

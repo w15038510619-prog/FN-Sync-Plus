@@ -16,7 +16,16 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _appTitle = $"飞牛同步增强版 v{FNSyncPlus.Core.Updates.UpdateService.DisplayVersion}";
 
         [ObservableProperty]
-        private string _nasStatusText = "NAS 未连接 (点击配置)";
+        private string _nasStatusText = "NAS 未连接";
+
+        [ObservableProperty]
+        private string _nasStatusTooltip = "点击配置飞牛 NAS 设备连接";
+
+        [ObservableProperty]
+        private string _nasStatusTone = "Neutral";
+
+        [ObservableProperty]
+        private NasConnectionState _connectionState = NasConnectionState.Disconnected;
 
         [ObservableProperty]
         private bool _isNasConnected = false;
@@ -70,40 +79,49 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         public void UpdateNasConnectionStatus()
         {
+            ConnectionState = _connectionService.State;
             switch (_connectionService.State)
             {
                 case NasConnectionState.Connected:
                     IsNasConnected = true;
-                    NasStatusText = _connectionService.CurrentProviderType == FNSyncPlus.Core.Storage.StorageProviderType.FnOsPersonal
-                        ? $"{_connectionService.ServerAddress} · {_connectionService.Username} (fnOS 个人空间已连接)"
-                        : $"{_connectionService.ServerAddress} · {_connectionService.Username} (SMB 共享已连接)";
+                    NasStatusTone = "Success";
+                    NasStatusText = $"{_connectionService.ServerAddress} · {_connectionService.Username}";
+                    NasStatusTooltip = _connectionService.CurrentProviderType == FNSyncPlus.Core.Storage.StorageProviderType.FnOsPersonal
+                        ? $"已连接飞牛官方个人空间 ({_connectionService.ServerAddress} · {_connectionService.Username})，点击管理设备"
+                        : $"已连接 NAS SMB 共享 ({_connectionService.ServerAddress} · {_connectionService.Username})，点击管理设备";
                     PillBgColorHex = "#DCFCE7";
                     PillTextColorHex = "#15803D";
                     break;
                 case NasConnectionState.Connecting:
                     IsNasConnected = false;
-                    NasStatusText = _connectionService.CurrentProviderType == FNSyncPlus.Core.Storage.StorageProviderType.FnOsPersonal
-                        ? "🟡 fnOS 个人空间连接中..."
-                        : "🟡 正在连接 NAS SMB 共享...";
+                    NasStatusTone = "Warning";
+                    NasStatusText = "正在连接 NAS…";
+                    NasStatusTooltip = "正在建立飞牛 NAS 安全连接";
                     PillBgColorHex = "#FEF3C7";
                     PillTextColorHex = "#B45309";
                     break;
                 case NasConnectionState.AuthenticationFailed:
                     IsNasConnected = false;
-                    NasStatusText = "🔴 fnOS 认证失败 (点击配置)";
+                    NasStatusTone = "Error";
+                    NasStatusText = "认证失败 · 点击处理";
+                    NasStatusTooltip = "飞牛 NAS 登录认证失败，点击重新登录";
                     PillBgColorHex = "#FEE2E2";
                     PillTextColorHex = "#B91C1C";
                     break;
                 case NasConnectionState.ConnectionLost:
                     IsNasConnected = false;
-                    NasStatusText = "🔴 NAS 网络中断 (点击配置)";
+                    NasStatusTone = "Error";
+                    NasStatusText = "连接已断开 · 点击重连";
+                    NasStatusTooltip = "与飞牛 NAS 的连接中断，点击检查网络或重连";
                     PillBgColorHex = "#FEE2E2";
                     PillTextColorHex = "#B91C1C";
                     break;
                 case NasConnectionState.Disconnected:
                 default:
                     IsNasConnected = false;
-                    NasStatusText = "未连接 (点击配置)";
+                    NasStatusTone = "Neutral";
+                    NasStatusText = "NAS 未连接";
+                    NasStatusTooltip = "尚未连接飞牛 NAS，点击前往配置";
                     PillBgColorHex = "#F1F5F9";
                     PillTextColorHex = "#64748B";
                     break;

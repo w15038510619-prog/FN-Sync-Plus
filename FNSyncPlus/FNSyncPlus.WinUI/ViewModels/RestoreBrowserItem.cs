@@ -16,11 +16,20 @@ public partial class RestoreBrowserItem : ObservableObject
     public string Name { get; }
     public RestoreBrowserItem? Parent { get; }
     public bool IsFolder { get; }
+    public bool IsFile => !IsFolder;
     public string? OriginalPath { get; set; }
+    public long FileSizeBytes { get; set; }
     public Dictionary<string, RestoreBrowserItem> Children { get; } = new(StringComparer.Ordinal);
-    public string BreadcrumbLabel => Parent == null ? Name : "›  " + Name;
+
+    public bool ShowBreadcrumbSeparator => Parent != null;
+    public string BreadcrumbLabel => Name;
     public string DisplayPath => Parent?.Parent == null ? Name : Parent.DisplayPath + "/" + Name;
     public string DisplayLocation => Parent?.Parent == null ? "" : Parent.DisplayPath;
+    public string DisplayLocationLabel => string.IsNullOrEmpty(DisplayLocation) ? "" : $"位置：{DisplayLocation}";
+    public string MetaText => IsFolder
+        ? (Children.Count == 0 ? "空文件夹" : $"{Children.Count} 项")
+        : (FileSizeBytes > 0 ? FormatFileSize(FileSizeBytes) : "");
+
     public string Icon => IsFolder ? "\uE8B7" : Path.GetExtension(Name).ToLowerInvariant() switch
     {
         ".xlsx" or ".xls" or ".csv" or ".ods" => "\uE9F9",
@@ -42,5 +51,13 @@ public partial class RestoreBrowserItem : ObservableObject
         yield return this;
         foreach (var child in Children.Values)
             foreach (var item in child.Descendants()) yield return item;
+    }
+
+    public static string FormatFileSize(long bytes)
+    {
+        if (bytes >= 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024 * 1024):F2} GB";
+        if (bytes >= 1024L * 1024) return $"{bytes / (1024.0 * 1024):F1} MB";
+        if (bytes >= 1024L) return $"{bytes / 1024.0:F1} KB";
+        return $"{bytes:N0} B";
     }
 }

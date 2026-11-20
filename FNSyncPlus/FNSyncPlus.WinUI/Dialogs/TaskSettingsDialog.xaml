@@ -5,152 +5,148 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    Title="备份任务设置"
+    Title="编辑备份设置"
     PrimaryButtonText="保存设置"
     CloseButtonText="取消"
     DefaultButton="Primary"
     mc:Ignorable="d">
 
-    <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="600">
-        <StackPanel MinWidth="540" MaxWidth="620" Spacing="14" Padding="0,4,0,0">
-            <TextBlock x:Name="TxtSaveError" Visibility="Collapsed" TextWrapping="Wrap" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
-            <!-- 1. Task Name and Paths Card -->
-            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1" CornerRadius="8" Padding="14,12">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="520">
+        <StackPanel MinWidth="440" MaxWidth="560" Spacing="12" Padding="0,4,0,0">
+            <TextBlock x:Name="TxtSaveError" Visibility="Collapsed" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
+
+            <!-- 1. Basic Info & Paths -->
+            <Border Style="{StaticResource CompactCardStyle}" Padding="14,12">
                 <StackPanel Spacing="10">
-                    <TextBlock Text="基础信息与路径" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                    <TextBlock Text="基础信息与路径" Style="{StaticResource SectionHeaderTextStyle}" />
 
                     <StackPanel Spacing="4">
-                        <TextBlock Text="任务显示名称:" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                        <TextBox x:Name="TxtTaskName" FontSize="12" />
+                        <TextBlock Text="任务显示名称" Style="{StaticResource CaptionTextStyle}" />
+                        <TextBox x:Name="TxtTaskName" FontSize="13" />
                     </StackPanel>
 
-                    <Grid ColumnSpacing="8">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="65" />
-                            <ColumnDefinition Width="*" />
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="本地源路径:" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
-                        <TextBlock x:Name="TxtSourcePath" Grid.Column="1" FontSize="11" FontFamily="Consolas" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                    </Grid>
+                    <Border Style="{StaticResource InsetSurfaceStyle}" Padding="10,8">
+                        <StackPanel Spacing="4">
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="64" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="本地源目录" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBlock x:Name="TxtSourcePath" Grid.Column="1" Style="{StaticResource MonoPathTextStyle}" Foreground="{ThemeResource TextFillColorPrimaryBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                            </Grid>
 
-                    <Grid ColumnSpacing="8">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="65" />
-                            <ColumnDefinition Width="*" />
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="NAS 目标:" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
-                        <TextBlock x:Name="TxtDestPath" Grid.Column="1" FontSize="11" FontFamily="Consolas" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
-                    </Grid>
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="64" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="NAS 目标" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                                <TextBlock x:Name="TxtDestPath" Grid.Column="1" Style="{StaticResource MonoPathTextStyle}" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                            </Grid>
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
             </Border>
 
-            <!-- 2. Automation Schedule Mode Card -->
-            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1" CornerRadius="8" Padding="14,12">
+            <!-- 2. Automation Schedule Mode -->
+            <Border Style="{StaticResource CompactCardStyle}" Padding="14,12">
                 <StackPanel Spacing="10">
-                    <TextBlock Text="同步调度模式" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                    <TextBlock Text="自动同步方式" Style="{StaticResource SectionHeaderTextStyle}" />
 
                     <ComboBox x:Name="CmbScheduleMode" HorizontalAlignment="Stretch" SelectionChanged="CmbScheduleMode_SelectionChanged">
                         <ComboBoxItem Tag="SmartAuto">
                             <StackPanel Spacing="2">
-                                <TextBlock Text="智能自动备份 (默认推荐)" FontWeight="SemiBold" FontSize="12" />
-                                <TextBlock Text="实时监听变动，配合定时补偿扫描，防漏保全" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="智能自动备份（默认推荐）" FontWeight="SemiBold" FontSize="12" />
+                                <TextBlock Text="实时监听变动，配合定时扫描检查，防漏保全" Style="{StaticResource CaptionTextStyle}" />
                             </StackPanel>
                         </ComboBoxItem>
                         <ComboBoxItem Tag="RealtimeOnly">
                             <StackPanel Spacing="2">
                                 <TextBlock Text="仅实时监听" FontWeight="SemiBold" FontSize="12" />
-                                <TextBlock Text="检测到本地变动立即自动同步（带防抖缓冲）" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="检测到本地变动立即自动同步（带防抖缓冲）" Style="{StaticResource CaptionTextStyle}" />
                             </StackPanel>
                         </ComboBoxItem>
                         <ComboBoxItem Tag="PeriodicOnly">
                             <StackPanel Spacing="2">
                                 <TextBlock Text="仅定时同步" FontWeight="SemiBold" FontSize="12" />
-                                <TextBlock Text="关闭实时监听，按固定时间间隔定期检查" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="关闭实时监听，按固定时间间隔定期检查" Style="{StaticResource CaptionTextStyle}" />
                             </StackPanel>
                         </ComboBoxItem>
                         <ComboBoxItem Tag="ManualOnly">
                             <StackPanel Spacing="2">
                                 <TextBlock Text="仅手动同步" FontWeight="SemiBold" FontSize="12" />
-                                <TextBlock Text="关闭所有自动监控，仅在手动点击同步时执行" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="关闭自动监控，仅在点击「立即备份」时执行" Style="{StaticResource CaptionTextStyle}" />
                             </StackPanel>
                         </ComboBoxItem>
                     </ComboBox>
 
-                    <!-- Interval Picker (Visible for SmartAuto and PeriodicOnly) -->
-                    <StackPanel x:Name="PnlInterval" Spacing="4" Margin="0,4,0,0">
-                        <TextBlock Text="检查周期 / 定时补偿频率:" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <StackPanel x:Name="PnlInterval" Spacing="4" Margin="0,2,0,0">
+                        <TextBlock Text="定时检查周期" Style="{StaticResource CaptionTextStyle}" />
                         <ComboBox x:Name="CmbInterval" HorizontalAlignment="Stretch">
-                            <ComboBoxItem Content="每 5 分钟 (默认推荐)" Tag="5" />
+                            <ComboBoxItem Content="每 5 分钟（默认推荐）" Tag="5" />
                             <ComboBoxItem Content="每 15 分钟" Tag="15" />
                             <ComboBoxItem Content="每 30 分钟" Tag="30" />
-                            <ComboBoxItem Content="每 60 分钟 (1 小时)" Tag="60" />
-                            <ComboBoxItem Content="每 120 分钟 (2 小时)" Tag="120" />
+                            <ComboBoxItem Content="每 60 分钟（1 小时）" Tag="60" />
+                            <ComboBoxItem Content="每 120 分钟（2 小时）" Tag="120" />
                         </ComboBox>
                     </StackPanel>
                 </StackPanel>
             </Border>
 
-            <!-- 3. Settling Delay & Anti-Jitter Card -->
-            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1" CornerRadius="8" Padding="14,12">
-                <StackPanel Spacing="10">
-                    <TextBlock Text="防写抖动延迟 (Settling Delay)" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                    <TextBlock Text="检测到本地文件变化后等待设定时间，并检查文件是否被占用。对于分段写入的应用，请设置足够长的等待时间。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+            <!-- 3. Settling Delay -->
+            <Border Style="{StaticResource CompactCardStyle}" Padding="14,12">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="防写抖动等待" Style="{StaticResource SectionHeaderTextStyle}" />
+                    <TextBlock Text="检测到文件变动后等待设定时间并确认文件未被占用，适合 Office / 剪辑等分段保存应用。" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
 
                     <ComboBox x:Name="CmbSettlingDelay" HorizontalAlignment="Stretch">
-                        <ComboBoxItem Content="1 秒 (极速响应)" Tag="1" />
-                        <ComboBoxItem Content="3 秒 (默认推荐，适合常规办公文档与代码)" Tag="3" />
-                        <ComboBoxItem Content="5 秒 (适合大文件与音视频编辑保存)" Tag="5" />
-                        <ComboBoxItem Content="10 秒 (适合连续写入密集型应用)" Tag="10" />
+                        <ComboBoxItem Content="1 秒（极速响应）" Tag="1" />
+                        <ComboBoxItem Content="3 秒（默认推荐，适合常规文档与代码）" Tag="3" />
+                        <ComboBoxItem Content="5 秒（适合大文件与音视频保存）" Tag="5" />
+                        <ComboBoxItem Content="10 秒（适合连续写入密集型应用）" Tag="10" />
                     </ComboBox>
                 </StackPanel>
             </Border>
 
-            <!-- 4. Backup Strategy Card -->
-            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1" CornerRadius="8" Padding="14,12">
-                <StackPanel Spacing="10">
-                    <TextBlock Text="远端重命名与备份策略" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+            <!-- 4. Backup Strategy -->
+            <Border Style="{StaticResource CompactCardStyle}" Padding="14,12">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="版本与远端备份策略" Style="{StaticResource SectionHeaderTextStyle}" />
 
                     <ComboBox x:Name="CmbStrategy" HorizontalAlignment="Stretch" SelectionChanged="CmbStrategy_SelectionChanged">
                         <ComboBoxItem Tag="Smart">
                             <StackPanel Spacing="2">
-                                <TextBlock Text="智能备份 (默认推荐)" FontWeight="SemiBold" FontSize="12" />
-                                <TextBlock Text="自动识别新增、修改与重命名，旧版本转入历史清单，还原仅还原最新状态" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="智能备份（默认推荐）" FontWeight="SemiBold" FontSize="12" />
+                                <TextBlock Text="自动识别新增、修改与重命名，旧版本转入历史清单" Style="{StaticResource CaptionTextStyle}" />
                             </StackPanel>
                         </ComboBoxItem>
                         <ComboBoxItem Tag="Archive">
                             <StackPanel Spacing="2">
                                 <TextBlock Text="归档备份" FontWeight="SemiBold" FontSize="12" />
-                                <TextBlock Text="只增不减，旧文件全部保留在远端与历史记录中，新旧共存" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="只增不减，旧文件全部保留在远端与历史记录中" Style="{StaticResource CaptionTextStyle}" />
                             </StackPanel>
                         </ComboBoxItem>
                         <ComboBoxItem x:Name="MirrorStrategyItem" Tag="Mirror">
                             <StackPanel Spacing="2">
                                 <TextBlock Text="镜像备份" FontWeight="SemiBold" FontSize="12" />
-                                <TextBlock Text="当前树跟随本地变更并保留历史；发现未知远端项目或源目录变空时停止。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="当前树跟随本地变更并保留历史；发现未知远端项目或源目录变空时停止。" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
                             </StackPanel>
                         </ComboBoxItem>
                     </ComboBox>
-                    <TextBlock x:Name="MirrorUnavailableNotice" Visibility="Collapsed" Text="当前任务不支持镜像备份，请选择智能备份或归档备份。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="MirrorUnavailableNotice" Visibility="Collapsed" Text="当前任务不支持镜像备份，请选择智能备份或归档备份。" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
                     <CheckBox x:Name="MirrorDeletionConsent" Visibility="Collapsed" Checked="MirrorDeletionConsent_Checked">
-                        <TextBlock Text="我明确允许将本地已删除的受管理文件从当前目录移入历史；仅限手动同步，发现额外远端文件或源目录变空时停止。" TextWrapping="Wrap" MaxWidth="520" />
+                        <TextBlock Text="我明确允许将本地已删除的受管理文件从当前目录移入历史；仅限手动同步，发现额外远端文件或源目录变空时停止。" TextWrapping="Wrap" MaxWidth="460" FontSize="12" />
                     </CheckBox>
                     <TextBlock x:Name="MirrorConsentError" Visibility="Collapsed" Text="请先明确勾选允许移入历史。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
                 </StackPanel>
             </Border>
 
-            <!-- 5. Safety Notice Card -->
-            <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="6" Padding="12,8">
+            <!-- 5. Safety Notice -->
+            <Border Style="{StaticResource InsetSurfaceStyle}" Padding="12,9">
                 <StackPanel Orientation="Horizontal" Spacing="8">
-                    <FontIcon Glyph="&#xE946;" FontSize="13" Foreground="{ThemeResource AccentFillColorDefaultBrush}" VerticalAlignment="Top" Margin="0,2,0,0" />
-                    <TextBlock Text="点击「仅移除任务配置」仅在当前软件中移除该任务的自动化调度，绝对不会删除或修改您的本地源文件或 NAS 已有的任何备份数据。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    <FontIcon Glyph="&#xE946;" FontSize="13" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Top" Margin="0,1,0,0" />
+                    <TextBlock Text="移除任务配置仅停止自动调度，绝不会删除或修改电脑源文件或 NAS 上已有的任何备份数据。" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
                 </StackPanel>
             </Border>
         </StackPanel>

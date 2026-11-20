@@ -5,261 +5,455 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:controls="using:FNSyncPlus.WinUI.Controls"
     mc:Ignorable="d">
 
-    <Grid Padding="24,12,24,24" RowSpacing="16">
+    <Grid Padding="{StaticResource PageContentPadding}" RowSpacing="14">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <!-- 1. HEADER -->
-        <StackPanel Grid.Row="0" Spacing="2">
-            <TextBlock Text="系统与同步设置" FontSize="20" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-            <TextBlock Text="自定义软件自启动、后台运行、多任务并发控制及安全凭据管理" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-        </StackPanel>
+        <!-- 1. PAGE HEADER -->
+        <Grid Grid.Row="0" ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Spacing="2">
+                <TextBlock Text="设置" Style="{StaticResource PageTitleTextStyle}" />
+                <TextBlock Text="管理界面外观、开机运行、并发备份、容量统计、安全凭据与软件更新" Style="{StaticResource PageSubtitleTextStyle}" />
+            </StackPanel>
+            <Button Grid.Column="1" Command="{x:Bind ViewModel.SaveSettingsCommand}" Style="{StaticResource PrimaryActionButtonStyle}" VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <FontIcon Glyph="&#xE74E;" FontSize="13" />
+                    <TextBlock Text="保存设置" FontSize="12" FontWeight="SemiBold" />
+                </StackPanel>
+            </Button>
+        </Grid>
 
-        <!-- 2. SETTINGS CONTENT -->
-        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-            <StackPanel Spacing="16" MaxWidth="720" HorizontalAlignment="Left">
-                <!-- Card 1: System Behavior -->
-                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
-                    <StackPanel Spacing="12">
-                        <TextBlock Text="系统运行行为" FontSize="14" FontWeight="SemiBold" />
+        <!-- 2. FEEDBACK INFOBAR -->
+        <InfoBar Grid.Row="1"
+                 IsOpen="{x:Bind HasNotice(ViewModel.StatusNotice), Mode=OneWay}"
+                 Severity="Success"
+                 Title="操作提示"
+                 Message="{x:Bind ViewModel.StatusNotice, Mode=OneWay}"
+                 IsClosable="True" />
 
-                        <Grid ColumnSpacing="16">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                                <TextBlock Text="开机自动启动" FontSize="13" FontWeight="Medium" />
-                                <TextBlock Text="随 Windows 启动" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            </StackPanel>
-                            <ToggleSwitch Grid.Column="1" IsOn="{x:Bind ViewModel.StartWithWindows, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanConfigureStartup}" OnContent="" OffContent="" />
-                        </Grid>
+        <!-- 3. SETTINGS CONTENT -->
+        <ScrollViewer x:Name="SettingsScroll"
+                      Grid.Row="2"
+                      SizeChanged="SettingsScroll_SizeChanged"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollMode="Disabled"
+                      HorizontalScrollBarVisibility="Disabled">
+            <StackPanel x:Name="SettingsContentPanel" Spacing="14" HorizontalAlignment="Left" Padding="0,0,12,12">
 
-                        <MenuFlyoutSeparator Margin="0,4" />
-
-                        <Grid ColumnSpacing="16">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                                <TextBlock Text="关闭主窗口时最小化到系统托盘" FontSize="13" FontWeight="Medium" />
-                                <TextBlock Text="点击窗口右上角关闭按钮时保持后台同步运行，双击托盘图标可重新呼出" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            </StackPanel>
-                            <ToggleSwitch Grid.Column="1" IsOn="{x:Bind ViewModel.MinimizeToTray, Mode=TwoWay}" OnContent="" OffContent="" />
-                        </Grid>
-                    </StackPanel>
-                </Border>
-
-                <!-- Card 2: Performance & Concurrency -->
-                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
-                    <StackPanel Spacing="12">
-                        <TextBlock Text="性能与并发控制" FontSize="14" FontWeight="SemiBold" />
-
-                        <Grid ColumnSpacing="16">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="180" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                                <TextBlock Text="最大并发同步任务数" FontSize="13" FontWeight="Medium" />
-                                <TextBlock Text="限制同时向 NAS 传输文件的任务数量，防止网络带宽与 NAS 存储 I/O 拥塞" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            </StackPanel>
-                            <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.MaxConcurrentSyncsIndex, Mode=TwoWay}" HorizontalAlignment="Stretch">
-                                <ComboBoxItem Content="1 个任务 (低负载)" />
-                                <ComboBoxItem Content="2 个任务 (推荐平衡)" />
-                                <ComboBoxItem Content="3 个任务 (高性能)" />
-                                <ComboBoxItem Content="4 个任务 (千兆/万兆)" />
-                            </ComboBox>
-                        </Grid>
-                    </StackPanel>
-                </Border>
-
-                <!-- Card 3: Security & Credentials -->
-                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
-                    <StackPanel Spacing="12">
-                        <TextBlock Text="安全与凭据管理" FontSize="14" FontWeight="SemiBold" />
-
-                        <Grid ColumnSpacing="16">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                                <TextBlock Text="清除已保存的密码" FontSize="13" FontWeight="Medium" />
-                                <TextBlock Text="密码使用 Windows DPAPI 本地强加密存储。点击可立即清除所有记住的凭据" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            </StackPanel>
-                            <Button Grid.Column="1" Command="{x:Bind ViewModel.ClearCredentialsCommand}">
-                                <StackPanel Orientation="Horizontal" Spacing="6">
-                                    <FontIcon Glyph="&#xE74D;" FontSize="12" />
-                                    <TextBlock Text="清除 DPAPI 凭据" FontSize="12" />
+                <!-- ==================== SECTION 1: 常用设置 ==================== -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="常用设置" Style="{StaticResource SectionHeaderTextStyle}" />
+                    <Border Style="{StaticResource SurfaceCardStyle}" Padding="0">
+                        <StackPanel>
+                            <!-- Row 1: App Theme -->
+                            <Grid Padding="16,11" ColumnSpacing="14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" MinWidth="0" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <FontIcon Grid.Column="0" Glyph="&#xE790;" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                                <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock Text="外观主题" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="切换浅色或深色界面外观，立即生效并与窗口顶部切换按钮同步" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
                                 </StackPanel>
-                            </Button>
-                        </Grid>
-                    </StackPanel>
-                </Border>
+                                <ComboBox Grid.Column="2" SelectedIndex="{x:Bind ViewModel.AppThemeIndex, Mode=TwoWay}" Width="168" VerticalAlignment="Center">
+                                    <ComboBoxItem Content="浅色模式" />
+                                    <ComboBoxItem Content="深色模式" />
+                                </ComboBox>
+                            </Grid>
 
-                <!-- Card 4: Backup capacity & retention (read-only) -->
-                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
-                    <StackPanel Spacing="12">
-                        <TextBlock Text="备份容量与保留策略（只读）" FontSize="14" FontWeight="SemiBold" />
-                        <TextBlock Text="统计当前备份、历史版本与物理对象的占用。程序不会自动删除任何历史版本；预览仅用于人工评估。"
-                                   FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <Rectangle Style="{StaticResource HorizontalDividerStyle}" Margin="16,0" />
 
-                        <Grid ColumnSpacing="16">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="240" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                                <TextBlock Text="备份任务" FontSize="13" FontWeight="Medium" />
-                                <TextBlock Text="选择要统计的备份目标（需先连接 NAS）" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            </StackPanel>
-                            <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{x:Bind ViewModel.CapacityTasks, Mode=OneWay}"
-                                      SelectedIndex="{x:Bind ViewModel.CapacityTaskIndex, Mode=TwoWay}" />
-                        </Grid>
-
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Button Command="{x:Bind ViewModel.AnalyzeCapacityCommand}" IsEnabled="{x:Bind ViewModel.CanRunCapacity, Mode=OneWay}">
-                                <StackPanel Orientation="Horizontal" Spacing="6">
-                                    <FontIcon Glyph="&#xE9D9;" FontSize="12" />
-                                    <TextBlock Text="统计容量" FontSize="12" />
+                            <!-- Row 2: Start With Windows -->
+                            <Grid Padding="16,11" ColumnSpacing="14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" MinWidth="0" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <FontIcon Grid.Column="0" Glyph="&#xE7E8;" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                                <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock Text="开机自动启动" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="正式安装版启用后，下次登录 Windows 会自动在后台启动" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
                                 </StackPanel>
-                            </Button>
-                            <NumberBox Value="{x:Bind ViewModel.RetentionKeepVersions, Mode=TwoWay}" Minimum="1" Maximum="1000" SmallChange="1"
-                                       SpinButtonPlacementMode="Compact" Width="120" Header="保留版本数" />
-                            <NumberBox Value="{x:Bind ViewModel.RetentionKeepDays, Mode=TwoWay}" Minimum="0" Maximum="3650" SmallChange="1"
-                                       SpinButtonPlacementMode="Compact" Width="120" Header="保留天数" />
-                            <Button Command="{x:Bind ViewModel.PreviewRetentionCommand}" IsEnabled="{x:Bind ViewModel.CanRunCapacity, Mode=OneWay}"
-                                    VerticalAlignment="Bottom">
-                                <StackPanel Orientation="Horizontal" Spacing="6">
-                                    <FontIcon Glyph="&#xE81C;" FontSize="12" />
-                                    <TextBlock Text="预览保留策略" FontSize="12" />
+                                <ToggleSwitch Grid.Column="2" MinWidth="0"
+                                              IsOn="{x:Bind ViewModel.StartWithWindows, Mode=TwoWay}"
+                                              IsEnabled="{x:Bind ViewModel.CanConfigureStartup}"
+                                              OnContent="" OffContent="" VerticalAlignment="Center" />
+                            </Grid>
+
+                            <Rectangle Style="{StaticResource HorizontalDividerStyle}" Margin="16,0" />
+
+                            <!-- Row 3: Minimize To Tray -->
+                            <Grid Padding="16,11" ColumnSpacing="14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" MinWidth="0" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <FontIcon Grid.Column="0" Glyph="&#xE738;" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                                <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock Text="关闭主窗口时最小化到系统托盘" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="点击窗口右上角关闭按钮后继续后台自动同步，双击托盘图标可重新打开" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
                                 </StackPanel>
-                            </Button>
+                                <ToggleSwitch Grid.Column="2" MinWidth="0"
+                                              IsOn="{x:Bind ViewModel.MinimizeToTray, Mode=TwoWay}"
+                                              OnContent="" OffContent="" VerticalAlignment="Center" />
+                            </Grid>
+
+                            <Rectangle Style="{StaticResource HorizontalDividerStyle}" Margin="16,0" />
+
+                            <!-- Row 4: Max Concurrent Syncs -->
+                            <Grid Padding="16,11" ColumnSpacing="14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" MinWidth="0" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <FontIcon Grid.Column="0" Glyph="&#xE9D9;" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                                <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock Text="最大并发同步任务数" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="限制同时向 NAS 传输文件的任务数量，防止占满网络带宽或 NAS 磁盘负载" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ComboBox Grid.Column="2" SelectedIndex="{x:Bind ViewModel.MaxConcurrentSyncsIndex, Mode=TwoWay}" Width="190" VerticalAlignment="Center">
+                                    <ComboBoxItem Content="1 个任务（低负载）" />
+                                    <ComboBoxItem Content="2 个任务（推荐平衡）" />
+                                    <ComboBoxItem Content="3 个任务（高性能）" />
+                                    <ComboBoxItem Content="4 个任务（千兆 / 万兆）" />
+                                </ComboBox>
+                            </Grid>
                         </StackPanel>
-
-                        <TextBlock Text="{x:Bind ViewModel.CapacitySummary, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
-                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" IsTextSelectionEnabled="True" />
-                        <TextBlock Text="{x:Bind ViewModel.RetentionSummary, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
-                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" IsTextSelectionEnabled="True" />
-                    </StackPanel>
-                </Border>
-
-                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
-                    <StackPanel Spacing="8">
-                        <TextBlock Text="快捷键" FontSize="14" FontWeight="SemiBold" />
-                        <TextBlock Text="Ctrl+1　同步任务　　　 Ctrl+2　恢复文件" TextWrapping="Wrap" />
-                        <TextBlock Text="Ctrl+3　NAS 设备　　　Ctrl+4　设置" TextWrapping="Wrap" />
-                        <TextBlock Text="Ctrl+N　添加文件夹备份向导" />
-                    </StackPanel>
-                </Border>
-
-                <!-- Card 5: Software Update -->
-                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
-                    <StackPanel Spacing="12">
-                        <Grid ColumnSpacing="12">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="软件更新" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
-                            <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.CurrentVersionText, Mode=OneWay}" FontSize="11"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
-                        </Grid>
-
-                        <TextBlock Text="{x:Bind ViewModel.UpdateSupportMessage, Mode=OneWay}" FontSize="11" TextWrapping="Wrap"
-                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-
-                        <Expander Header="高级更新选项" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
-                        <StackPanel Spacing="10">
-                        <StackPanel Spacing="6">
-                            <TextBox Header="更新源地址（HTTPS）" Text="{x:Bind ViewModel.UpdateFeedUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                     TextWrapping="Wrap" PlaceholderText="https://…/manifest.json" />
-                            <Button Content="复制更新源地址" Command="{x:Bind ViewModel.CopyUpdateSourceCommand}" />
-                        </StackPanel>
-
-                        <Expander Header="代理和超时" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
-                            <StackPanel Spacing="8">
-                                <TextBox Header="更新代理 URL" PlaceholderText="留空使用系统代理" TextWrapping="Wrap"
-                                         Text="{x:Bind ViewModel.UpdateProxyUrl, Mode=TwoWay}" />
-                                <NumberBox Header="连接超时（秒）" Minimum="2" Maximum="120" Value="{x:Bind ViewModel.ConnectTimeoutSeconds, Mode=TwoWay}" />
-                                <NumberBox Header="检查超时（秒）" Minimum="5" Maximum="300" Value="{x:Bind ViewModel.CheckTimeoutSeconds, Mode=TwoWay}" />
-                                <NumberBox Header="下载总超时（分钟）" Minimum="1" Maximum="480" Value="{x:Bind ViewModel.DownloadTimeoutMinutes, Mode=TwoWay}" />
-                            </StackPanel>
-                        </Expander>
-
-                        <Grid ColumnSpacing="16">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="200" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
-                                <TextBlock Text="更新通道" FontSize="13" FontWeight="Medium" />
-                                <TextBlock Text="Stable 只接收正式版；Beta 可接收测试版。请按公司试点范围选择" FontSize="11" TextWrapping="Wrap"
-                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            </StackPanel>
-                            <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.UpdateChannelIndex, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanChangeUpdatePolicy}" HorizontalAlignment="Stretch">
-                                <ComboBoxItem Content="Stable（正式）" />
-                                <ComboBoxItem Content="Beta（试点）" />
-                            </ComboBox>
-                        </Grid>
-
-                        </StackPanel>
-                        </Expander>
-                        <TextBlock Text="点击窗口顶部「更新」查看进度。正式版会提前下载，通过校验后由你确认安装。" TextWrapping="Wrap" />
-                    </StackPanel>
-                </Border>
-
-                <Expander x:Name="LegacyPanel" Header="旧版配置参考" Visibility="Collapsed" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
-                    <StackPanel Spacing="8">
-                        <TextBlock Text="在新版重建任务时，可在这里核对原来的目录。请为新任务选择独立的备份位置。" TextWrapping="Wrap" />
-                        <TextBlock x:Name="LegacyPaths" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-                    </StackPanel>
-                </Expander>
-
-                <!-- Card 5: About & Version -->
-                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16">
-                    <StackPanel Spacing="8">
-                        <TextBlock Text="关于软件与版本信息" FontSize="14" FontWeight="SemiBold" />
-                        <Grid ColumnSpacing="16">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0" Spacing="4">
-                                <TextBlock Text="飞牛同步增强版 (FN Sync Plus)" FontSize="13" FontWeight="SemiBold" />
-                                <TextBlock Text="Windows 文件备份、版本历史和恢复" FontSize="11" TextWrapping="Wrap"
-                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            </StackPanel>
-                            <Border Grid.Column="1" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="8,4" VerticalAlignment="Center">
-                                <TextBlock Text="{x:Bind ViewModel.ProductVersion}" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
-                            </Border>
-                        </Grid>
-                    </StackPanel>
-                </Border>
-
-                <!-- Action Bar -->
-                <StackPanel Orientation="Horizontal" Spacing="12">
-                    <Button Command="{x:Bind ViewModel.SaveSettingsCommand}" Style="{ThemeResource AccentButtonStyle}" Padding="20,8">
-                        <StackPanel Orientation="Horizontal" Spacing="6">
-                            <FontIcon Glyph="&#xE74E;" FontSize="13" />
-                            <TextBlock Text="保存设置变更" FontSize="12" FontWeight="SemiBold" />
-                        </StackPanel>
-                    </Button>
+                    </Border>
                 </StackPanel>
 
-                <!-- Status Feedback InfoBar -->
-                <InfoBar
-                    IsOpen="{x:Bind HasNotice(ViewModel.StatusNotice), Mode=OneWay}"
-                    Severity="Success"
-                    Title="操作结果"
-                    Message="{x:Bind ViewModel.StatusNotice, Mode=OneWay}"
-                    IsClosable="True" />
+                <!-- ==================== SECTION 2: 备份管理 ==================== -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="备份管理" Style="{StaticResource SectionHeaderTextStyle}" />
+                    <Border Style="{StaticResource SurfaceCardStyle}" Padding="16,13">
+                        <StackPanel Spacing="11">
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" MinWidth="0" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <FontIcon Grid.Column="0" Glyph="&#xEDA2;" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                                <StackPanel Grid.Column="1" Spacing="2">
+                                    <TextBlock Text="备份容量统计与保留策略预览" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="查看所选备份在 NAS 上的当前文件与历史版本占用。本功能仅作只读评估，不会自动删除任何历史版本。" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <controls:StatusBadge Grid.Column="2" Text="只读安全" Tone="Info" ShowDot="False" VerticalAlignment="Center" />
+                            </Grid>
+
+                            <Rectangle Style="{StaticResource HorizontalDividerStyle}" />
+
+                            <!-- Task Selection -->
+                            <Grid ColumnSpacing="14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" MinWidth="0" />
+                                    <ColumnDefinition Width="260" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                    <TextBlock Text="选择要评估的备份任务" FontSize="13" FontWeight="Medium" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="需先连接 NAS 才能读取远端备份清单与空间占用" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ComboBox Grid.Column="1" Width="260" MaxWidth="260" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                                          ItemsSource="{x:Bind ViewModel.CapacityTasks, Mode=OneWay}"
+                                          SelectedIndex="{x:Bind ViewModel.CapacityTaskIndex, Mode=TwoWay}"
+                                          PlaceholderText="暂无可统计任务" />
+                            </Grid>
+
+                            <!-- Aligned Controls Bar -->
+                            <Grid ColumnSpacing="10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" MinWidth="0" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <NumberBox Grid.Column="0" Value="{x:Bind ViewModel.RetentionKeepVersions, Mode=TwoWay}"
+                                           Minimum="1" Maximum="1000" SmallChange="1"
+                                           SpinButtonPlacementMode="Compact" Width="124" Header="保留版本数" />
+
+                                <NumberBox Grid.Column="1" Value="{x:Bind ViewModel.RetentionKeepDays, Mode=TwoWay}"
+                                           Minimum="0" Maximum="3650" SmallChange="1"
+                                           SpinButtonPlacementMode="Compact" Width="124" Header="保留天数" />
+
+                                <Button Grid.Column="3" Command="{x:Bind ViewModel.AnalyzeCapacityCommand}"
+                                        IsEnabled="{x:Bind ViewModel.CanRunCapacity, Mode=OneWay}"
+                                        Style="{StaticResource SecondaryActionButtonStyle}" VerticalAlignment="Bottom">
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <FontIcon Glyph="&#xE9D9;" FontSize="12" />
+                                        <TextBlock Text="统计容量" FontSize="12" />
+                                    </StackPanel>
+                                </Button>
+
+                                <Button Grid.Column="4" Command="{x:Bind ViewModel.PreviewRetentionCommand}"
+                                        IsEnabled="{x:Bind ViewModel.CanRunCapacity, Mode=OneWay}"
+                                        Style="{StaticResource SecondaryActionButtonStyle}" VerticalAlignment="Bottom">
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <FontIcon Glyph="&#xE81C;" FontSize="12" />
+                                        <TextBlock Text="预览保留策略" FontSize="12" />
+                                    </StackPanel>
+                                </Button>
+                            </Grid>
+
+                            <!-- Output Summary Box -->
+                            <Border Style="{StaticResource InsetSurfaceStyle}" Padding="12,8">
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="{x:Bind ViewModel.CapacitySummary, Mode=OneWay}"
+                                               FontSize="12" TextWrapping="Wrap"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                               IsTextSelectionEnabled="True" />
+                                    <TextBlock Text="{x:Bind ViewModel.RetentionSummary, Mode=OneWay}"
+                                               Visibility="{x:Bind ViewModel.RetentionSummary, Mode=OneWay, Converter={StaticResource StringNotEmptyToVisibilityConverter}}"
+                                               FontSize="11" FontFamily="Consolas, Segoe UI" TextWrapping="Wrap"
+                                               Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                               IsTextSelectionEnabled="True" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- ==================== SECTION 3: 安全与账号 ==================== -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="安全与账号" Style="{StaticResource SectionHeaderTextStyle}" />
+                    <Border Style="{StaticResource SurfaceCardStyle}" Padding="16,11">
+                        <Grid ColumnSpacing="14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" MinWidth="0" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <FontIcon Grid.Column="0" Glyph="&#xE72E;" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                            <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+                                <TextBlock Text="已保存的登录凭据" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                <TextBlock Text="登录密码使用 Windows DPAPI 本地强加密保存。清除后，下次连接 NAS 需要重新输入账号密码。" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <Button Grid.Column="2" Click="BtnClearCredentials_Click" Style="{StaticResource DangerButtonStyle}" VerticalAlignment="Center">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE74D;" FontSize="12" />
+                                    <TextBlock Text="清除已保存凭据" FontSize="12" FontWeight="Medium" />
+                                </StackPanel>
+                            </Button>
+                        </Grid>
+                    </Border>
+
+                    <!-- Collapsible Shortcuts Expander -->
+                    <Expander HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="16,10">
+                        <Expander.Header>
+                            <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                                <FontIcon Glyph="&#xE765;" FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                                <StackPanel Spacing="1">
+                                    <TextBlock Text="快捷键一览" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                                    <TextBlock Text="使用键盘快速在各个页面和添加向导间切换" Style="{StaticResource CaptionTextStyle}" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Expander.Header>
+                        <Grid ColumnSpacing="24" RowSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <!-- Ctrl+1 -->
+                            <Grid Grid.Row="0" Grid.Column="0">
+                                <TextBlock Text="切换到同步任务" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <StackPanel Orientation="Horizontal" Spacing="4" HorizontalAlignment="Right">
+                                    <Border Style="{StaticResource KeycapBadgeStyle}"><TextBlock Text="Ctrl" FontSize="11" FontFamily="Consolas" /></Border>
+                                    <TextBlock Text="+" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" VerticalAlignment="Center" />
+                                    <Border Style="{StaticResource KeycapBadgeStyle}"><TextBlock Text="1" FontSize="11" FontFamily="Consolas" /></Border>
+                                </StackPanel>
+                            </Grid>
+
+                            <!-- Ctrl+2 -->
+                            <Grid Grid.Row="0" Grid.Column="1">
+                                <TextBlock Text="切换到恢复文件" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <StackPanel Orientation="Horizontal" Spacing="4" HorizontalAlignment="Right">
+                                    <Border Style="{StaticResource KeycapBadgeStyle}"><TextBlock Text="Ctrl" FontSize="11" FontFamily="Consolas" /></Border>
+                                    <TextBlock Text="+" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" VerticalAlignment="Center" />
+                                    <Border Style="{StaticResource KeycapBadgeStyle}"><TextBlock Text="2" FontSize="11" FontFamily="Consolas" /></Border>
+                                </StackPanel>
+                            </Grid>
+
+                            <!-- Ctrl+3 -->
+                            <Grid Grid.Row="1" Grid.Column="0">
+                                <TextBlock Text="切换到 NAS 设备" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <StackPanel Orientation="Horizontal" Spacing="4" HorizontalAlignment="Right">
+                                    <Border Style="{StaticResource KeycapBadgeStyle}"><TextBlock Text="Ctrl" FontSize="11" FontFamily="Consolas" /></Border>
+                                    <TextBlock Text="+" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" VerticalAlignment="Center" />
+                                    <Border Style="{StaticResource KeycapBadgeStyle}"><TextBlock Text="3" FontSize="11" FontFamily="Consolas" /></Border>
+                                </StackPanel>
+                            </Grid>
+
+                            <!-- Ctrl+4 -->
+                            <Grid Grid.Row="1" Grid.Column="1">
+                                <TextBlock Text="切换到设置" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <StackPanel Orientation="Horizontal" Spacing="4" HorizontalAlignment="Right">
+                                    <Border Style="{StaticResource KeycapBadgeStyle}"><TextBlock Text="Ctrl" FontSize="11" FontFamily="Consolas" /></Border>
+                                    <TextBlock Text="+" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" VerticalAlignment="Center" />
+                                    <Border Style="{StaticResource KeycapBadgeStyle}"><TextBlock Text="4" FontSize="11" FontFamily="Consolas" /></Border>
+                                </StackPanel>
+                            </Grid>
+
+                            <!-- Ctrl+N -->
+                            <Grid Grid.Row="2" Grid.Column="0">
+                                <TextBlock Text="打开添加文件夹备份向导" FontSize="12" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <StackPanel Orientation="Horizontal" Spacing="4" HorizontalAlignment="Right">
+                                    <Border Style="{StaticResource KeycapBadgeStyle}"><TextBlock Text="Ctrl" FontSize="11" FontFamily="Consolas" /></Border>
+                                    <TextBlock Text="+" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" VerticalAlignment="Center" />
+                                    <Border Style="{StaticResource KeycapBadgeStyle}"><TextBlock Text="N" FontSize="11" FontFamily="Consolas" /></Border>
+                                </StackPanel>
+                            </Grid>
+                        </Grid>
+                    </Expander>
+                </StackPanel>
+
+                <!-- ==================== SECTION 4: 软件与高级设置 ==================== -->
+                <StackPanel Spacing="6">
+                    <TextBlock Text="软件与高级设置" Style="{StaticResource SectionHeaderTextStyle}" />
+                    <Border Style="{StaticResource SurfaceCardStyle}" Padding="16,13">
+                        <StackPanel Spacing="11">
+                            <!-- About + Update Status Hero Row -->
+                            <Grid ColumnSpacing="14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" MinWidth="0" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <Border Grid.Column="0" Width="38" Height="38" CornerRadius="8" Background="{ThemeResource SoftAccentBackgroundBrush}" VerticalAlignment="Center">
+                                    <FontIcon Glyph="&#xE895;" FontSize="17" Foreground="{ThemeResource SoftAccentForegroundBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                </Border>
+
+                                <StackPanel Grid.Column="1" Spacing="3" VerticalAlignment="Center">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <TextBlock Text="飞牛同步增强版" FontSize="14" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" VerticalAlignment="Center" />
+                                        <controls:StatusBadge Text="{x:Bind ViewModel.ProductVersion}" Tone="Accent" ShowDot="False" VerticalAlignment="Center" />
+                                        <controls:StatusBadge Text="{x:Bind ViewModel.UpdateHeadline, Mode=OneWay}" Tone="{x:Bind ViewModel.UpdateStatusTone, Mode=OneWay}" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                    <TextBlock Text="{x:Bind ViewModel.UpdateDetailText, Mode=OneWay}" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
+                                    <TextBlock Text="{x:Bind ViewModel.LastCheckText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextWrapping="Wrap" />
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                    <Button Content="检查更新"
+                                            Command="{x:Bind ViewModel.DownloadUpdateCommand}"
+                                            Visibility="{x:Bind ViewModel.ShowCheckUpdateButton, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                                            Style="{StaticResource SecondaryActionButtonStyle}" />
+                                    <Button Content="安装并重启…"
+                                            Click="BtnInstallUpdateFromSettings_Click"
+                                            Visibility="{x:Bind ViewModel.CanStartInstall, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                                            Style="{StaticResource PrimaryActionButtonStyle}" />
+                                    <Button Content="取消"
+                                            Command="{x:Bind ViewModel.CancelUpdateCommand}"
+                                            Visibility="{x:Bind ViewModel.CanCancelUpdate, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                                            Style="{StaticResource SecondaryActionButtonStyle}" />
+                                </StackPanel>
+                            </Grid>
+
+                            <ProgressBar Value="{x:Bind ViewModel.DownloadProgress, Mode=OneWay}" Maximum="100"
+                                         Visibility="{x:Bind ViewModel.ShowDownloadProgress, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+
+                            <TextBlock Text="{x:Bind ViewModel.UpdateSupportMessage, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.ShowUpdateSupportNotice, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                                       Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
+
+                            <!-- Advanced Update & Network Options (Collapsed by default) -->
+                            <Expander Header="高级更新与网络选项" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="14,10">
+                                <StackPanel Spacing="14">
+                                    <!-- Update Channel -->
+                                    <Grid ColumnSpacing="16">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="200" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center">
+                                            <TextBlock Text="更新通道" FontSize="13" FontWeight="Medium" />
+                                            <TextBlock Text="Stable 只接收正式版；Beta 可接收试点测试版。修改后点击顶部「保存设置」生效。" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <ComboBox Grid.Column="1" SelectedIndex="{x:Bind ViewModel.UpdateChannelIndex, Mode=TwoWay}"
+                                                  IsEnabled="{x:Bind ViewModel.CanChangeUpdatePolicy}" HorizontalAlignment="Stretch" VerticalAlignment="Center">
+                                            <ComboBoxItem Content="Stable（正式版）" />
+                                            <ComboBoxItem Content="Beta（试点版）" />
+                                        </ComboBox>
+                                    </Grid>
+
+                                    <Rectangle Style="{StaticResource HorizontalDividerStyle}" />
+
+                                    <!-- HTTPS Feed URL -->
+                                    <StackPanel Spacing="6">
+                                        <TextBlock Text="更新源地址（HTTPS）" Style="{StaticResource FieldLabelTextStyle}" />
+                                        <Grid ColumnSpacing="8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBox Grid.Column="0"
+                                                     Text="{x:Bind ViewModel.UpdateFeedUrl, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                     PlaceholderText="https://…/manifest.json"
+                                                     FontFamily="Consolas, Segoe UI" />
+                                            <Button Grid.Column="1" Command="{x:Bind ViewModel.CopyUpdateSourceCommand}" Style="{StaticResource SecondaryActionButtonStyle}">
+                                                <StackPanel Orientation="Horizontal" Spacing="5">
+                                                    <FontIcon Glyph="&#xE8C8;" FontSize="12" />
+                                                    <TextBlock Text="复制地址" FontSize="12" />
+                                                </StackPanel>
+                                            </Button>
+                                        </Grid>
+                                    </StackPanel>
+
+                                    <!-- Proxy URL -->
+                                    <StackPanel Spacing="6">
+                                        <TextBlock Text="网络代理 URL（可选）" Style="{StaticResource FieldLabelTextStyle}" />
+                                        <TextBox Text="{x:Bind ViewModel.UpdateProxyUrl, Mode=TwoWay}"
+                                                 PlaceholderText="留空则跟随 Windows 系统代理，例如 http://127.0.0.1:7890"
+                                                 FontFamily="Consolas, Segoe UI" />
+                                    </StackPanel>
+
+                                    <!-- 3-Column Timeouts -->
+                                    <Grid ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <NumberBox Grid.Column="0" Header="连接超时（秒）" Minimum="2" Maximum="120" SpinButtonPlacementMode="Compact" Value="{x:Bind ViewModel.ConnectTimeoutSeconds, Mode=TwoWay}" />
+                                        <NumberBox Grid.Column="1" Header="检查超时（秒）" Minimum="5" Maximum="300" SpinButtonPlacementMode="Compact" Value="{x:Bind ViewModel.CheckTimeoutSeconds, Mode=TwoWay}" />
+                                        <NumberBox Grid.Column="2" Header="下载总超时（分钟）" Minimum="1" Maximum="480" SpinButtonPlacementMode="Compact" Value="{x:Bind ViewModel.DownloadTimeoutMinutes, Mode=TwoWay}" />
+                                    </Grid>
+                                </StackPanel>
+                            </Expander>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Legacy Configuration Reference (Visible only for versioned beta migration profiles) -->
+                    <Expander x:Name="LegacyPanel" Header="旧版配置参考" Visibility="Collapsed" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="14,12">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="在新版重建任务时，可在这里核对原来的目录。请为新任务选择独立的备份位置。" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
+                            <TextBlock x:Name="LegacyPaths" FontFamily="Consolas, Segoe UI" FontSize="11" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                        </StackPanel>
+                    </Expander>
+                </StackPanel>
+
             </StackPanel>
         </ScrollViewer>
     </Grid>

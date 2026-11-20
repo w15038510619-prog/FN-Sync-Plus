@@ -204,7 +204,8 @@ namespace FNSyncPlus.WinUI.Pages
                     PrimaryButtonText = "前往连接",
                     CloseButtonText = "取消",
                     DefaultButton = ContentDialogButton.Primary,
-                    XamlRoot = this.XamlRoot ?? App.MainWindowInstance?.Content?.XamlRoot
+                    XamlRoot = this.XamlRoot ?? App.MainWindowInstance?.Content?.XamlRoot,
+                    RequestedTheme = this.ActualTheme
                 };
 
                 var result = await dialog.ShowAsync();
@@ -242,7 +243,8 @@ namespace FNSyncPlus.WinUI.Pages
 
                 var dialog = new TaskDetailsDialog(taskItem.Model)
                 {
-                    XamlRoot = this.XamlRoot
+                    XamlRoot = this.XamlRoot,
+                    RequestedTheme = this.ActualTheme
                 };
 
                 await dialog.ShowAsync();
@@ -269,7 +271,8 @@ namespace FNSyncPlus.WinUI.Pages
                 var tm = AppServices.GetService<FNSyncPlus.Core.Services.TaskManager>();
                 var dialog = new TaskSettingsDialog(taskItem.Model, tm)
                 {
-                    XamlRoot = this.XamlRoot
+                    XamlRoot = this.XamlRoot,
+                    RequestedTheme = this.ActualTheme
                 };
 
                 await dialog.ShowAsync();
@@ -301,7 +304,8 @@ namespace FNSyncPlus.WinUI.Pages
                     PrimaryButtonText = "确认移除",
                     CloseButtonText = "取消",
                     DefaultButton = ContentDialogButton.Close,
-                    XamlRoot = this.XamlRoot
+                    XamlRoot = this.XamlRoot,
+                    RequestedTheme = this.ActualTheme
                 };
 
                 var res = await confirmDialog.ShowAsync();

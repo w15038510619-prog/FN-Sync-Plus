@@ -47,10 +47,16 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _statusBadgeColorHex = "#475569";
 
         [ObservableProperty]
+        private string _statusTone = "Neutral";
+
+        [ObservableProperty]
         private string _formattedLastSync = "--";
 
         [ObservableProperty]
         private string _scheduleSummaryText = string.Empty;
+
+        [ObservableProperty]
+        private string _compactMetaLine = string.Empty;
 
         [ObservableProperty]
         private bool _isSyncing;
@@ -59,10 +65,25 @@ namespace FNSyncPlus.WinUI.ViewModels
         private bool _isPaused;
 
         [ObservableProperty]
+        private bool _canPauseTask;
+
+        [ObservableProperty]
+        private bool _showRunNowButton;
+
+        [ObservableProperty]
+        private bool _hasErrorBanner;
+
+        [ObservableProperty]
+        private string _errorSummaryText = string.Empty;
+
+        [ObservableProperty]
         private string _currentFileText = string.Empty;
 
         [ObservableProperty]
         private string _currentProgressText = "0%";
+
+        [ObservableProperty]
+        private string _liveProgressDetailText = string.Empty;
 
         [ObservableProperty]
         private bool _isConfigurationError;
@@ -103,10 +124,20 @@ namespace FNSyncPlus.WinUI.ViewModels
             IsPaused = Model.State == TaskSyncState.Paused;
             IsConfigurationError = Model.State == TaskSyncState.ConfigurationError;
             CanRunSync = !IsConfigurationError && Model.State != TaskSyncState.Removing && Model.State != TaskSyncState.Paused && !IsSyncing;
+            CanPauseTask = !IsPaused && Model.State != TaskSyncState.Removing;
+            ShowRunNowButton = !IsPaused && !IsSyncing;
 
             DisplayStatus = Model.DisplayStatus;
             StatusBadgeBgHex = Model.StateBadgeBgHex;
             StatusBadgeColorHex = Model.StateBadgeColorHex;
+            StatusTone = Model.State switch
+            {
+                TaskSyncState.Completed => "Success",
+                TaskSyncState.Syncing or TaskSyncState.Scanning or TaskSyncState.Queued => "Info",
+                TaskSyncState.Paused or TaskSyncState.OfflineWaiting => "Warning",
+                TaskSyncState.Error or TaskSyncState.ConfigurationError => "Error",
+                _ => "Neutral"
+            };
 
             if (Model.CurrentSpeedBytesPerSec > 0)
             {
@@ -116,20 +147,47 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 CurrentSpeedFormatted = string.Empty;
             }
+            LiveProgressDetailText = $"{CurrentSpeedFormatted}{CurrentProgressText}";
 
-            if (Model.LastSyncTime.HasValue)
+            DateTime? successTime = Model.LastSuccessTime ?? Model.LastSyncTime;
+            string lastSuccessBrief;
+            if (successTime.HasValue)
             {
-                var timeStr = Model.LastSyncTime.Value.ToString("yyyy-MM-dd HH:mm");
-                FormattedLastSync = $"上次备份: {timeStr} · 扫描 {Model.LastScannedFiles} 个文件 · 转换 {Model.LastLongNameFiles} 项";
+                var timeStr = successTime.Value.ToString("yyyy-MM-dd HH:mm");
+                FormattedLastSync = $"最近成功: {timeStr} · 共 {Model.LastScannedFiles} 个文件" +
+                    (Model.LastLongNameFiles > 0 ? $" · 长名兼容 {Model.LastLongNameFiles} 项" : "");
+                lastSuccessBrief = $"最近成功 {timeStr}";
             }
             else
             {
-                FormattedLastSync = "尚未进行初次同步";
+                FormattedLastSync = "尚未进行首次备份";
+                lastSuccessBrief = "尚未进行首次备份";
             }
             if (Model.LastFailureTime.HasValue)
                 FormattedLastSync += $" · 上次失败 {Model.LastFailureTime.Value:yyyy-MM-dd HH:mm}";
 
             ScheduleSummaryText = Model.ScheduleSummary;
+            CompactMetaLine = string.IsNullOrWhiteSpace(ScheduleSummaryText)
+                ? lastSuccessBrief
+                : $"{lastSuccessBrief}  ·  {ScheduleSummaryText}";
+
+            bool isErrorState = Model.State == TaskSyncState.Error || Model.State == TaskSyncState.ConfigurationError;
+            bool hasRecentFailedFiles = Model.LastFailedFiles > 0 && !IsSyncing;
+            HasErrorBanner = isErrorState || hasRecentFailedFiles;
+            if (isErrorState)
+            {
+                ErrorSummaryText = !string.IsNullOrWhiteSpace(Model.LastError)
+                    ? Model.LastError!
+                    : (Model.LastFailedFiles > 0 ? $"最近一次备份有 {Model.LastFailedFiles} 个文件失败，请打开详情查看原因。" : "上次备份未完成，请查看详情排查原因。");
+            }
+            else if (hasRecentFailedFiles)
+            {
+                ErrorSummaryText = $"最近一次备份有 {Model.LastFailedFiles} 个文件失败，可点击「查看详情」排查原因。";
+            }
+            else
+            {
+                ErrorSummaryText = string.Empty;
+            }
         }
 
         private static string FormatSpeed(double bytesPerSec)

@@ -9,6 +9,7 @@
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+                <ResourceDictionary Source="ms-appx:///Styles/DesignSystem.xaml" />
             </ResourceDictionary.MergedDictionaries>
 
             <!-- Global Converters -->
@@ -16,6 +17,8 @@
             <helpers:HexToBrushConverter x:Key="HexToBrushConverter" />
             <helpers:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
             <helpers:InverseBoolToVisibilityConverter x:Key="InverseBoolToVisibilityConverter" />
+            <helpers:InverseBoolConverter x:Key="InverseBoolConverter" />
+            <helpers:StringNotEmptyToVisibilityConverter x:Key="StringNotEmptyToVisibilityConverter" />
         </ResourceDictionary>
     </Application.Resources>
 </Application>

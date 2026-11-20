@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using FNSyncPlus.WinUI.Helpers;
 using FNSyncPlus.WinUI.Services;
 using FNSyncPlus.WinUI.ViewModels;
@@ -24,6 +25,18 @@ namespace FNSyncPlus.WinUI.Pages
 
         private void OnPageLoaded(object sender, RoutedEventArgs e)
         {
+            if (AppServices.IsUiVisualAcceptance)
+            {
+                foreach (var arg in Environment.GetCommandLineArgs())
+                {
+                    if (arg.StartsWith("--wizard-step=", StringComparison.OrdinalIgnoreCase) &&
+                        int.TryParse(arg.Substring("--wizard-step=".Length), out int step) && step > 0)
+                    {
+                        ViewModel.LoadVisualFixture(step);
+                        return;
+                    }
+                }
+            }
             CheckAndTriggerAutoFolderPicker();
         }
 
@@ -84,7 +97,7 @@ namespace FNSyncPlus.WinUI.Pages
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"[AddFolderPage] 打开文件夹选择器异常: {ex.Message}");
-                ViewModel.StatusMessage = $"打开文件夹选择器失败: {ex.Message}，您可以点击下方「选择本地文件夹」手动选择。";
+                ViewModel.StatusMessage = $"打开文件夹选择器失败: {ex.Message}，你可以点击「选择本地文件夹…」手动选择。";
             }
             finally
             {
@@ -126,16 +139,13 @@ namespace FNSyncPlus.WinUI.Pages
 
         private void BtnViewExistingTasks_Click(object sender, RoutedEventArgs e)
         {
-            if (App.MainWindowInstance != null)
-            {
-                App.MainWindowInstance.NavigateToTag("Tasks");
-            }
-            else if (Frame.CanGoBack)
-            {
-                Frame.GoBack();
-            }
+            BtnBackToTasks_Click(sender, e);
         }
 
+        private void BtnContinueAddMore_Click(object sender, RoutedEventArgs e)
+        {
+            ViewModel.ResetSession();
+        }
 
         private async void BtnRemoveFolder_Click(object sender, RoutedEventArgs e)
         {
@@ -149,7 +159,8 @@ namespace FNSyncPlus.WinUI.Pages
         {
             var dialog = new Dialogs.NasBrowserDialog
             {
-                XamlRoot = this.XamlRoot
+                XamlRoot = this.XamlRoot,
+                RequestedTheme = this.ActualTheme
             };
             var res = await dialog.ShowAsync();
             if (res == ContentDialogResult.Primary)
@@ -170,6 +181,7 @@ namespace FNSyncPlus.WinUI.Pages
             var dialog = new Dialogs.NasBrowserDialog
             {
                 XamlRoot = this.XamlRoot,
+                RequestedTheme = this.ActualTheme,
                 Title = AppServices.IsVersionedBetaSession ? "选择已有飞牛同步文件夹" : "选择已有飞牛同步文件夹（隔离试验）"
             };
             if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
@@ -195,18 +207,7 @@ namespace FNSyncPlus.WinUI.Pages
 
         private async void BtnCreateAndStart_Click(object sender, RoutedEventArgs e)
         {
-            int created = await ViewModel.CreateAllTasksAsync();
-            if (created > 0)
-            {
-                if (App.MainWindowInstance != null)
-                {
-                    App.MainWindowInstance.NavigateToTag("Tasks");
-                }
-                else if (Frame.CanGoBack)
-                {
-                    Frame.GoBack();
-                }
-            }
+            await ViewModel.CreateAllTasksAsync();
         }
 
         public Visibility GetEmptyStateVisibility(int count) => count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -214,24 +215,9 @@ namespace FNSyncPlus.WinUI.Pages
         public Visibility GetEmptyNoticeVisibility(int count) => count == 0 ? Visibility.Visible : Visibility.Collapsed;
         public Visibility GetErrorNoticeVisibility(string? error) => !string.IsNullOrWhiteSpace(error) ? Visibility.Visible : Visibility.Collapsed;
 
-        public InfoBarSeverity GetStep1NoticeSeverity(int count) => count > 0 ? InfoBarSeverity.Informational : InfoBarSeverity.Warning;
-
-        public Brush GetStepPillBg(int currentStep, int pillStep)
+        public string GetStepPillTone(int currentStep, int pillStep)
         {
-            if (currentStep == pillStep)
-            {
-                return (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"];
-            }
-            return (Brush)Application.Current.Resources["SubtleFillColorSecondaryBrush"];
-        }
-
-        public Brush GetStepPillFg(int currentStep, int pillStep)
-        {
-            if (currentStep == pillStep)
-            {
-                return new SolidColorBrush(Colors.White);
-            }
-            return (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"];
+            return currentStep == pillStep ? "Accent" : "Neutral";
         }
 
         public InfoBarSeverity GetSecuritySeverity(bool isTeamShareWarning)

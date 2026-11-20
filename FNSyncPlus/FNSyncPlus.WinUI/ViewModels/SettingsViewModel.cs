@@ -57,6 +57,26 @@ namespace FNSyncPlus.WinUI.ViewModels
         [ObservableProperty]
         private int _maxConcurrentSyncsIndex;
 
+        private bool _syncingThemeFromShell;
+        [ObservableProperty]
+        private int _appThemeIndex;
+
+        public event Action<bool>? ThemeChangedRequested;
+
+        partial void OnAppThemeIndexChanged(int value)
+        {
+            if (_syncingThemeFromShell) return;
+            bool dark = value == 1;
+            ThemeChangedRequested?.Invoke(dark);
+        }
+
+        public void SyncThemeFromShell(bool isDark)
+        {
+            _syncingThemeFromShell = true;
+            try { AppThemeIndex = isDark ? 1 : 0; }
+            finally { _syncingThemeFromShell = false; }
+        }
+
         [ObservableProperty]
         private string _statusNotice = string.Empty;
 
@@ -84,14 +104,88 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         public bool CanRunUpdate => CanCheckUpdate && !IsUpdateBusy;
         public bool CanStartInstall => CanInstallUpdate && !IsUpdateBusy && ReadyVersion.Length > 0;
+        public bool HasUpdateAttention => !string.IsNullOrEmpty(ReadyVersion);
+        public bool ShowCheckUpdateButton => CanCheckUpdate && !IsUpdateBusy && !CanStartInstall;
+        public bool ShowRecheckUpdateButton => CanCheckUpdate && !IsUpdateBusy && CanStartInstall;
+        public bool ShowUpdateSupportNotice => (!CanCheckUpdate || !CanInstallUpdate) && !string.IsNullOrWhiteSpace(UpdateSupportMessage);
+
+        public string UpdateHeadline
+        {
+            get
+            {
+                if (IsUpdateBusy)
+                {
+                    if (ShowDownloadProgress) return "正在下载更新";
+                    if (UpdateButtonLabel == "等待安装") return "正在等待任务完成";
+                    return "正在检查更新";
+                }
+                if (CanStartInstall) return $"新版本 v{ReadyVersion} 已就绪";
+                if (!string.IsNullOrEmpty(ReadyVersion)) return $"发现新版本 v{ReadyVersion}";
+                if (!CanCheckUpdate) return "当前模式不支持在线更新";
+                if (!string.IsNullOrEmpty(UpdateStatus) &&
+                    (UpdateStatus.Contains("失败") || UpdateStatus.Contains("异常") || UpdateStatus.Contains("无法") || UpdateStatus.Contains("错误")))
+                    return "检查更新遇到问题";
+                return "当前已是最新版本";
+            }
+        }
+
+        public string UpdateStatusTone
+        {
+            get
+            {
+                if (CanStartInstall || !string.IsNullOrEmpty(ReadyVersion)) return "Accent";
+                if (IsUpdateBusy) return "Info";
+                if (!CanCheckUpdate) return "Neutral";
+                if (!string.IsNullOrEmpty(UpdateStatus) &&
+                    (UpdateStatus.Contains("失败") || UpdateStatus.Contains("异常") || UpdateStatus.Contains("无法") || UpdateStatus.Contains("错误")))
+                    return "Error";
+                return "Success";
+            }
+        }
+
+        public string UpdateDetailText => string.IsNullOrWhiteSpace(UpdateStatus)
+            ? (CanCheckUpdate ? "已启用安全签名校验，可随时点击下方按钮检查新版本。" : UpdateSupportMessage)
+            : UpdateStatus;
+
         [ObservableProperty]
         [NotifyPropertyChangedFor(nameof(CanStartInstall))]
+        [NotifyPropertyChangedFor(nameof(HasUpdateAttention))]
+        [NotifyPropertyChangedFor(nameof(ShowCheckUpdateButton))]
+        [NotifyPropertyChangedFor(nameof(ShowRecheckUpdateButton))]
+        [NotifyPropertyChangedFor(nameof(UpdateHeadline))]
+        [NotifyPropertyChangedFor(nameof(UpdateStatusTone))]
         private string _readyVersion = "";
-        [ObservableProperty] private string _updateButtonLabel = "更新";
+
+        [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(UpdateHeadline))]
+        private string _updateButtonLabel = "更新";
+
         partial void OnIsUpdateBusyChanged(bool value)
         {
             OnPropertyChanged(nameof(CanRunUpdate));
             OnPropertyChanged(nameof(CanStartInstall));
+            OnPropertyChanged(nameof(ShowCheckUpdateButton));
+            OnPropertyChanged(nameof(ShowRecheckUpdateButton));
+            OnPropertyChanged(nameof(UpdateHeadline));
+            OnPropertyChanged(nameof(UpdateStatusTone));
+        }
+
+        partial void OnUpdateStatusChanged(string value)
+        {
+            OnPropertyChanged(nameof(UpdateHeadline));
+            OnPropertyChanged(nameof(UpdateStatusTone));
+            OnPropertyChanged(nameof(UpdateDetailText));
+        }
+
+        partial void OnShowDownloadProgressChanged(bool value) => OnPropertyChanged(nameof(UpdateHeadline));
+        partial void OnCanInstallUpdateChanged(bool value)
+        {
+            OnPropertyChanged(nameof(CanStartInstall));
+            OnPropertyChanged(nameof(ShowCheckUpdateButton));
+            OnPropertyChanged(nameof(ShowRecheckUpdateButton));
+            OnPropertyChanged(nameof(ShowUpdateSupportNotice));
+            OnPropertyChanged(nameof(UpdateHeadline));
+            OnPropertyChanged(nameof(UpdateStatusTone));
         }
 
         [ObservableProperty]
@@ -178,6 +272,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             try { _startWithWindows = _startupLauncher != null && AppSettings.IsStartupRegistered(_startupLauncher); }
             catch (Exception ex) { App.LogCrashException(ex, "Settings.ReadStartup"); }
             _minimizeToTray = settings.MinimizeToTray;
+            _appThemeIndex = string.Equals(settings.AppTheme, "Dark", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
 
             _maxConcurrentSyncsIndex = settings.MaxConcurrentSyncs switch
             {

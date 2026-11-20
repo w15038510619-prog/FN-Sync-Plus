@@ -125,7 +125,9 @@ namespace FNSyncPlus.WinUI.Pages
             {
                 var dialog = new ContentDialog
                 {
-                    XamlRoot = XamlRoot, Title = historical ? "确认恢复历史版本" : retry ? "确认重试当前备份" : entire ? "确认恢复整个备份" : "确认恢复所选",
+                    XamlRoot = XamlRoot,
+                    RequestedTheme = ActualTheme,
+                    Title = historical ? "确认恢复历史版本" : retry ? "确认重试当前备份" : entire ? "确认恢复整个备份" : "确认恢复所选",
                     Content = new ScrollViewer { Content = detail, MaxHeight = 340 },
                     PrimaryButtonText = "开始恢复", CloseButtonText = "返回", DefaultButton = ContentDialogButton.Close
                 };
@@ -147,7 +149,7 @@ namespace FNSyncPlus.WinUI.Pages
 
         private async void BtnBrowseNasRestore_Click(object sender, RoutedEventArgs e)
         {
-            var dialog = new Dialogs.NasBrowserDialog { XamlRoot = XamlRoot, Title = "选择备份目录或其上一级目录" };
+            var dialog = new Dialogs.NasBrowserDialog { XamlRoot = XamlRoot, RequestedTheme = ActualTheme, Title = "选择备份目录或其上一级目录" };
             dialog.ViewModel.AllowReadOnlySelection = true;
             if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
             string selected = !string.IsNullOrWhiteSpace(dialog.ViewModel.ConfirmedSelectedPath)
@@ -157,11 +159,31 @@ namespace FNSyncPlus.WinUI.Pages
 
         private async void Details_Click(object sender, RoutedEventArgs e)
         {
-            var text = string.Join("\n\n", System.Linq.Enumerable.Select(ViewModel.PackageFiles,
-                file => $"{file.OriginalRelPath}\n存储位置：{file.StoredRelPath}\nSHA-256：{file.Sha256}"));
-            await new ContentDialog { XamlRoot = XamlRoot, Title = "备份高级详情", CloseButtonText = "关闭",
-                Content = new ScrollViewer { MaxHeight = 360, Content = new TextBlock { Text = text,
-                    IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap } } }.ShowAsync();
+            var sections = new System.Collections.Generic.List<string>();
+            if (ViewModel.FailedFilesList.Count > 0)
+            {
+                sections.Add("【失败文件清单】\n" + string.Join("\n", ViewModel.FailedFilesList.Select(
+                    f => $"• {FNSyncPlus.Core.Services.RestoreDisplayText.OriginalPath(f.OriginalRel)}：{f.ErrorMessage}")));
+            }
+            if (ViewModel.PackageFiles.Count > 0)
+            {
+                sections.Add("【备份文件校验值】\n" + string.Join("\n\n", ViewModel.PackageFiles.Select(
+                    file => $"{file.OriginalRelPath}\n大小：{file.FormattedSize}\nSHA-256：{file.Sha256}")));
+            }
+            string text = sections.Count > 0 ? string.Join("\n\n", sections) : "尚未加载备份清单，请先连接 NAS 并选择一个备份。";
+            await new ContentDialog
+            {
+                XamlRoot = XamlRoot,
+                RequestedTheme = ActualTheme,
+                Title = "备份高级详情",
+                CloseButtonText = "关闭",
+                Content = new ScrollViewer
+                {
+                    MaxHeight = 380,
+                    MinWidth = 420,
+                    Content = new TextBlock { Text = text, IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap, FontSize = 12 }
+                }
+            }.ShowAsync();
         }
 
         private async void BtnBrowseLocalRestore_Click(object sender, RoutedEventArgs e)

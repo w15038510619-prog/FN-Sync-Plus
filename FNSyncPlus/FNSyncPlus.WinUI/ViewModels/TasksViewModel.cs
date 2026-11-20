@@ -22,7 +22,10 @@ namespace FNSyncPlus.WinUI.ViewModels
         private int _totalTasksCount;
 
         [ObservableProperty]
-        private string _totalTasksCountText = "0 个保护目录";
+        private string _totalTasksCountText = "0 个任务";
+
+        [ObservableProperty]
+        private string _headerSummaryTone = "Neutral";
 
         [ObservableProperty]
         private int _syncingTasksCount;
@@ -112,10 +115,30 @@ namespace FNSyncPlus.WinUI.ViewModels
         private void UpdateMetrics()
         {
             TotalTasksCount = Tasks.Count;
-            TotalTasksCountText = $"{TotalTasksCount} 个保护目录";
             SyncingTasksCount = Tasks.Count(t => t.State == TaskSyncState.Syncing || t.State == TaskSyncState.Scanning);
             IdleTasksCount = Tasks.Count(t => t.State == TaskSyncState.Completed || t.State == TaskSyncState.Idle);
-            FailedTasksCount = Tasks.Count(t => t.State == TaskSyncState.Error);
+            FailedTasksCount = Tasks.Count(t => t.State == TaskSyncState.Error || t.State == TaskSyncState.ConfigurationError);
+
+            if (TotalTasksCount == 0)
+            {
+                TotalTasksCountText = "暂无任务";
+                HeaderSummaryTone = "Neutral";
+            }
+            else if (FailedTasksCount > 0)
+            {
+                TotalTasksCountText = $"{TotalTasksCount} 个任务 · {FailedTasksCount} 个需处理";
+                HeaderSummaryTone = "Error";
+            }
+            else if (SyncingTasksCount > 0)
+            {
+                TotalTasksCountText = $"{TotalTasksCount} 个任务 · {SyncingTasksCount} 个备份中";
+                HeaderSummaryTone = "Info";
+            }
+            else
+            {
+                TotalTasksCountText = $"{TotalTasksCount} 个保护目录";
+                HeaderSummaryTone = "Accent";
+            }
 
             HasTasks = TotalTasksCount > 0;
             IsEmpty = TotalTasksCount == 0;
