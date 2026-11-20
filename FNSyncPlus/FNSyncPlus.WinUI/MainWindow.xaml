@@ -43,7 +43,7 @@
                         VerticalAlignment="Center">
                         <TextBlock
                             x:Name="AppVersionTag"
-                            Text="v0.4.7"
+                            Text="v0.4.8"
                             FontSize="10"
                             FontWeight="Medium"
                             Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

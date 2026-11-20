@@ -1,6 +1,6 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Version = '0.4.7',
+    [string]$Version = '0.4.8',
     [string]$ReleaseNotes = "",
     [string]$MinimumClientVersion = '0.4.3',
     [Parameter(Mandatory)][string]$OutputRoot,
