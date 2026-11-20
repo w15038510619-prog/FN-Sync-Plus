@@ -58,6 +58,7 @@ namespace FNSyncPlus.Core.Services
     public class DiscoveredBackupPackage
     {
         public string PackageName { get; set; } = string.Empty;
+        public string Summary => $"{FileCount} 个文件 · {LastUpdated.ToLocalTime():yyyy-MM-dd HH:mm} · {(HasDamagedVersionRecords ? "部分记录需检查" : "可恢复")}";
         public string NasFolderUnc { get; set; } = string.Empty;
         public string OriginalSourceRoot { get; set; } = string.Empty;
         public int FileCount { get; set; }
@@ -90,6 +91,12 @@ namespace FNSyncPlus.Core.Services
             _manifestManager = manifestManager;
         }
 
+        /// <summary>Maps a manifest relative path onto the host separator (POSIX hosts use '/').</summary>
+        private static string ToLocalSeparators(string relativePath) =>
+            OperatingSystem.IsWindows()
+                ? relativePath.Replace('/', '\\')
+                : relativePath.Replace('\\', '/');
+
         private void Log(string level, string message)
         {
             LogEmitted?.Invoke(level, $"[{DateTime.Now:HH:mm:ss}] [{level}] {message}");
@@ -107,33 +114,43 @@ namespace FNSyncPlus.Core.Services
             VersionId = versionId
         };
 
-        private async Task<DiscoveredBackupPackage?> DiscoverProviderPackageAsync(INasStorageProvider provider,
+        public async Task<DiscoveredBackupPackage?> DiscoverProviderPackageAsync(INasStorageProvider provider,
             string path, string name, CancellationToken token)
         {
-            if (!string.IsNullOrEmpty(path))
+            string normalized = PathHelper.NormalizeRelPath(path);
+            string metaPath = string.IsNullOrEmpty(normalized) ? ".fnsync" : $"{normalized}/.fnsync";
+            var metaDirectory = await provider.GetItemAsync(metaPath, token).ConfigureAwait(false);
+            if (metaDirectory != null && !metaDirectory.IsDirectory) throw new InvalidDataException("备份元数据路径不是目录");
+            var versionDirectory = metaDirectory == null ? null :
+                await provider.GetItemAsync($"{metaPath}/manifest-versions", token).ConfigureAwait(false);
+            if (versionDirectory != null)
             {
-                string metaPath = $"{path.TrimEnd('/', '\\')}/.fnsync";
-                var metaDirectory = await provider.GetItemAsync(metaPath, token).ConfigureAwait(false);
-                if (metaDirectory != null && !metaDirectory.IsDirectory) throw new InvalidDataException("备份元数据路径不是目录");
-                var versionDirectory = metaDirectory == null ? null :
-                    await provider.GetItemAsync($"{metaPath}/manifest-versions", token).ConfigureAwait(false);
-                if (versionDirectory != null)
-                {
-                    if (!versionDirectory.IsDirectory) throw new InvalidDataException("版本化清单路径不是目录");
-                    var inspection = await new VersionedManifestStore().InspectForRestoreAsync(provider, path, token).ConfigureAwait(false);
-                    var snapshot = inspection.Snapshot ?? throw new InvalidDataException("存在版本化清单目录，但没有有效提交");
-                    var package = PackageFromManifest(name, path, snapshot.Manifest, snapshot.Id);
-                    package.HasDamagedVersionRecords = inspection.HasInvalidRecords;
-                    return package;
-                }
+                if (!versionDirectory.IsDirectory) throw new InvalidDataException("版本化清单路径不是目录");
+                var inspection = await new VersionedManifestStore().InspectForRestoreAsync(provider, path, token).ConfigureAwait(false);
+                var snapshot = inspection.Snapshot ?? throw new InvalidDataException("存在版本化清单目录，但没有有效提交");
+                var package = PackageFromManifest(name, path, snapshot.Manifest, snapshot.Id);
+                package.HasDamagedVersionRecords = inspection.HasInvalidRecords;
+                return package;
             }
             var manifest = await _manifestManager.LoadManifestAsync(provider, path, token).ConfigureAwait(false);
             return manifest.IsNew ? null : PackageFromManifest(name, path, manifest);
         }
 
+        private static (INasStorageProvider, DiscoveredBackupPackage) BindSmbPackage(INasStorageProvider provider, DiscoveredBackupPackage package)
+        {
+            if (provider is not SmbStorageProvider || !Path.IsPathFullyQualified(package.NasFolderUnc)) return (provider, package);
+            string root = Path.GetFullPath(provider.RootDisplayPath).TrimEnd('\\');
+            string folder = Path.GetFullPath(package.NasFolderUnc).TrimEnd('\\');
+            if (!folder.Equals(root, StringComparison.OrdinalIgnoreCase) && !folder.StartsWith(root + "\\", StringComparison.OrdinalIgnoreCase))
+                throw new IOException("备份不属于当前共享位置。");
+            return (new SmbStorageProvider(rootUncPath: folder), new DiscoveredBackupPackage {
+                PackageName = package.PackageName, NasFolderUnc = "", VersionId = package.VersionId });
+        }
+
         public async Task<Manifest> ReadPackageManifestAsync(INasStorageProvider provider,
             DiscoveredBackupPackage package, CancellationToken cancellationToken = default)
         {
+            (provider, package) = BindSmbPackage(provider, package);
             ArgumentNullException.ThrowIfNull(provider);
             ArgumentNullException.ThrowIfNull(package);
             if (package.VersionId == null)
@@ -166,9 +183,21 @@ namespace FNSyncPlus.Core.Services
                 // 1. 检查根目录本身是否就是一个备份包
                 string rootMeta = Path.Combine(longRoot, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName);
                 string legacyRootMeta = Path.Combine(longRoot, Manifest.LegacyManifestFileName);
+                string rootVersionDir = Path.Combine(longRoot, Manifest.MetadataDirName, "manifest-versions");
                 try
                 {
-                    if (ManifestFilePresent(rootMeta) || ManifestFilePresent(legacyRootMeta))
+                    if (Directory.Exists(rootVersionDir))
+                    {
+                        var provider = new SmbStorageProvider(rootUncPath: nasBackupRootUnc);
+                        var inspection = await new VersionedManifestStore().InspectForRestoreAsync(provider, "", cancellationToken).ConfigureAwait(false);
+                        if (inspection.Snapshot != null)
+                        {
+                            var package = PackageFromManifest(rootDi.Name, nasBackupRootUnc, inspection.Snapshot.Manifest, inspection.Snapshot.Id);
+                            package.HasDamagedVersionRecords = inspection.HasInvalidRecords;
+                            result.Add(package);
+                        }
+                    }
+                    else if (ManifestFilePresent(rootMeta) || ManifestFilePresent(legacyRootMeta))
                     {
                         var m = await _manifestManager.LoadManifestAsync(nasBackupRootUnc, cancellationToken);
                         if (!m.IsNew)
@@ -205,10 +234,22 @@ namespace FNSyncPlus.Core.Services
                         string subUnc = PathHelper.RemoveLongPathPrefix(sub.FullName);
                         string subMeta = Path.Combine(sub.FullName, Manifest.MetadataDirName, Manifest.IsolatedManifestFileName);
                         string legacySubMeta = Path.Combine(sub.FullName, Manifest.LegacyManifestFileName);
+                        string subVersionDir = Path.Combine(sub.FullName, Manifest.MetadataDirName, "manifest-versions");
 
                         try
                         {
-                            if (ManifestFilePresent(subMeta) || ManifestFilePresent(legacySubMeta))
+                            if (Directory.Exists(subVersionDir))
+                            {
+                                var provider = new SmbStorageProvider(rootUncPath: subUnc);
+                                var inspection = await new VersionedManifestStore().InspectForRestoreAsync(provider, "", cancellationToken).ConfigureAwait(false);
+                                if (inspection.Snapshot != null)
+                                {
+                                    var package = PackageFromManifest(sub.Name, subUnc, inspection.Snapshot.Manifest, inspection.Snapshot.Id);
+                                    package.HasDamagedVersionRecords = inspection.HasInvalidRecords;
+                                    result.Add(package);
+                                }
+                            }
+                            else if (ManifestFilePresent(subMeta) || ManifestFilePresent(legacySubMeta))
                             {
                                 var m = await _manifestManager.LoadManifestAsync(subUnc, cancellationToken);
                                 result.Add(new DiscoveredBackupPackage
@@ -420,7 +461,7 @@ namespace FNSyncPlus.Core.Services
                 foreach (var d in manifest.Directories)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    string dirTarget = Path.Combine(longLocal, d.OriginalRel.Replace('/', '\\'));
+                    string dirTarget = Path.Combine(longLocal, ToLocalSeparators(d.OriginalRel));
                     bool existed = Directory.Exists(dirTarget);
                     try
                     {
@@ -445,7 +486,7 @@ namespace FNSyncPlus.Core.Services
             {
                 if (!PathHelper.IsSafeRelativePath(file.StoredRel))
                     throw new InvalidDataException($"清单包含不安全的存储路径: {file.StoredRel}");
-                nasFiles.Add(new FileInfo(Path.Combine(longNas, file.StoredRel.Replace('/', '\\'))));
+                nasFiles.Add(new FileInfo(Path.Combine(longNas, ToLocalSeparators(file.StoredRel))));
             }
 
             report.TotalFiles = nasFiles.Count;
@@ -489,7 +530,7 @@ namespace FNSyncPlus.Core.Services
                     continue;
                 }
 
-                string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
+                string targetLocalFull = Path.Combine(longLocal, ToLocalSeparators(targetRel));
                 string targetDir = Path.GetDirectoryName(targetLocalFull)!;
 
                 // 冲突处理
@@ -642,6 +683,7 @@ namespace FNSyncPlus.Core.Services
             ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
             CancellationToken cancellationToken = default)
         {
+            (provider, package) = BindSmbPackage(provider, package);
             var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
             if (manifest.IsNew) throw new InvalidDataException("备份清单已不存在，请重新扫描");
             return await RunRestoreManifestAsync(provider, package.NasFolderUnc, destination,
@@ -653,6 +695,7 @@ namespace FNSyncPlus.Core.Services
             ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
             CancellationToken cancellationToken = default)
         {
+            (provider, package) = BindSmbPackage(provider, package);
             var requested = new HashSet<string>(originalPaths, StringComparer.OrdinalIgnoreCase);
             var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
             if (manifest.IsNew) throw new InvalidDataException("备份清单已不存在，请重新扫描");
@@ -669,6 +712,7 @@ namespace FNSyncPlus.Core.Services
             ConflictResolution conflictResolution = ConflictResolution.SkipExisting,
             CancellationToken cancellationToken = default)
         {
+            (provider, package) = BindSmbPackage(provider, package);
             ArgumentNullException.ThrowIfNull(requested);
             var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
             if (manifest.IsNew || manifest.History == null) throw new InvalidDataException("历史清单不可用，请重新扫描");
@@ -680,6 +724,26 @@ namespace FNSyncPlus.Core.Services
             if (matches.Count != 1) throw new InvalidDataException("历史记录已变化或无法唯一确认，请重新扫描");
             return await RunRestoreHistoryFileDetailedAsync(provider, package.NasFolderUnc, destination,
                 matches[0], cancellationToken, conflictResolution).ConfigureAwait(false);
+        }
+
+        public async Task<RestoreProgressReport> RestorePackageSelectionAsync(INasStorageProvider provider,
+            DiscoveredBackupPackage package, string destination, IReadOnlyCollection<string> originalFiles,
+            IReadOnlyCollection<string> originalDirectories, ConflictResolution conflictResolution,
+            CancellationToken cancellationToken = default)
+        {
+            if (originalFiles.Count == 0 && originalDirectories.Count == 0)
+                throw new ArgumentException("请选择要恢复的文件或文件夹。");
+            (provider, package) = BindSmbPackage(provider, package);
+            var manifest = await ReadPackageManifestAsync(provider, package, cancellationToken).ConfigureAwait(false);
+            if (manifest.IsNew) throw new InvalidDataException("备份已不存在，请刷新。");
+            var files = originalFiles.ToHashSet(StringComparer.Ordinal);
+            var directories = originalDirectories.ToHashSet(StringComparer.Ordinal);
+            manifest.Files = manifest.Files.Where(f => files.Contains(f.OriginalRel)).ToList();
+            manifest.Directories = manifest.Directories.Where(d => directories.Contains(d.OriginalRel)).ToList();
+            if (manifest.Files.Count != files.Count || manifest.Directories.Count != directories.Count)
+                throw new InvalidDataException("所选内容与备份不一致，请刷新。");
+            return await RunRestoreFilteredAsync(provider, package.NasFolderUnc, destination,
+                manifest, conflictResolution, cancellationToken, restoreDirectories: true).ConfigureAwait(false);
         }
 
         private async Task<RestoreProgressReport> RunRestoreManifestAsync(
@@ -711,7 +775,7 @@ namespace FNSyncPlus.Core.Services
                 string dirRel = PathHelper.NormalizeRelPath(dir.OriginalRel);
                 if (PathHelper.IsSafeRelativePath(dir.OriginalRel))
                 {
-                    string targetDir = Path.Combine(longLocal, dirRel.Replace('/', '\\'));
+                    string targetDir = Path.Combine(longLocal, ToLocalSeparators(dirRel));
                     if (!Directory.Exists(targetDir))
                     {
                         EnsureSafeRestoreDirectory(longLocal, targetDir);
@@ -742,7 +806,7 @@ namespace FNSyncPlus.Core.Services
                     continue;
                 }
 
-                string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
+                string targetLocalFull = Path.Combine(longLocal, ToLocalSeparators(targetRel));
                 string targetDir = Path.GetDirectoryName(targetLocalFull)!;
 
                 if (File.Exists(targetLocalFull))
@@ -921,10 +985,24 @@ namespace FNSyncPlus.Core.Services
             string localDestinationFolder,
             Manifest manifest,
             ConflictResolution conflictResolution,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool restoreDirectories = false)
         {
             var report = new RestoreProgressReport { TotalFiles = manifest.Files.Count };
             string longLocal = PathHelper.EnsureLongPathPrefix(localDestinationFolder);
+
+            if (restoreDirectories)
+            {
+                if (manifest.Directories.Any(d => !PathHelper.IsSafeRelativePath(d.OriginalRel)))
+                    throw new InvalidDataException("备份包含不安全的目录路径。");
+                foreach (var directory in manifest.Directories)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var target = Path.Combine(longLocal, ToLocalSeparators(PathHelper.NormalizeRelPath(directory.OriginalRel)));
+                    EnsureSafeRestoreDirectory(longLocal, target);
+                    report.RestoredDirectories++;
+                }
+            }
 
             foreach (var fileEntry in manifest.Files)
             {
@@ -937,7 +1015,7 @@ namespace FNSyncPlus.Core.Services
                     continue;
                 }
                 string targetRel = PathHelper.NormalizeRelPath(fileEntry.OriginalRel);
-                string targetLocalFull = Path.Combine(longLocal, targetRel.Replace('/', '\\'));
+                string targetLocalFull = Path.Combine(longLocal, ToLocalSeparators(targetRel));
                 string targetDir = Path.GetDirectoryName(targetLocalFull)!;
                 string tempRestorePath = Path.Combine(targetDir, $".fnsync_rst_retry_{Guid.NewGuid():N}.tmp");
                 try

@@ -1,0 +1,81 @@
+name: HTTPS Update Acceptance Harness
+
+on:
+  workflow_dispatch:
+    inputs:
+      prepare_timeout_sec:
+        description: 'Preparation timeout in seconds'
+        required: false
+        default: '300'
+  pull_request:
+    paths:
+      - 'tools/acceptance/https-update-acceptance.ps1'
+      - 'tools/release/**'
+      - '.github/workflows/https-update-acceptance.yml'
+      - 'tools/FNSyncPlus.LocalUpdateServer/**'
+      - 'FNSyncPlus/FNSyncPlus.Core/Updates/**'
+      - 'FNSyncPlus/FNSyncPlus.Updater/**'
+
+jobs:
+  acceptance-https-update:
+    name: Run Controlled Loopback HTTPS Update Acceptance
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [beta, stable]
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8.0 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore Solution
+        run: dotnet restore FNSyncPlus/FNSyncPlus.sln
+
+      - name: Build Solution and Tools
+        run: |
+          dotnet build FNSyncPlus/FNSyncPlus.sln -c Release --no-restore
+          dotnet build tools/FNSyncPlus.LocalUpdateServer/FNSyncPlus.LocalUpdateServer.csproj -c Release
+
+      - name: Run HTTPS Update Acceptance Suite
+        shell: pwsh
+        run: |
+          $timeout = if ("${{ inputs.prepare_timeout_sec }}" -ne "") { [int]"${{ inputs.prepare_timeout_sec }}" } else { 300 }
+          $work = Join-Path $PWD '.acceptance\online-beta-ci'
+          $versions = @('0.4.1','0.4.2','0.4.3')
+          if ('${{ matrix.channel }}' -eq 'stable') { $versions = @('0.4.5','0.4.6','0.4.7') }
+          $harnessArgs = @('-ExecutionPolicy','Bypass','-File','tools\acceptance\https-update-acceptance.ps1',
+            '-DotnetPath','dotnet','-WorkRoot',$work,'-PrepareTimeoutSeconds',"$timeout",'-VersionA',$versions[0],
+            '-VersionB',$versions[1],'-VersionC',$versions[2],'-Channel','${{ matrix.channel }}')
+          if ('${{ matrix.channel }}' -eq 'beta') { $harnessArgs += '-ControlledOnlineBeta' }
+          & powershell.exe @harnessArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "HTTPS 端到端更新验收测试失败，退出码: $LASTEXITCODE"
+          }
+          if (!(Get-Command openssl -ErrorAction SilentlyContinue)) {
+            $env:PATH += ";$env:ProgramFiles\Git\usr\bin"
+          }
+          python tools/release/Test-BetaPublisher.py (Join-Path $work 'build-b\manifest.json') (Join-Path $work 'keys\update-public.pem')
+          if ($LASTEXITCODE -ne 0) { throw 'Beta publication protocol test failed.' }
+
+      - name: Upload Test Evidences
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: https-update-acceptance-evidence-${{ matrix.channel }}
+          include-hidden-files: true
+          path: |
+            .acceptance/online-beta-ci/acceptance-result.json
+            .acceptance/online-beta-ci/server-facts.json
+            .acceptance/online-beta-ci/server-facts.json.requests.jsonl
+            .acceptance/online-beta-ci/server-stdout.log
+            .acceptance/online-beta-ci/server-stderr.log
+            .acceptance/online-beta-ci/storage-audit.log
+            .acceptance/online-beta-ci/layout/install/update.log
+            .acceptance/online-beta-ci/layout/install/.ops/*.json
+            .acceptance/online-beta-ci/layout/install/.health/report-*.json

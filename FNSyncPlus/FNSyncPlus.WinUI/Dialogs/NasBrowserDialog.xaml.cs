@@ -15,6 +15,7 @@ namespace FNSyncPlus.WinUI.Dialogs
         {
             InitializeComponent();
             ViewModel = AppServices.GetService<NasBrowserViewModel>();
+            ViewModel.AllowReadOnlySelection = false;
             ViewModel.ResetDialogSelection();
         }
 

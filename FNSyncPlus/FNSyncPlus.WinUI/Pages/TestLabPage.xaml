@@ -29,7 +29,7 @@
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <TextBlock Text="备份测试实验室 (Test Lab)" FontSize="18" FontWeight="SemiBold" />
                         <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="6,2" VerticalAlignment="Center">
-                            <TextBlock Text="v0.4.0-beta 内置验证系统" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" FontWeight="Medium" />
+                            <TextBlock Text="内部验证系统" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" FontWeight="Medium" />
                         </Border>
                     </StackPanel>
                     <TextBlock Text="安全沙箱环境自动化生成 254/255/256/300 字节临界文件，验证短名无损映射、多任务隔离与 SHA-256 逐字节完整性恢复。" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
@@ -54,6 +54,19 @@
                         <StackPanel Orientation="Horizontal" Spacing="6">
                             <FontIcon Glyph="&#xE74E;" FontSize="12" />
                             <TextBlock Text="导出测试报告" FontSize="12" />
+                        </StackPanel>
+                    </Button>
+
+                    <Button Command="{x:Bind ViewModel.RunStressAndFaultSuiteCommand}" Padding="12,7" ToolTipService.ToolTip="本地隔离开展 1000/5000 文件压力与基准测量">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE9D2;" FontSize="12" />
+                            <TextBlock Text="压力测试" FontSize="12" />
+                        </StackPanel>
+                    </Button>
+                    <Button Command="{x:Bind ViewModel.RunRestoreCenterSuiteCommand}" Padding="12,7" ToolTipService.ToolTip="在本地隔离目录运行名称、历史、损坏、安全与取消场景的恢复套件">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon Glyph="&#xE777;" FontSize="12" />
+                            <TextBlock Text="恢复中心套件" FontSize="12" />
                         </StackPanel>
                     </Button>
                 </StackPanel>

@@ -23,7 +23,7 @@ namespace FNSyncPlus.Core.Services
     /// <summary>
     /// 统一 NAS 连接状态管理服务（全局单例），管理飞牛原生个人空间与 SMB 登录、证书核对、断开连接及状态广播
     /// </summary>
-    public class NasConnectionService : INotifyPropertyChanged
+    public partial class NasConnectionService : INotifyPropertyChanged
     {
         private readonly SmbAuthService _smbService;
         private readonly AppSettings _settings;
@@ -104,6 +104,8 @@ namespace FNSyncPlus.Core.Services
             {
                 if (_state != value)
                 {
+                    if (value is NasConnectionState.Disconnected or NasConnectionState.AuthenticationFailed or NasConnectionState.ConnectionLost)
+                        _teamSessionPassword = null;
                     _state = value;
                     OnPropertyChanged();
                     OnPropertyChanged(nameof(IsConnected));
@@ -191,6 +193,7 @@ namespace FNSyncPlus.Core.Services
 
             // 绑定 TaskManager 存储提供程序委托
             _taskManager.StorageProviderSupplier = () => CurrentStorageProvider;
+            _taskManager.TaskStorageProviderSupplier = GetTaskStorageAsync;
 
             // 配置全局设备自签名证书指纹信任验证器
             FnOsApiClient.TrustedThumbprintValidator = (host, thumbprint) =>
@@ -257,6 +260,18 @@ namespace FNSyncPlus.Core.Services
             if (!await _connectionLock.WaitAsync(0).ConfigureAwait(false))
             {
                 return (false, "当前已有连接或断开操作正在执行，请稍候。");
+            }
+
+            if (!_taskManager.TryEnterMaintenanceHold(out var connectionLease, "更改 NAS 连接"))
+            {
+                _connectionLock.Release();
+                return (false, "正在执行维护操作，请稍后连接。");
+            }
+            using var connectionHold = connectionLease;
+            if (_taskManager.HasRunningWork)
+            {
+                _connectionLock.Release();
+                return (false, "有备份正在执行，请先暂停并等待任务结束后切换连接。");
             }
 
             _activeConnectionCts?.Cancel();
@@ -406,6 +421,7 @@ namespace FNSyncPlus.Core.Services
                     if (authResult.Success)
                     {
                         await ReplaceCurrentProviderAsync(fnProvider).ConfigureAwait(false);
+                        _teamSessionPassword = password;
                         CurrentUid = authResult.UserUid;
                         PersonalRootDisplay = fnProvider.RootDisplayPath;
 
@@ -539,6 +555,7 @@ namespace FNSyncPlus.Core.Services
         {
             bool remember = rememberCredentials ?? _pendingTwoFactorRemember;
             string? password = _pendingTwoFactorPassword;
+            _teamSessionPassword = password;
             _pendingTwoFactorRemember = false;
             _pendingTwoFactorPassword = null;
             _settings.NasServer = ServerAddress;
@@ -596,12 +613,26 @@ namespace FNSyncPlus.Core.Services
                 }
             }
 
+            if (!_taskManager.TryEnterMaintenanceHold(out var disconnectLease, "断开 NAS 连接"))
+            {
+                _connectionLock.Release();
+                LastError = "正在执行维护操作，请稍后断开。";
+                return;
+            }
+            using var disconnectHold = disconnectLease;
+            if (_taskManager.HasRunningWork)
+            {
+                _connectionLock.Release();
+                LastError = "有备份正在执行，请先暂停并等待任务结束后断开连接。";
+                return;
+            }
             try
             {
                 _activeConnectionCts?.Cancel();
                 _activeConnectionCts = null;
                 _pendingTwoFactorPassword = null;
                 _pendingTwoFactorRemember = false;
+                _teamSessionPassword = null;
 
                 // 1. 先安全通知 TaskManager 标记 NAS 离线，停止依赖当前连接的活动
                 _taskManager.SetNasOnlineState(false);
@@ -840,8 +871,7 @@ namespace FNSyncPlus.Core.Services
         {
             try
             {
-                string localApp = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                string logDir = Path.Combine(localApp, "FNSyncPlus", "logs");
+                string logDir = Path.Combine(AppStorageRoot.LocalAppDataDir(), "logs");
                 Directory.CreateDirectory(logDir);
                 string logFile = Path.Combine(logDir, $"connection_{DateTime.Now:yyyyMMdd}.log");
                 string logMsg = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{stage}] {ex.GetType().FullName}: {ex.Message}\n{ex.StackTrace}\n";

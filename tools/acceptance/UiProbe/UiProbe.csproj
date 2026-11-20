@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>UiProbe</AssemblyName>
+    <RootNamespace>UiProbe</RootNamespace>
+    <!-- Acceptance-only helper; not shipped with the product. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+
+</Project>

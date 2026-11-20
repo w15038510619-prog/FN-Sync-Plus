@@ -18,23 +18,12 @@ namespace FNSyncPlus.WinUI.Pages
         private bool _isShowingDetails = false;
         private bool _isEditingSettings = false;
         private bool _isInspectingInterruption = false;
-        private bool _isViewingLegacy = false;
 
         public TasksPage()
         {
             ViewModel = AppServices.GetService<TasksViewModel>();
             InitializeComponent();
-            BtnViewLegacyTasks.Visibility = AppServices.GetService<AppSettings>().IsVersionedBetaProfile ? Visibility.Visible : Visibility.Collapsed;
-            if (AppServices.IsVersionedBetaSession)
-            {
-                BetaSafetyNotice.Text = "新版备份仍在试用。旧任务配置已保留但不会自动运行，可点击“查看旧任务”；请勿让其他设备同时写入同一备份目录。";
-                BetaSafetyNotice.Visibility = Visibility.Visible;
-            }
-            else if (AppServices.IsLegacyEngineSession)
-            {
-                BetaSafetyNotice.Text = "旧版引擎仅供诊断，历史数据保护存在风险，请勿用于正式文件。";
-                BetaSafetyNotice.Visibility = Visibility.Visible;
-            }
+            BetaSafetyNotice.Visibility = Visibility.Collapsed;
 
             Loaded += OnPageLoaded;
             Unloaded += OnPageUnloaded;
@@ -79,43 +68,6 @@ namespace FNSyncPlus.WinUI.Pages
                 XamlRoot = this.XamlRoot ?? App.MainWindowInstance?.Content?.XamlRoot
             };
             await dialog.ShowAsync();
-        }
-
-        private async void BtnViewLegacyTasks_Click(object sender, RoutedEventArgs e)
-        {
-            if (_isViewingLegacy || XamlRoot == null) return;
-            _isViewingLegacy = true;
-            try
-            {
-                var settings = AppServices.GetService<AppSettings>();
-                var legacy = await Task.Run(settings.ReadVersionedLegacySettings);
-                var text = new StringBuilder();
-                if (legacy == null || (legacy.Tasks.Count == 0 && string.IsNullOrWhiteSpace(legacy.LegacySourceFolder) && string.IsNullOrWhiteSpace(legacy.LegacyTargetShare)))
-                {
-                    text.AppendLine("没有找到本软件的旧任务。若之前使用飞牛官方同步，请在添加文件夹时选择本地目录和飞牛上的已有目录。");
-                }
-                else
-                {
-                    text.AppendLine("以下是本软件旧配置中的任务，仅供查看；旧配置没有被修改。");
-                    if (!string.IsNullOrWhiteSpace(legacy.LegacySourceFolder) || !string.IsNullOrWhiteSpace(legacy.LegacyTargetShare))
-                        text.AppendLine($"\n旧单任务\n本地：{legacy.LegacySourceFolder}\n目标：{legacy.LegacyTargetShare}");
-                    foreach (var task in legacy.Tasks.Take(50))
-                    {
-                        if (task == null) { text.AppendLine("\n有一项旧任务无效，请先检查旧配置。"); continue; }
-                        text.AppendLine($"\n{task.TaskName}\n本地：{task.SourceFolder}\n目标：{task.DestinationFolder}");
-                    }
-                    if (legacy.Tasks.Count > 50) text.AppendLine($"\n另有 {legacy.Tasks.Count - 50} 项未在此列出。");
-                }
-                text.AppendLine("\n迁移前请停止旧程序和其他可能写入相同目标的设备。选择已有飞牛目录用于复用，并为新版备份选择独立位置；匹配文件会在 NAS 内复制并占用空间。");
-                await new ContentDialog { Title = "查看旧任务", Content = new ScrollViewer { MaxHeight = 420,
-                    Content = new TextBlock { Text = text.ToString(), TextWrapping = TextWrapping.Wrap } },
-                    CloseButtonText = "知道了", XamlRoot = XamlRoot }.ShowAsync();
-            }
-            catch (Exception ex)
-            {
-                await new ContentDialog { Title = "无法查看旧任务", Content = ex.Message, CloseButtonText = "知道了", XamlRoot = XamlRoot }.ShowAsync();
-            }
-            finally { _isViewingLegacy = false; }
         }
 
         private async void InspectInterruptedBackup(SyncTaskItemViewModel item)
@@ -252,7 +204,8 @@ namespace FNSyncPlus.WinUI.Pages
                     PrimaryButtonText = "前往连接",
                     CloseButtonText = "取消",
                     DefaultButton = ContentDialogButton.Primary,
-                    XamlRoot = this.XamlRoot ?? App.MainWindowInstance?.Content?.XamlRoot
+                    XamlRoot = this.XamlRoot ?? App.MainWindowInstance?.Content?.XamlRoot,
+                    RequestedTheme = this.ActualTheme
                 };
 
                 var result = await dialog.ShowAsync();
@@ -290,7 +243,8 @@ namespace FNSyncPlus.WinUI.Pages
 
                 var dialog = new TaskDetailsDialog(taskItem.Model)
                 {
-                    XamlRoot = this.XamlRoot
+                    XamlRoot = this.XamlRoot,
+                    RequestedTheme = this.ActualTheme
                 };
 
                 await dialog.ShowAsync();
@@ -317,7 +271,8 @@ namespace FNSyncPlus.WinUI.Pages
                 var tm = AppServices.GetService<FNSyncPlus.Core.Services.TaskManager>();
                 var dialog = new TaskSettingsDialog(taskItem.Model, tm)
                 {
-                    XamlRoot = this.XamlRoot
+                    XamlRoot = this.XamlRoot,
+                    RequestedTheme = this.ActualTheme
                 };
 
                 await dialog.ShowAsync();
@@ -349,7 +304,8 @@ namespace FNSyncPlus.WinUI.Pages
                     PrimaryButtonText = "确认移除",
                     CloseButtonText = "取消",
                     DefaultButton = ContentDialogButton.Close,
-                    XamlRoot = this.XamlRoot
+                    XamlRoot = this.XamlRoot,
+                    RequestedTheme = this.ActualTheme
                 };
 
                 var res = await confirmDialog.ShowAsync();

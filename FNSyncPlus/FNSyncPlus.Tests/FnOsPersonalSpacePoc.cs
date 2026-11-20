@@ -46,7 +46,7 @@ namespace FNSyncPlus.Tests
             Console.WriteLine("================================================================================");
 
             // 1. 获取凭据 (优先使用系统 DPAPI 保护的凭据，或环境变量)
-            string server = Environment.GetEnvironmentVariable("FNOS_SERVER") ?? "192.168.8.120";
+            string server = Environment.GetEnvironmentVariable("FNOS_SERVER") ?? "192.0.2.10";
             string? username = Environment.GetEnvironmentVariable("FNOS_USER");
             string? password = Environment.GetEnvironmentVariable("FNOS_PASS");
 

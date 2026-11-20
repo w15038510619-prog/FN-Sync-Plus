@@ -45,6 +45,24 @@ namespace FNSyncPlus.Core.Services
         private readonly CancellationTokenSource _managerCts = new();
         private readonly Task _queueWorkerTask;
 
+        private volatile bool _maintenanceHold;
+        private bool _drainQueuedBackups;
+        private bool _waitingForSlot;
+        private int _activeRestores;
+
+        public IDisposable? TryBeginFileRestore()
+        {
+            lock (_taskLifecycleLock)
+            {
+                if (_stopping || _maintenanceHold) return null;
+                _activeRestores++;
+                return new MaintenanceLease(Guid.NewGuid().ToString("N"), "恢复文件", _ =>
+                {
+                    lock (_taskLifecycleLock) _activeRestores--;
+                });
+            }
+        }
+        private string? _maintenanceOwnerId;   // guarded by _taskLifecycleLock
         private volatile bool _isNasOnline = true;
         private bool _nasStateInitialized;
         private bool _stopping;
@@ -61,6 +79,16 @@ namespace FNSyncPlus.Core.Services
         /// 统一 NAS 存储提供程序委托（由 NasConnectionService 或工厂提供）
         /// </summary>
         public Func<INasStorageProvider?>? StorageProviderSupplier { get; set; }
+        public Func<SyncTask, CancellationToken, Task<INasStorageProvider?>>? TaskStorageProviderSupplier { get; set; }
+        private static bool SupportsVersionedProvider(SyncTask task) => task.ProviderType == StorageProviderType.FnOsPersonal ||
+            task.ProviderType == StorageProviderType.SmbShare && task.DestinationFolder.StartsWith(@"\\", StringComparison.Ordinal);
+        public static string BackupTarget(SyncTask task)
+        {
+            if (task.ProviderType != StorageProviderType.SmbShare) return task.DestinationFolder;
+            var (_, _, root, isRoot) = PathHelper.ParseUncShare(task.DestinationFolder);
+            if (isRoot || root.Length >= task.DestinationFolder.Length) throw new InvalidOperationException("请选择团队共享内的独立备份子目录。");
+            return task.DestinationFolder[root.Length..].TrimStart('\\', '/').Replace('\\', '/');
+        }
 
         private bool _useExperimentalVersionedBackup;
         public bool UseExperimentalVersionedBackup
@@ -105,18 +133,18 @@ namespace FNSyncPlus.Core.Services
                 if (task.ExperimentalInitializationId != null &&
                     (!Guid.TryParseExact(task.ExperimentalInitializationId, "N", out var initializationId) || initializationId == Guid.Empty))
                     throw new InvalidOperationException("首次备份归属标识无效，已停止任务。");
-                if (settings.IsVersionedBetaProfile && (task.ProviderType != StorageProviderType.FnOsPersonal ||
+                if (settings.IsVersionedBetaProfile && (!SupportsVersionedProvider(task) ||
                     !string.Equals(task.BackupStorageFormat, IsolatedVersionedFormat, StringComparison.Ordinal)))
                     throw new InvalidOperationException("新版配置包含未明确迁移的旧任务，已阻止自动启动。");
                 if (task.BackupStorageFormat != null &&
-                    (!experimentalVersionedBackup || task.ProviderType != StorageProviderType.FnOsPersonal ||
+                    (!experimentalVersionedBackup || !SupportsVersionedProvider(task) ||
                      !string.Equals(task.BackupStorageFormat, IsolatedVersionedFormat, StringComparison.Ordinal)))
                     throw new InvalidOperationException("任务包含不支持的备份格式，已阻止旧同步引擎运行；请保留配置并使用对应版本处理。");
             }
             _useExperimentalVersionedBackup = experimentalVersionedBackup;
             if (experimentalVersionedBackup)
             {
-                foreach (var task in settings.Tasks.Where(t => t.ProviderType == StorageProviderType.FnOsPersonal))
+                foreach (var task in settings.Tasks.Where(SupportsVersionedProvider))
                 {
                     task.IsExperimentalBackup = true;
                     task.BackupStorageFormat = IsolatedVersionedFormat;
@@ -165,6 +193,14 @@ namespace FNSyncPlus.Core.Services
             if (!_settings.IsVersionedBetaProfile) return;
             var legacy = _settings.ReadVersionedLegacySettings();
             if (legacy == null) return;
+            if (task.ProviderType == StorageProviderType.SmbShare)
+            {
+                BackupTarget(task);
+                foreach (var old in legacy.Tasks.Where(t => t.ProviderType == StorageProviderType.SmbShare))
+                    if (PathHelper.ArePathsSameOrNested(task.DestinationFolder, old.DestinationFolder, out _))
+                        throw new InvalidOperationException("团队备份目标与旧任务重叠，请选择独立目录。");
+                return;
+            }
             if (!string.IsNullOrWhiteSpace(legacy.LegacySourceFolder) || !string.IsNullOrWhiteSpace(legacy.LegacyTargetShare))
                 throw new InvalidOperationException("旧程序存在尚未确认的单任务配置，不能判断目标是否重叠。");
             if (!PathHelper.IsSafeRelativePath(task.DestinationFolder)) throw new InvalidOperationException("新版备份目标路径无效");
@@ -194,12 +230,12 @@ namespace FNSyncPlus.Core.Services
         {
             if (task == null) throw new ArgumentNullException(nameof(task));
             _settings.EnsureIsolatedTestTask(task);
-            if (_settings.IsVersionedBetaProfile && (!UseExperimentalVersionedBackup || task.ProviderType != StorageProviderType.FnOsPersonal))
+            if (_settings.IsVersionedBetaProfile && (!UseExperimentalVersionedBackup || !SupportsVersionedProvider(task)))
                 throw new InvalidOperationException("新版试验配置仅接受飞牛版本化备份任务。");
             EnsureSeparateFromLegacyTasks(task);
             if (task.BackupStorageFormat != null || task.ExperimentalInitializationId != null)
                 throw new InvalidOperationException("不能把已有备份格式的任务作为新任务添加");
-            task.IsExperimentalBackup = UseExperimentalVersionedBackup && task.ProviderType == StorageProviderType.FnOsPersonal;
+            task.IsExperimentalBackup = UseExperimentalVersionedBackup && SupportsVersionedProvider(task);
             task.RequiresNewExperimentalBackup = task.IsExperimentalBackup;
             task.ExperimentalPendingInitialization = task.IsExperimentalBackup;
             if (!string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot) && !task.IsExperimentalBackup)
@@ -370,10 +406,31 @@ namespace FNSyncPlus.Core.Services
         /// <summary>
         /// 触发指定任务立即执行同步
         /// </summary>
+        private readonly Dictionary<string, IReadOnlyDictionary<string, string>> _confirmedRenames = new(StringComparer.Ordinal);
+
+        private IReadOnlyDictionary<string, string>? TakeConfirmedRenames(string taskId)
+        {
+            lock (_taskLifecycleLock)
+            {
+                if (_confirmedRenames.Remove(taskId, out var pairs)) return pairs;
+                return null;
+            }
+        }
+
         public void TriggerSync(string taskId)
         {
             lock (_taskLifecycleLock)
             {
+                if (_drainQueuedBackups)
+                {
+                    var deferred = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+                    if (deferred != null)
+                    {
+                        deferred.LastSyncStatus = "正在准备更新，请在更新结束后同步";
+                        TaskStateChanged?.Invoke(deferred);
+                    }
+                    return;
+                }
                 if (_stopping || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId) || _runningCompletions.ContainsKey(taskId)) return;
                 var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
                 if (task == null || !task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing)
@@ -411,6 +468,23 @@ namespace FNSyncPlus.Core.Services
                     AppendTaskLog(task, "INFO", "任务已加入执行队列，等待调度...");
                 }
             }
+        }
+
+        /// <summary>
+        /// 记录用户对“待处理改名差异”的显式确认配对，然后触发一次同步。配对会在提交前按当前
+        /// 源文件内容重新校验；内容已变化时本次同步仍会停止并要求重新扫描。
+        /// </summary>
+        public void TriggerSyncWithConfirmedRenames(string taskId, AmbiguousRenameResolution resolution)
+        {
+            ArgumentNullException.ThrowIfNull(resolution);
+            lock (_taskLifecycleLock)
+            {
+                var task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
+                if (task == null) return;
+                _confirmedRenames[taskId] = resolution.Pairs;
+                AppendTaskLog(task, "INFO", $"用户确认了 {resolution.Pairs.Count} 组改名配对，将在提交前重新校验内容");
+            }
+            TriggerSync(taskId);
         }
 
         /// <summary>
@@ -496,7 +570,7 @@ namespace FNSyncPlus.Core.Services
                     (!_settings.IsVersionedBetaTestProfile || _settings.HasIsolatedTestBoundary))) ||
                     !UseExperimentalVersionedBackup || !task.IsExperimentalBackup)
                     throw new InvalidOperationException("中断恢复仅支持新版备份任务");
-                if (_stopping || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId))
+                if (_maintenanceHold || _stopping || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId))
                     throw new InvalidOperationException("任务正在停止、移除或执行其他恢复操作");
                 _settings.EnsureIsolatedTestTask(task);
                 EnsureSeparateFromLegacyTasks(task);
@@ -557,7 +631,7 @@ namespace FNSyncPlus.Core.Services
                 _owner = owner; _task = task; _gate = gate; _destination = task.DestinationFolder;
             }
 
-            private INasStorageProvider CheckedProvider()
+            private async Task<INasStorageProvider> CheckedProviderAsync()
             {
                 lock (_owner._taskLifecycleLock)
                 {
@@ -568,8 +642,8 @@ namespace FNSyncPlus.Core.Services
                     _owner._settings.EnsureIsolatedTestTask(_task);
                     _owner.EnsureSeparateFromLegacyTasks(_task);
                 }
-                var provider = _owner.StorageProviderSupplier?.Invoke();
-                if (provider == null || !provider.IsAuthenticated || provider.ProviderType != StorageProviderType.FnOsPersonal)
+                var provider = _owner.TaskStorageProviderSupplier != null ? await _owner.TaskStorageProviderSupplier(_task, _owner._managerCts.Token).ConfigureAwait(false) : _owner.StorageProviderSupplier?.Invoke();
+                if (provider == null || !provider.IsAuthenticated || provider.ProviderType != _task.ProviderType)
                     throw new InvalidOperationException("飞牛未连接，不能检查中断状态");
                 if (provider is FnOsPersonalStorageProvider fn &&
                     ((!string.IsNullOrWhiteSpace(_task.NasUsername) && !string.Equals(_task.NasUsername, fn.CurrentUsername, StringComparison.Ordinal)) ||
@@ -590,26 +664,26 @@ namespace FNSyncPlus.Core.Services
                 try
                 {
                     if (Volatile.Read(ref _closing) != 0) throw new ObjectDisposedException(nameof(IsolatedRecoverySession));
-                    return await operation(CheckedProvider(), _owner._managerCts.Token).ConfigureAwait(false);
+                    return await operation(await CheckedProviderAsync().ConfigureAwait(false), _owner._managerCts.Token).ConfigureAwait(false);
                 }
                 finally { _operation.Release(); }
             }
 
             public Task<ExperimentalProjectionRecoveryInspector.Inspection?> InspectAsync() =>
-                RunAsync((provider, token) => new ExperimentalProjectionRecoveryLocator().LocateAsync(provider, _destination, token));
+                RunAsync((provider, token) => new ExperimentalProjectionRecoveryLocator().LocateAsync(provider, BackupTarget(_task), token));
 
             public Task<ExperimentalStableLockRecovery.Inspection?> InspectStableLockAsync() =>
-                RunAsync((provider, token) => new ExperimentalStableLockRecovery().InspectAsync(provider, _destination, token));
+                RunAsync((provider, token) => new ExperimentalStableLockRecovery().InspectAsync(provider, BackupTarget(_task), token));
 
             public Task<ExperimentalInitializationLockRecovery.Inspection?> InspectInitializationLockAsync() =>
                 RunAsync((provider, token) => new ExperimentalInitializationLockRecovery().InspectAsync(provider, _task, token));
 
             public Task<ExperimentalProjectionRecovery.Recovered> RecoverAsync(
                 ExperimentalProjectionRecoveryInspector.Inspection expected, string acknowledgement) =>
-                RunAsync((provider, token) => new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(provider, _destination, expected, acknowledgement, token));
+                RunAsync((provider, token) => new ExperimentalProjectionRecovery().RecoverAfterOwnerStoppedAsync(provider, BackupTarget(_task), expected, acknowledgement, token));
 
             public Task ReleaseStableLockAsync(ExperimentalStableLockRecovery.Inspection expected, string acknowledgement) =>
-                RunAsync(async (provider, token) => { await new ExperimentalStableLockRecovery().ReleaseAfterOwnerStoppedAsync(provider, _destination, expected, acknowledgement, token).ConfigureAwait(false); return true; });
+                RunAsync(async (provider, token) => { await new ExperimentalStableLockRecovery().ReleaseAfterOwnerStoppedAsync(provider, BackupTarget(_task), expected, acknowledgement, token).ConfigureAwait(false); return true; });
 
             public Task ReleaseInitializationLockAsync(ExperimentalInitializationLockRecovery.Inspection expected, string acknowledgement) =>
                 RunAsync(async (provider, token) => { await new ExperimentalInitializationLockRecovery().ReleaseAfterOwnerStoppedAsync(provider, _task, expected, acknowledgement, token).ConfigureAwait(false); return true; });
@@ -623,6 +697,17 @@ namespace FNSyncPlus.Core.Services
             }
         }
 
+        /// <summary>
+        /// Wakes the queue worker without enqueueing work, so a released hold is noticed promptly
+        /// instead of after the polling interval.
+        /// </summary>
+        private void WakeQueueWorker()
+        {
+            try { _queueSignal.Release(); }
+            catch (ObjectDisposedException) { }
+            catch (SemaphoreFullException) { }
+        }
+
         private async Task ProcessQueueLoopAsync(CancellationToken token)
         {
             while (!token.IsCancellationRequested)
@@ -631,14 +716,51 @@ namespace FNSyncPlus.Core.Services
                 {
                     await _queueSignal.WaitAsync(token).ConfigureAwait(false);
 
-                    if (_taskQueue.TryDequeue(out string? taskId))
+                    // The hold is checked under the lifecycle lock, so a task can never slip past it
+                    // between the check and the registration below: either the hold is already set
+                    // (the item stays queued) or the task registers as running first and the gate
+                    // will wait for it.
+                    SyncTask? task;
+                    string? taskId;
+                    bool held;
+                    lock (_taskLifecycleLock)
                     {
-                        SyncTask? task;
-                        lock (_taskLifecycleLock)
+                        held = _maintenanceHold && !_drainQueuedBackups;
+                        if (!held && _taskQueue.TryDequeue(out taskId))
                         {
                             task = _settings.Tasks.FirstOrDefault(t => t.TaskId == taskId);
-                            if (_stopping || task == null || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId) || !task.Enabled || task.IsUserPaused || task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing || task.State == TaskSyncState.ConfigurationError) continue;
+                            if (_stopping || task == null || _removingTasks.Contains(taskId) ||
+                                _recoverySessions.ContainsKey(taskId) || !task.Enabled || task.IsUserPaused ||
+                                task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing ||
+                                task.State == TaskSyncState.ConfigurationError)
+                            {
+                                continue;
+                            }
+                            _waitingForSlot = true;
                         }
+                        else if (!held)
+                        {
+                            continue;
+                        }
+                        else
+                        {
+                            task = null;
+                            taskId = null;
+                        }
+                    }
+
+                    if (held)
+                    {
+                        // An update is being installed: keep the queued work pending and do not start
+                        // anything new. Running tasks are not touched and are not waited for here.
+                        _queueSignal.Release();
+                        await Task.Delay(250, token).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    {
+
+                        if (task == null || taskId == null) continue;
 
                         // 等待获取全局并发信号量槽位
                         await _concurrencySemaphore.WaitAsync(token).ConfigureAwait(false);
@@ -647,6 +769,17 @@ namespace FNSyncPlus.Core.Services
                         TaskCompletionSource completion;
                         lock (_taskLifecycleLock)
                         {
+                            _waitingForSlot = false;
+                            if (_maintenanceHold && !_drainQueuedBackups)
+                            {
+                                // The hold was taken while this item was waiting for a concurrency
+                                // slot. Put it back rather than dropping it, so the pending backup
+                                // runs once the update has finished or has been abandoned.
+                                _concurrencySemaphore.Release();
+                                if (!_taskQueue.Contains(taskId)) _taskQueue.Enqueue(taskId);
+                                _queueSignal.Release();
+                                continue;
+                            }
                             if (_stopping || !_settings.Tasks.Contains(task) || _removingTasks.Contains(taskId) || _recoverySessions.ContainsKey(taskId) ||
                                 _runningCompletions.ContainsKey(taskId) || !task.Enabled || task.IsUserPaused ||
                                 task.State == TaskSyncState.Paused || task.State == TaskSyncState.Removing ||
@@ -707,7 +840,7 @@ namespace FNSyncPlus.Core.Services
         {
             taskToken.ThrowIfCancellationRequested();
             if ((_settings.IsVersionedBetaProfile && !task.IsExperimentalBackup) || (task.IsExperimentalBackup
-                ? !UseExperimentalVersionedBackup || task.ProviderType != StorageProviderType.FnOsPersonal ||
+                ? !UseExperimentalVersionedBackup || !SupportsVersionedProvider(task) ||
                   !string.Equals(task.BackupStorageFormat, IsolatedVersionedFormat, StringComparison.Ordinal)
                 : task.BackupStorageFormat != null))
             {
@@ -763,7 +896,9 @@ namespace FNSyncPlus.Core.Services
             }
 
             // The active fnOS connection must never redirect a local/SMB task into personal storage.
-            var provider = task.ProviderType == StorageProviderType.FnOsPersonal ? StorageProviderSupplier?.Invoke() : null;
+            var provider = TaskStorageProviderSupplier != null ? await TaskStorageProviderSupplier(task, taskToken).ConfigureAwait(false) :
+                task.ProviderType == StorageProviderType.FnOsPersonal ? StorageProviderSupplier?.Invoke() : null;
+            string target = task.IsExperimentalBackup ? BackupTarget(task) : task.DestinationFolder;
             if (task.ProviderType == StorageProviderType.FnOsPersonal &&
                 (!_isNasOnline || provider == null || provider.ProviderType != StorageProviderType.FnOsPersonal || !provider.IsAuthenticated))
             {
@@ -843,12 +978,12 @@ namespace FNSyncPlus.Core.Services
                     if (!task.RequiresNewExperimentalBackup &&
                         (!_isolatedProjections.ContainsKey(task.TaskId) || task.Strategy == BackupStrategy.Mirror))
                     {
-                        task.CurrentFile = "正在核验隔离备份的已有物理目录及发布记录";
+                        task.CurrentFile = "正在检查已有备份";
                         TaskStateChanged?.Invoke(task);
                         var discovery = new ExperimentalProjectionDiscovery();
                         var found = task.ExperimentalFirstPublicationPending
-                            ? await discovery.DiscoverFirstPublicationAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false)
-                            : await discovery.DiscoverAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false);
+                            ? await discovery.DiscoverFirstPublicationAsync(provider, target, taskToken).ConfigureAwait(false)
+                            : await discovery.DiscoverAsync(provider, target, taskToken).ConfigureAwait(false);
                         if (found != null) _isolatedProjections[task.TaskId] = new IsolatedProjectionState(found.Plan, found.Publication);
                     }
                     AppendTaskLog(task, "INFO", "隔离试验：正在准备版本化内容及物理候选目录。");
@@ -862,9 +997,10 @@ namespace FNSyncPlus.Core.Services
                     bool initializing = task.RequiresNewExperimentalBackup;
                     var result = initializing
                         ? string.IsNullOrWhiteSpace(task.ExperimentalExistingRoot)
-                            ? await experimental.CreateNewAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId, task.MirrorDeletionEnabled).ConfigureAwait(false)
-                            : await experimental.CreateNewFromExistingAsync(provider, task.SourceFolder, task.DestinationFolder, task.ExperimentalExistingRoot, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId, task.MirrorDeletionEnabled).ConfigureAwait(false)
-                        : await experimental.RunAsync(provider, task.SourceFolder, task.DestinationFolder, taskToken, task.Strategy, settlingDelay, task.MirrorDeletionEnabled).ConfigureAwait(false);
+                            ? await experimental.CreateNewAsync(provider, task.SourceFolder, target, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId, task.MirrorDeletionEnabled).ConfigureAwait(false)
+                            : await experimental.CreateNewFromExistingAsync(provider, task.SourceFolder, target, task.ExperimentalExistingRoot, taskToken, task.Strategy, settlingDelay, task.ExperimentalInitializationId, task.MirrorDeletionEnabled).ConfigureAwait(false)
+                        : await experimental.RunAsync(provider, task.SourceFolder, target, taskToken, task.Strategy, settlingDelay, task.MirrorDeletionEnabled,
+                            TakeConfirmedRenames(task.TaskId)).ConfigureAwait(false);
                     task.RequiresNewExperimentalBackup = false;
                     if (initializing)
                     {
@@ -876,37 +1012,37 @@ namespace FNSyncPlus.Core.Services
                     if (result.ResumedInitialization && !_isolatedProjections.ContainsKey(task.TaskId))
                     {
                         var existingPublication = await new ExperimentalProjectionDiscovery()
-                            .DiscoverFirstPublicationAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false);
+                            .DiscoverFirstPublicationAsync(provider, target, taskToken).ConfigureAwait(false);
                         if (existingPublication != null)
                             _isolatedProjections[task.TaskId] = new IsolatedProjectionState(existingPublication.Plan, existingPublication.Publication);
                     }
                     bool hasPrevious = _isolatedProjections.TryGetValue(task.TaskId, out var previousProjection);
                     if (hasPrevious && previousProjection!.Plan.VersionId == result.Snapshot.Id)
                     {
-                        task.CurrentFile = "文件无变化，正在核验现有隔离物理目录";
+                        task.CurrentFile = "文件无变化，正在核验已有备份";
                         TaskStateChanged?.Invoke(task);
-                        await new ExperimentalFirstProjection().VerifyPublishedAsync(provider, task.DestinationFolder,
+                        await new ExperimentalFirstProjection().VerifyPublishedAsync(provider, target,
                             previousProjection!.Plan, previousProjection.Publication, taskToken).ConfigureAwait(false);
                     }
                     else
                     {
-                        task.CurrentFile = "正在准备并核验隔离候选目录";
+                        task.CurrentFile = "正在准备并校验新备份";
                         TaskStateChanged?.Invoke(task);
-                        var plan = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, task.DestinationFolder, taskToken).ConfigureAwait(false);
+                        var plan = await new ExperimentalPhysicalSnapshot().PrepareAsync(provider, target, taskToken).ConfigureAwait(false);
                         if (plan.VersionId != result.Snapshot.Id)
                             throw new IOException("准备物理目录期间备份版本已变化，拒绝发布");
-                        task.CurrentFile = "正在核验并发布隔离物理目录";
+                        task.CurrentFile = "正在校验并完成备份";
                         TaskStateChanged?.Invoke(task);
                         ExperimentalFirstProjection.Published publication;
                         if (hasPrevious)
                         {
-                            var next = await new ExperimentalNextProjection().PublishAsync(provider, task.DestinationFolder,
+                            var next = await new ExperimentalNextProjection().PublishAsync(provider, target,
                                 previousProjection!.Plan, previousProjection.Publication, plan, taskToken).ConfigureAwait(false);
                             publication = next.Current;
                         }
                         else
                         {
-                            publication = await new ExperimentalFirstProjection().PublishAsync(provider, task.DestinationFolder, plan, taskToken).ConfigureAwait(false);
+                            publication = await new ExperimentalFirstProjection().PublishAsync(provider, target, plan, taskToken).ConfigureAwait(false);
                         }
                         _isolatedProjections[task.TaskId] = new IsolatedProjectionState(plan, publication);
                     }
@@ -984,11 +1120,13 @@ namespace FNSyncPlus.Core.Services
                     task.State = TaskSyncState.Completed;
                     task.LastSuccessTime = DateTime.Now;
                     task.CurrentProgress = 100.0;
-                    string trialLabel = _settings.IsVersionedBetaProfile && !_settings.IsVersionedBetaTestProfile ? "新版备份试用" : "隔离试验";
+                    string trialLabel = (_settings.IsVersionedBetaTestProfile || (_settings.IsInMemoryOnly && !_settings.IsVersionedBetaProfile)) ? "隔离试验" : "备份";
                     task.CurrentFile = task.IsExperimentalBackup ? $"{trialLabel}已提交：复用 {reusedFiles}，上传 {report.UploadedFiles}；物理目录已发布" : "所有文件均已同步更新至最新状态";
                     task.LastSyncStatus = task.IsExperimentalBackup
                         ? $"{trialLabel}物理目录已发布（复用 {reusedFiles}，上传 {report.UploadedFiles}）"
                         : "同步成功完成 (已最新)";
+                    // A committed run settles any earlier pending rename difference.
+                    task.PendingRenameDetails = null;
                 }
 
                 _settings.Save();
@@ -1011,6 +1149,7 @@ namespace FNSyncPlus.Core.Services
                     // 需要用户检查的差异不是故障：上一份备份完整保留，等待人工整理后重新同步。
                     task.LastError = ambiguous.BuildUserSummary();
                     task.LastSyncStatus = "待处理改名差异";
+                    task.PendingRenameDetails = AmbiguousRenameDetails.Serialize(ambiguous);
                     task.CurrentFile = "待处理改名差异：上一份备份未改变";
                     if (task.LastScannedFiles == 0 && syncEngine.LastScannedCount > 0) task.LastScannedFiles = syncEngine.LastScannedCount;
                     task.LastFailedFiles = 0;
@@ -1466,6 +1605,118 @@ namespace FNSyncPlus.Core.Services
             _ = completion.ContinueWith(_ => DisposeResources(), CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             return completion;
+        }
+
+        /// <summary>
+        /// Stops the queue from starting new backups and returns an owned lease. Used while an update
+        /// is being installed so a fresh task cannot begin in the middle of the pointer swap.
+        ///
+        /// The hold is taken under the same lock the queue worker uses to register a running task,
+        /// so after this method returns the set of running tasks is fixed: either a task registered
+        /// before the hold (the caller waits for it) or it is refused the next time round (see
+        /// <see cref="ProcessQueueLoopAsync"/>). Running tasks are never interrupted.
+        ///
+        /// Returns false when another caller already holds the lease: a maintenance hold is never
+        /// stolen, because the existing owner is the one responsible for releasing it.
+        /// </summary>
+        public bool TryEnterMaintenanceHold(out MaintenanceLease lease, string reason = "准备安装更新", bool drainQueuedBackups = false)
+        {
+            lock (_taskLifecycleLock)
+            {
+                if (_maintenanceOwnerId != null)
+                {
+                    lease = null!;
+                    return false;
+                }
+                string id = Guid.NewGuid().ToString("N");
+                _maintenanceOwnerId = id;
+                _maintenanceHold = true;
+                _drainQueuedBackups = drainQueuedBackups;
+                lease = new MaintenanceLease(id, reason, ReleaseMaintenanceLease);
+            }
+            _logService.LogTask(new TaskLogEntry
+            {
+                TaskId = "system", Level = "INFO", Stage = "UPDATE",
+                Message = $"已进入更新维护状态（租约 {lease.Id[..8]}）：{reason}；暂停启动新的备份任务"
+            });
+            return true;
+        }
+
+        /// <summary>
+        /// Clears the hold only when <paramref name="lease"/> is the current owner. A stale lease
+        /// (for example one that survived across a shutdown) is ignored instead of clearing a newer
+        /// hold taken by a different code path.
+        /// </summary>
+        private void ReleaseMaintenanceLease(MaintenanceLease lease)
+        {
+            bool released;
+            lock (_taskLifecycleLock)
+            {
+                released = _maintenanceOwnerId == lease.Id;
+                if (released)
+                {
+                    _maintenanceOwnerId = null;
+                    _maintenanceHold = false;
+                    _drainQueuedBackups = false;
+                }
+            }
+            if (!released) return;
+            _logService.LogTask(new TaskLogEntry
+            {
+                TaskId = "system", Level = "INFO", Stage = "UPDATE",
+                Message = $"已退出更新维护状态（租约 {lease.Id[..8]}），恢复启动新的备份任务"
+            });
+            // Wake the queue worker so it re-reads the hold flag instead of waiting for a new signal.
+            WakeQueueWorker();
+        }
+
+        public bool IsMaintenanceHoldActive => _maintenanceHold;
+
+        /// <summary>Number of leases that believe they hold the queue. Used by tests.</summary>
+        internal bool HasMaintenanceOwner
+        {
+            get { lock (_taskLifecycleLock) return _maintenanceOwnerId != null; }
+        }
+
+        /// <summary>
+        /// True when a task is actively executing. Queued-but-held work is deliberately excluded:
+        /// while the maintenance hold is active, queued items cannot start, so waiting for them
+        /// would make a safe install window impossible to reach.
+        /// </summary>
+        public bool HasRunningWork
+        {
+            get { lock (_taskLifecycleLock) return _runningCompletions.Count > 0 || _activeRestores > 0 ||
+                (_drainQueuedBackups && (_waitingForSlot || !_taskQueue.IsEmpty)); }
+        }
+
+        /// <summary>True when any task is scanning, syncing, queued or still completing.</summary>
+        public bool HasRunningOrQueuedWork
+        {
+            get
+            {
+                lock (_taskLifecycleLock)
+                {
+                    if (_activeRestores > 0 || _waitingForSlot || _runningCompletions.Count > 0) return true;
+                    return _settings.Tasks.Any(t => t.IsRunning || t.State == TaskSyncState.Queued);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Conservative proxy for "the last run did not end in a known-good state": a recovery
+        /// session is open or a task stopped in a configuration/uncertain state. Callers must defer
+        /// an update rather than guess.
+        /// </summary>
+        public bool HasUnclearCommitOrLock
+        {
+            get
+            {
+                lock (_taskLifecycleLock)
+                {
+                    if (_recoverySessions.Count > 0) return true;
+                    return _settings.Tasks.Any(t => t.State == TaskSyncState.ConfigurationError);
+                }
+            }
         }
 
         /// <summary>Stops scheduling and waits for all running tasks to actually finish. Timeout leaves the manager stopped.</summary>

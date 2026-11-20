@@ -5,234 +5,519 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:controls="using:FNSyncPlus.WinUI.Controls"
     xmlns:vm="using:FNSyncPlus.WinUI.ViewModels"
     mc:Ignorable="d">
 
-    <Grid Padding="24,12,24,24" RowSpacing="14">
+    <Grid Padding="28,14,28,18" RowSpacing="12">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- 1. HEADER -->
-        <StackPanel Grid.Row="0" Spacing="2">
-            <TextBlock Text="异机无损恢复中心" FontSize="20" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-            <TextBlock Text="无需原电脑本地数据库；选择备份目录或其上一级目录，恢复时逐一校验 SHA-256。" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
-        </StackPanel>
+        <!-- 1. COMPACT HEADER & BACKUP SOURCE SELECTOR -->
+        <Grid Grid.Row="0" ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" MinWidth="220" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
 
-        <!-- 2. SCAN NAS ROOT & SELECT PACKAGE -->
-        <Border Grid.Row="1" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="16,12">
-            <Grid RowSpacing="10">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
+            <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="1">
+                <TextBlock Text="恢复文件" Style="{StaticResource PageTitleTextStyle}" />
+            </StackPanel>
 
-                <!-- Scan Row -->
-                <Grid Grid.Row="0">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Text="NAS 备份位置:" FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center" Margin="0,0,12,0" />
-                    <TextBox Grid.Column="1" Text="{x:Bind ViewModel.NasScanRoot, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" FontFamily="Consolas, Segoe UI" FontSize="12" VerticalAlignment="Center" />
-                    <Button Grid.Column="2" Click="BtnBrowseNasRestore_Click" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" Content="选择目录" Margin="10,0,0,0" />
-                    <Button Grid.Column="3" Command="{x:Bind ViewModel.ScanPackagesCommand}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" Style="{ThemeResource AccentButtonStyle}" Margin="10,0,0,0">
-                        <StackPanel Orientation="Horizontal" Spacing="6">
-                            <FontIcon Glyph="&#xE721;" FontSize="12" />
-                            <TextBlock Text="检索备份包" FontSize="12" />
+            <ComboBox
+                Grid.Column="1"
+                ItemsSource="{x:Bind ViewModel.DiscoveredPackages}"
+                SelectedItem="{x:Bind ViewModel.SelectedPackage, Mode=TwoWay}"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Center"
+                MaxWidth="520"
+                HorizontalContentAlignment="Stretch"
+                PlaceholderText="连接 NAS 后自动加载可选备份…"
+                AutomationProperties.Name="选择备份任务"
+                IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}">
+                <ComboBox.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Spacing="1">
+                            <TextBlock Text="{Binding PackageName}" FontWeight="SemiBold" FontSize="13" TextTrimming="CharacterEllipsis" />
+                            <TextBlock Text="{Binding Summary}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{Binding NasFolderUnc}" />
                         </StackPanel>
-                    </Button>
-                </Grid>
+                    </DataTemplate>
+                </ComboBox.ItemTemplate>
+            </ComboBox>
 
-                <!-- Package Dropdown -->
-                <Grid Grid.Row="1">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Text="选择备份任务:" FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center" Margin="0,0,12,0" />
-                    <ComboBox
-                        Grid.Column="1"
-                        ItemsSource="{x:Bind ViewModel.DiscoveredPackages, Mode=OneWay}"
-                        SelectedItem="{x:Bind ViewModel.SelectedPackage, Mode=TwoWay}"
-                        IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"
-                        HorizontalAlignment="Stretch">
-                        <ComboBox.ItemTemplate>
-                            <DataTemplate>
-                                <TextBlock Text="{Binding PackageName}" FontSize="12" />
-                            </DataTemplate>
-                        </ComboBox.ItemTemplate>
-                    </ComboBox>
-                </Grid>
-            </Grid>
-        </Border>
+            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                <Button
+                    Command="{x:Bind ViewModel.LoadKnownBackupsCommand}"
+                    Style="{StaticResource SecondaryActionButtonStyle}"
+                    ToolTipService.ToolTip="重新读取 NAS 上的可用备份">
+                    <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xE72C;" FontSize="12" />
+                        <TextBlock Text="刷新" />
+                    </StackPanel>
+                </Button>
+                <Button
+                    Click="BtnBrowseNasRestore_Click"
+                    Style="{StaticResource SecondaryActionButtonStyle}"
+                    ToolTipService.ToolTip="在异机恢复或查找其他备份目录时使用">
+                    <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                        <FontIcon Glyph="&#xE8DA;" FontSize="12" />
+                        <TextBlock Text="浏览备份…" />
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+        </Grid>
 
-        <!-- 3. RESTORABLE FILES LIST -->
-        <Border Grid.Row="2" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="12">
-            <Pivot>
-              <PivotItem Header="当前文件">
-            <Grid RowSpacing="8">
+        <!-- 2. EXPLORER-STYLE FILE & HISTORY WORKSPACE CARD -->
+        <Border
+            Grid.Row="1"
+            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderThickness="1"
+            CornerRadius="8">
+            <Grid>
                 <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <!-- Column Headers -->
-                <Grid Grid.Row="0" Background="{ThemeResource SubtleFillColorSecondaryBrush}" Padding="10,6" CornerRadius="4">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="3*" />
-                        <ColumnDefinition Width="2*" />
-                        <ColumnDefinition Width="100" />
-                        <ColumnDefinition Width="220" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="恢复后原始完整文件名" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Grid.Column="1" Text="NAS 物理存储别名" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Grid.Column="2" Text="文件大小" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <TextBlock Grid.Column="3" Text="SHA-256 完整性哈希" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                </Grid>
+                <!-- Toolbar: Mode Selector (Latest / History) + Global Search -->
+                <Border
+                    Grid.Row="0"
+                    Padding="12,6"
+                    BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                    BorderThickness="0,0,0,1">
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
 
-                <!-- Files ListView -->
-                <ListView Grid.Row="1" ItemsSource="{x:Bind ViewModel.PackageFiles, Mode=OneWay}" SelectionMode="None">
-                    <ListView.ItemTemplate>
-                        <DataTemplate>
-                            <Grid Padding="6,4">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="3*" />
-                                    <ColumnDefinition Width="2*" />
-                                    <ColumnDefinition Width="100" />
-                                    <ColumnDefinition Width="220" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="{Binding OriginalRelPath}" ToolTipService.ToolTip="{Binding OriginalRelPath}" FontSize="12" TextTrimming="CharacterEllipsis" FontWeight="Medium" />
-                                <TextBlock Grid.Column="1" Text="{Binding StoredRelPath}" ToolTipService.ToolTip="{Binding StoredRelPath}" FontSize="11" FontFamily="Consolas" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextTrimming="CharacterEllipsis" />
-                                <TextBlock Grid.Column="2" Text="{Binding FormattedSize}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                <TextBlock Grid.Column="3" Text="{Binding Sha256}" ToolTipService.ToolTip="{Binding Sha256}" FontSize="10" FontFamily="Consolas" Foreground="{ThemeResource TextFillColorTertiaryBrush}" TextTrimming="CharacterEllipsis" />
-                            </Grid>
-                        </DataTemplate>
-                    </ListView.ItemTemplate>
-                </ListView>
-            </Grid>
-              </PivotItem>
-              <PivotItem Header="历史版本">
-                <Grid RowSpacing="8">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="*" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-                    <ListView ItemsSource="{x:Bind ViewModel.HistoryFilesList, Mode=OneWay}"
-                              SelectedItem="{x:Bind ViewModel.SelectedHistory, Mode=TwoWay}"
-                              IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"
-                              SelectionMode="Single">
+                        <SelectorBar x:Name="RestoreMode" Grid.Column="0" SelectionChanged="RestoreMode_SelectionChanged" VerticalAlignment="Center">
+                            <SelectorBarItem Text="恢复最新文件" IsSelected="True" />
+                            <SelectorBarItem Text="恢复历史版本" />
+                        </SelectorBar>
+
+                        <AutoSuggestBox
+                            Grid.Column="2"
+                            Width="270"
+                            VerticalAlignment="Center"
+                            QueryIcon="Find"
+                            Text="{x:Bind ViewModel.SearchText, Mode=TwoWay}"
+                            PlaceholderText="搜索整个备份中的文件或文件夹"
+                            AutomationProperties.Name="搜索整个备份" />
+                    </Grid>
+                </Border>
+
+                <!-- Explorer Address / Breadcrumb Bar -->
+                <Border
+                    Grid.Row="1"
+                    Background="{ThemeResource BrowserToolbarBackgroundBrush}"
+                    BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                    BorderThickness="0,0,0,1"
+                    Padding="10,4">
+                    <Grid ColumnSpacing="6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" MinWidth="0" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <Button
+                            Grid.Column="0"
+                            Command="{x:Bind ViewModel.FolderUpCommand}"
+                            IsEnabled="{x:Bind ViewModel.CanGoUp, Mode=OneWay}"
+                            Style="{StaticResource BreadcrumbSegmentButtonStyle}"
+                            AutomationProperties.Name="上一级"
+                            ToolTipService.ToolTip="返回上一级文件夹">
+                            <StackPanel Orientation="Horizontal" Spacing="5" VerticalAlignment="Center">
+                                <FontIcon Glyph="&#xE74A;" FontSize="11" />
+                                <TextBlock Text="上一级" FontSize="12" />
+                            </StackPanel>
+                        </Button>
+
+                        <ScrollViewer
+                            Grid.Column="1"
+                            HorizontalScrollMode="Enabled"
+                            HorizontalScrollBarVisibility="Auto"
+                            VerticalScrollMode="Disabled"
+                            VerticalScrollBarVisibility="Disabled"
+                            VerticalAlignment="Center">
+                            <ItemsControl ItemsSource="{x:Bind ViewModel.Breadcrumbs}">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <StackPanel Orientation="Horizontal" Spacing="2" VerticalAlignment="Center" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:RestoreBrowserItem">
+                                        <StackPanel Orientation="Horizontal" Spacing="2" VerticalAlignment="Center">
+                                            <FontIcon
+                                                Glyph="&#xE76C;"
+                                                FontSize="9"
+                                                Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                                VerticalAlignment="Center"
+                                                Visibility="{x:Bind ShowBreadcrumbSeparator, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                            <Button
+                                                Tag="{x:Bind}"
+                                                Click="OpenFolder_Click"
+                                                Style="{StaticResource BreadcrumbSegmentButtonStyle}"
+                                                ToolTipService.ToolTip="{x:Bind DisplayPath}"
+                                                MaxWidth="220">
+                                                <TextBlock Text="{x:Bind BreadcrumbLabel}" FontWeight="Medium" TextTrimming="CharacterEllipsis" />
+                                            </Button>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+
+                        <TextBlock
+                            Grid.Column="2"
+                            Text="{x:Bind ViewModel.CurrentFolderCountText, Mode=OneWay}"
+                            Style="{StaticResource CaptionTextStyle}"
+                            VerticalAlignment="Center"
+                            Margin="6,0,4,0" />
+                    </Grid>
+                </Border>
+
+                <!-- Unified Files & Folders List -->
+                <Grid Grid.Row="2">
+                    <ListView
+                        x:Name="CurrentFileList"
+                        ItemsSource="{x:Bind ViewModel.BrowserItems}"
+                        SelectionMode="None"
+                        IsItemClickEnabled="True"
+                        ItemClick="Browser_ItemClick"
+                        KeyDown="Browser_KeyDown"
+                        Padding="6,4"
+                        IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"
+                        AutomationProperties.Name="备份文件和文件夹">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="MinHeight" Value="38" />
+                                <Setter Property="Padding" Value="8,2" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
                         <ListView.ItemTemplate>
-                            <DataTemplate>
-                                <StackPanel Padding="6,4" Spacing="2">
-                                    <TextBlock Text="{Binding OriginalRel}" ToolTipService.ToolTip="{Binding OriginalRel}" TextTrimming="CharacterEllipsis" FontWeight="SemiBold" />
-                                    <StackPanel Orientation="Horizontal" Spacing="12">
-                                        <TextBlock Text="{Binding ArchivedAt}" FontSize="11" />
-                                        <TextBlock Text="{Binding Reason}" FontSize="11" />
-                                        <TextBlock Text="{Binding Size}" FontSize="11" />
+                            <DataTemplate x:DataType="vm:RestoreBrowserItem">
+                                <Grid ColumnSpacing="10" DoubleTapped="BrowserRow_DoubleTapped" DataContext="{x:Bind}" Padding="2,3">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" MinWidth="0" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <CheckBox
+                                        Grid.Column="0"
+                                        MinWidth="0"
+                                        Padding="0"
+                                        Tag="{x:Bind}"
+                                        IsChecked="{x:Bind IsChecked, Mode=OneWay}"
+                                        Click="BrowserCheck_Click"
+                                        VerticalAlignment="Center"
+                                        Visibility="{x:Bind CanCheck, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                                        AutomationProperties.Name="{x:Bind DisplayPath}" />
+
+                                    <!-- Distinct Warm Folder Icon vs Crisp File Type Icon -->
+                                    <Grid Grid.Column="1" VerticalAlignment="Center" Width="20" Height="20">
+                                        <FontIcon
+                                            Glyph="{x:Bind Icon}"
+                                            FontSize="16"
+                                            Foreground="{ThemeResource FolderIconBrush}"
+                                            Visibility="{x:Bind IsFolder, Converter={StaticResource BoolToVisibilityConverter}}"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center" />
+                                        <FontIcon
+                                            Glyph="{x:Bind Icon}"
+                                            FontSize="16"
+                                            Foreground="{ThemeResource SoftAccentForegroundBrush}"
+                                            Visibility="{x:Bind IsFile, Converter={StaticResource BoolToVisibilityConverter}}"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center" />
+                                    </Grid>
+
+                                    <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="1" MinWidth="0">
+                                        <TextBlock
+                                            Text="{x:Bind Name}"
+                                            FontSize="13"
+                                            Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                                            TextTrimming="CharacterEllipsis"
+                                            ToolTipService.ToolTip="{x:Bind DisplayPath}" />
+                                        <TextBlock
+                                            Text="{x:Bind DisplayLocationLabel}"
+                                            FontSize="11"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            TextTrimming="CharacterEllipsis"
+                                            Visibility="{x:Bind ShowLocation, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
                                     </StackPanel>
-                                </StackPanel>
+
+                                    <TextBlock
+                                        Grid.Column="3"
+                                        Text="{x:Bind MetaText}"
+                                        FontSize="12"
+                                        Foreground="{ThemeResource TextFillColorTertiaryBrush}"
+                                        VerticalAlignment="Center"
+                                        Margin="8,0,2,0" />
+
+                                    <Button
+                                        Grid.Column="4"
+                                        Tag="{x:Bind}"
+                                        Click="OpenFolder_Click"
+                                        Style="{StaticResource SubtleIconButtonStyle}"
+                                        Padding="6,2"
+                                        MinHeight="26"
+                                        AutomationProperties.Name="打开文件夹"
+                                        ToolTipService.ToolTip="打开文件夹"
+                                        Visibility="{x:Bind IsFolder, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <FontIcon Glyph="&#xE76C;" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </Button>
+                                </Grid>
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>
-                    <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
-                        <Button Content="恢复所选历史版本" Command="{x:Bind ViewModel.RestoreHistoryCommand}"
-                                IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" />
-                        <TextBlock Text="使用下方的目标路径和冲突处理方式" FontSize="11" VerticalAlignment="Center" />
+
+                    <!-- Clean Empty / Loading Overlay -->
+                    <StackPanel
+                        Visibility="{x:Bind ViewModel.ShowBrowserMessage, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="8"
+                        IsHitTestVisible="False">
+                        <FontIcon Glyph="&#xE8B7;" FontSize="28" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
+                        <TextBlock
+                            Text="{x:Bind ViewModel.BrowserMessage, Mode=OneWay}"
+                            Style="{StaticResource CaptionTextStyle}"
+                            HorizontalAlignment="Center" />
                     </StackPanel>
                 </Grid>
-              </PivotItem>
-            </Pivot>
+
+                <!-- History Versions Panel (Visible ONLY in History Mode) -->
+                <Border
+                    Grid.Row="3"
+                    Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                    Background="{ThemeResource BrowserToolbarBackgroundBrush}"
+                    BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                    BorderThickness="0,1,0,0"
+                    Padding="12,8">
+                    <StackPanel Spacing="6">
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" MinWidth="0" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <FontIcon Grid.Column="0" Glyph="&#xE81C;" FontSize="13" Foreground="{ThemeResource SoftAccentForegroundBrush}" VerticalAlignment="Center" />
+                            <TextBlock
+                                Grid.Column="1"
+                                Text="{x:Bind ViewModel.HistoryCaption, Mode=OneWay}"
+                                FontSize="12"
+                                FontWeight="SemiBold"
+                                TextTrimming="CharacterEllipsis"
+                                VerticalAlignment="Center"
+                                ToolTipService.ToolTip="{x:Bind ViewModel.HistoryCaption, Mode=OneWay}" />
+                            <TextBlock
+                                Grid.Column="2"
+                                Text="{x:Bind ViewModel.HistoryCountText, Mode=OneWay}"
+                                Style="{StaticResource CaptionTextStyle}"
+                                VerticalAlignment="Center" />
+                        </Grid>
+
+                        <ListView
+                            x:Name="HistoryFileList"
+                            MinHeight="56"
+                            MaxHeight="116"
+                            ItemsSource="{x:Bind ViewModel.VisibleHistory}"
+                            SelectedItem="{x:Bind ViewModel.SelectedHistory, Mode=TwoWay}"
+                            SelectionMode="Single"
+                            IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}"
+                            AutomationProperties.Name="文件历史版本">
+                            <ListView.ItemContainerStyle>
+                                <Style TargetType="ListViewItem">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    <Setter Property="MinHeight" Value="34" />
+                                    <Setter Property="Padding" Value="8,2" />
+                                </Style>
+                            </ListView.ItemContainerStyle>
+                            <ListView.ItemTemplate>
+                                <DataTemplate x:DataType="vm:RestoreHistoryDisplayItem">
+                                    <Grid ColumnSpacing="10" Padding="2,2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{x:Bind ArchivedAt}" FontSize="12" FontWeight="Medium" VerticalAlignment="Center" />
+                                        <controls:StatusBadge Grid.Column="1" Text="{x:Bind Reason}" Tone="{x:Bind ReasonTone}" ShowDot="False" />
+                                        <TextBlock Grid.Column="3" Text="{x:Bind Size}" FontSize="12" FontFamily="Cascadia Mono, Consolas, Segoe UI" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+                    </StackPanel>
+                </Border>
+            </Grid>
         </Border>
 
-        <!-- 4. RESTORE EXECUTION PANEL -->
-        <Border Grid.Row="3" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14,12">
-            <Grid RowSpacing="8">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-
-                <Grid Grid.Row="0">
+        <!-- 3. STREAMLINED BOTTOM RESTORE ACTION BAR -->
+        <Border Grid.Row="2" Style="{StaticResource CompactCardStyle}">
+            <StackPanel Spacing="10">
+                <!-- Row 0: Local Destination + Conflict Policy -->
+                <Grid ColumnSpacing="8">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" MinWidth="180" />
                         <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="180" />
+                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
 
-                    <TextBlock Text="还原到本地路径:" FontWeight="SemiBold" FontSize="12" VerticalAlignment="Center" Margin="0,0,10,0" />
-                    <TextBox Grid.Column="1" Text="{x:Bind ViewModel.LocalRestoreTarget, Mode=TwoWay}" PlaceholderText="请选择恢复目标文件夹" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" FontSize="12" FontFamily="Consolas, Segoe UI" VerticalAlignment="Center" />
-                    <Button Grid.Column="2" Click="BtnBrowseLocalRestore_Click" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" Margin="8,0,14,0">
-                        <StackPanel Orientation="Horizontal" Spacing="4">
-                            <FontIcon Glyph="&#xE8B7;" FontSize="11" />
-                            <TextBlock Text="浏览..." FontSize="12" />
-                        </StackPanel>
-                    </Button>
-
-                    <ComboBox Grid.Column="3" SelectedIndex="{x:Bind ViewModel.ConflictPolicyIndex, Mode=TwoWay}" IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" HorizontalAlignment="Stretch">
-                        <ComboBoxItem Content="跳过已存在文件" />
-                        <ComboBoxItem Content="覆盖已存在文件" />
-                        <ComboBoxItem Content="自动加时间戳重命名" />
+                    <TextBlock Grid.Column="0" Text="恢复到" Style="{StaticResource FieldLabelTextStyle}" VerticalAlignment="Center" Margin="0,0,2,0" />
+                    <TextBox
+                        Grid.Column="1"
+                        Text="{x:Bind ViewModel.LocalRestoreTarget, Mode=TwoWay}"
+                        IsReadOnly="True"
+                        FontSize="12"
+                        FontFamily="Cascadia Mono, Consolas, Segoe UI"
+                        ToolTipService.ToolTip="{x:Bind ViewModel.LocalRestoreTarget, Mode=OneWay}"
+                        IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" />
+                    <Button
+                        Grid.Column="2"
+                        Content="选择位置…"
+                        Click="BtnBrowseLocalRestore_Click"
+                        Style="{StaticResource SecondaryActionButtonStyle}"
+                        IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}" />
+                    <ComboBox
+                        Grid.Column="3"
+                        Width="184"
+                        SelectedIndex="{x:Bind ViewModel.ConflictPolicyIndex, Mode=TwoWay}"
+                        AutomationProperties.Name="同名文件处理方式"
+                        ToolTipService.ToolTip="目标目录已有同名文件时的处理方式"
+                        IsEnabled="{x:Bind ViewModel.CanConfigureRestore, Mode=OneWay}">
+                        <ComboBoxItem Content="同名文件跳过" />
+                        <ComboBoxItem Content="覆盖同名文件（需确认）" />
+                        <ComboBoxItem Content="保留两份，自动改名" />
                     </ComboBox>
                 </Grid>
 
-                <Grid Grid.Row="1">
+                <!-- Contextual Progress Bar (Hidden when idle) -->
+                <ProgressBar
+                    Value="{x:Bind ViewModel.RestoreProgress, Mode=OneWay}"
+                    Visibility="{x:Bind ViewModel.ShowRestoreProgress, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                    Height="4" />
+
+                <!-- Row 1: Selection / Status Summary + Focused Restore Actions + More Menu -->
+                <Grid ColumnSpacing="12">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" MinWidth="0" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
 
-                    <StackPanel Grid.Column="0" VerticalAlignment="Center" Spacing="4">
-                        <Grid>
-                            <TextBlock Text="{x:Bind ViewModel.RestoreStatusText, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind ViewModel.DetailedErrorMessage, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
-                        </Grid>
-                        <ProgressBar Value="{x:Bind ViewModel.RestoreProgress, Mode=OneWay}" Maximum="100" Height="4" />
-                        
-                        <!-- 统计与指标卡 -->
-                        <StackPanel Orientation="Horizontal" Spacing="16" Margin="0,4,0,0">
-                            <TextBlock FontSize="11" Foreground="{ThemeResource SystemFillColorSuccessBrush}">
-                                <Run Text="已恢复: " /><Run Text="{x:Bind ViewModel.RestoredFilesCount, Mode=OneWay}" FontWeight="SemiBold" />
-                            </TextBlock>
-                            <TextBlock FontSize="11" Foreground="{ThemeResource SystemFillColorSuccessBrush}">
-                                <Run Text="校验通过: " /><Run Text="{x:Bind ViewModel.IntegrityVerifiedCount, Mode=OneWay}" FontWeight="SemiBold" />
-                            </TextBlock>
-                            <TextBlock FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}">
-                                <Run Text="已跳过: " /><Run Text="{x:Bind ViewModel.SkippedFilesCount, Mode=OneWay}" FontWeight="SemiBold" />
-                            </TextBlock>
-                            <TextBlock FontSize="11" Foreground="{ThemeResource SystemFillColorCriticalBrush}">
-                                <Run Text="失败: " /><Run Text="{x:Bind ViewModel.FailedFilesCount, Mode=OneWay}" FontWeight="SemiBold" />
-                            </TextBlock>
-                        </StackPanel>
+                    <!-- Left: Selection Pill + Status / Result Metrics -->
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                        <controls:StatusBadge
+                            Text="{x:Bind ViewModel.SelectionSummary, Mode=OneWay}"
+                            Tone="{x:Bind ViewModel.SelectionBadgeTone, Mode=OneWay}"
+                            ShowDot="False"
+                            MaxTextWidth="220"
+                            Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}" />
+
+                        <TextBlock
+                            Text="{x:Bind ViewModel.RestoreStatusText, Mode=OneWay}"
+                            ToolTipService.ToolTip="{x:Bind ViewModel.RestoreStatusText, Mode=OneWay}"
+                            Style="{StaticResource CaptionTextStyle}"
+                            TextTrimming="CharacterEllipsis"
+                            VerticalAlignment="Center"
+                            Visibility="{x:Bind ViewModel.RestoreStatusText, Mode=OneWay, Converter={StaticResource StringNotEmptyToVisibilityConverter}}" />
+
+                        <TextBlock
+                            FontSize="12"
+                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                            VerticalAlignment="Center"
+                            Visibility="{x:Bind ViewModel.ShowResultStats, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                            <Run Text="成功 " /><Run Text="{x:Bind ViewModel.RestoredFilesCount, Mode=OneWay}" FontWeight="SemiBold" Foreground="{ThemeResource StatusSuccessForegroundBrush}" />
+                            <Run Text="  ·  已校验 " /><Run Text="{x:Bind ViewModel.IntegrityVerifiedCount, Mode=OneWay}" FontWeight="SemiBold" />
+                            <Run Text="  ·  跳过 " /><Run Text="{x:Bind ViewModel.SkippedFilesCount, Mode=OneWay}" />
+                            <Run Text="  ·  失败 " /><Run Text="{x:Bind ViewModel.FailedFilesCount, Mode=OneWay}" FontWeight="SemiBold" Foreground="{ThemeResource StatusErrorForegroundBrush}" />
+                        </TextBlock>
                     </StackPanel>
 
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" Margin="16,0,0,0" VerticalAlignment="Center">
-                        <Button Command="{x:Bind ViewModel.ExportRestoreLogCommand}" ToolTipService.ToolTip="导出完整还原与校验日志">
-                            <StackPanel Orientation="Horizontal" Spacing="4">
-                                <FontIcon Glyph="&#xEDE1;" FontSize="12" />
-                                <TextBlock Text="导出报告" FontSize="12" />
-                            </StackPanel>
-                        </Button>
-                        <Button Command="{x:Bind ViewModel.RetryFailedFilesCommand}" Style="{ThemeResource AccentButtonStyle}" Background="#DC2626">
-                            <StackPanel Orientation="Horizontal" Spacing="4">
-                                <FontIcon Glyph="&#xE72C;" FontSize="12" />
-                                <TextBlock Text="重试失败" FontSize="12" />
-                            </StackPanel>
-                        </Button>
-                        <Button Command="{x:Bind ViewModel.ExecuteRestoreCommand}" Style="{ThemeResource AccentButtonStyle}" Padding="16,8">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xE896;" FontSize="14" />
-                                <TextBlock Text="开始完整还原 (SHA-256 强校验)" FontSize="12" FontWeight="SemiBold" />
-                            </StackPanel>
+                    <!-- Right: Clean Primary Actions + More Menu -->
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <Button
+                            Content="取消恢复"
+                            Command="{x:Bind ViewModel.CancelRestoreCommand}"
+                            Style="{StaticResource DangerButtonStyle}"
+                            Visibility="{x:Bind ViewModel.IsRestoring, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+
+                        <StackPanel
+                            x:Name="CurrentRestoreActions"
+                            Orientation="Horizontal"
+                            Spacing="8"
+                            Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}">
+                            <Button
+                                x:Name="RetryRestoreButton"
+                                Content="重试失败文件"
+                                Click="BeginRestore_Click"
+                                Style="{StaticResource SecondaryActionButtonStyle}"
+                                Visibility="{x:Bind ViewModel.CanRetryCurrentRestore, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                            <Button
+                                x:Name="RestoreEntireButton"
+                                Content="恢复整个备份"
+                                Click="BeginRestore_Click"
+                                Style="{StaticResource SecondaryActionButtonStyle}"
+                                IsEnabled="{x:Bind ViewModel.CanRestoreEntireBackup, Mode=OneWay}"
+                                ToolTipService.ToolTip="显式恢复当前备份中的全部文件和目录" />
+                            <Button
+                                Content="恢复所选"
+                                Click="BeginRestore_Click"
+                                Style="{StaticResource PrimaryActionButtonStyle}"
+                                IsEnabled="{x:Bind ViewModel.CanRestoreSelection, Mode=OneWay}"
+                                ToolTipService.ToolTip="仅恢复勾选的文件和文件夹" />
+                        </StackPanel>
+
+                        <Button
+                            x:Name="HistoryRestoreAction"
+                            Content="恢复所选版本"
+                            Click="BeginRestore_Click"
+                            Style="{StaticResource PrimaryActionButtonStyle}"
+                            Visibility="{x:Bind ViewModel.IsHistoryMode, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                            IsEnabled="{x:Bind ViewModel.CanRestoreHistory, Mode=OneWay}" />
+
+                        <!-- More Options Menu: Advanced Details & Export Report -->
+                        <Button
+                            Style="{StaticResource SubtleIconButtonStyle}"
+                            Padding="8,6"
+                            AutomationProperties.Name="更多恢复选项"
+                            ToolTipService.ToolTip="高级详情与导出报告">
+                            <FontIcon Glyph="&#xE712;" FontSize="13" />
+                            <Button.Flyout>
+                                <MenuFlyout Placement="TopEdgeAlignedRight">
+                                    <MenuFlyoutItem Text="查看高级详情（校验值与映射）" Click="Details_Click">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE946;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                    <MenuFlyoutItem Text="导出恢复报告" Command="{x:Bind ViewModel.ExportRestoreLogCommand}">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE74E;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                </MenuFlyout>
+                            </Button.Flyout>
                         </Button>
                     </StackPanel>
                 </Grid>
-            </Grid>
+            </StackPanel>
         </Border>
     </Grid>
 </Page>

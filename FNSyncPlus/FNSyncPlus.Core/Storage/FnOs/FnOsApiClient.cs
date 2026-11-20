@@ -94,11 +94,16 @@ namespace FNSyncPlus.Core.Storage.FnOs
         public static Func<string, string, bool>? TrustedThumbprintValidator { get; set; }
         public string? LastSeenCertSha256 { get; private set; }
 
-        public FnOsApiClient(string? pinnedCertSha256 = null)
+        private readonly Action<string>? _requestObserver;
+
+        // Optional operation names only. Never forward request bodies, URLs, cookies or tokens.
+        public FnOsApiClient(string? pinnedCertSha256 = null, Action<string>? requestObserver = null)
         {
             _pinnedCertSha256 = pinnedCertSha256;
+            _requestObserver = requestObserver;
             _httpHandler = new SocketsHttpHandler
             {
+                AllowAutoRedirect = requestObserver == null,
                 SslOptions = new System.Net.Security.SslClientAuthenticationOptions
                 {
                     RemoteCertificateValidationCallback = (sender, cert, chain, errors) =>
@@ -175,7 +180,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
             SslPolicyErrors sslPolicyErrors)
         {
             // 若系统信任链验证完全通过，直接允许
-            if (sslPolicyErrors == SslPolicyErrors.None) return true;
+            if (sslPolicyErrors == SslPolicyErrors.None && (_requestObserver == null || string.IsNullOrEmpty(_pinnedCertSha256))) return true;
 
             if (certificate == null) return false;
 
@@ -255,7 +260,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
 
             // 发送首个握手请求获取 RSA 公钥 (util.crypto.getRSAPub)
             string getPubMsg = $"{{\"reqid\":\"{FnOsCryptoHelper.GenerateReqId()}\",\"req\":\"util.crypto.getRSAPub\"}}";
-            await SendRawTextAsync(getPubMsg, ct);
+            await SendRawTextAsync("auth.publicKey", getPubMsg, ct);
 
             // 最多等待 8 秒获取握手
             using var handshakeTimeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
@@ -523,7 +528,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
             string responseJson;
             try
             {
-                await SendRawTextAsync(envelopeJson, ct).ConfigureAwait(false);
+                await SendRawTextAsync("auth.login", envelopeJson, ct).ConfigureAwait(false);
                 using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
                 using var reg = linked.Token.Register(() => tcs.TrySetCanceled());
@@ -615,7 +620,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
             string responseJson;
             try
             {
-                await SendRawTextAsync(envelopeJson, ct).ConfigureAwait(false);
+                await SendRawTextAsync("auth.twoFactor", envelopeJson, ct).ConfigureAwait(false);
                 using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
                 using var reg = linked.Token.Register(() => tcs.TrySetCanceled());
@@ -661,7 +666,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
             return loginResp ?? new FnOsLoginResponse { Result = "failed", ErrMsg = "Empty response" };
         }
 
-        private async Task SendRawTextAsync(string text, CancellationToken ct)
+        private async Task SendRawTextAsync(string method, string text, CancellationToken ct)
         {
             if (_webSocket == null || _webSocket.State != WebSocketState.Open)
                 throw new InvalidOperationException("WebSocket 未处于连接状态。");
@@ -670,6 +675,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
             await _wsLock.WaitAsync(ct);
             try
             {
+                _requestObserver?.Invoke(method);
                 await _webSocket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct);
             }
             finally
@@ -713,7 +719,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 using var timeoutCts = new CancellationTokenSource(timeout);
                 using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
                 using var reg = linked.Token.Register(() => tcs.TrySetCanceled(linked.Token));
-                await SendRawTextAsync(signedMessage, linked.Token).ConfigureAwait(false);
+                await SendRawTextAsync(method, signedMessage, linked.Token).ConfigureAwait(false);
                 return await tcs.Task.ConfigureAwait(false);
             }
             finally
@@ -959,6 +965,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
             request.Headers.Add("Trim-Token", AuthToken);
             request.Headers.Add("Trim-Sign", trimSign);
 
+            _requestObserver?.Invoke("http.upload");
             using var resp = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
             {
@@ -1047,6 +1054,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
                 Content = new StringContent(jsonReq, Encoding.UTF8, "application/json")
             };
 
+            _requestObserver?.Invoke("http.downloadToken");
             using var postResp = await _httpClient.SendAsync(postReq, ct).ConfigureAwait(false);
             postResp.EnsureSuccessStatusCode();
             string postRespJson = await postResp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
@@ -1062,6 +1070,7 @@ namespace FNSyncPlus.Core.Storage.FnOs
             var getReq = new HttpRequestMessage(HttpMethod.Get, streamUrl);
             getReq.Headers.Add("Cookie", $"fnos-token={AuthToken}");
 
+            _requestObserver?.Invoke("http.download");
             var streamResp = await _httpClient.SendAsync(getReq, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
             streamResp.EnsureSuccessStatusCode();
 

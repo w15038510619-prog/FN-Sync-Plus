@@ -62,11 +62,9 @@ public sealed class ImmutableContentStore
         if (!PathHelper.IsSafeRelativePath(target)) throw new ArgumentException("备份目标必须是安全的相对路径", nameof(target));
         if (string.IsNullOrWhiteSpace(sourceFile)) throw new ArgumentException("源文件路径不能为空", nameof(sourceFile));
 
-        // Keep this handle open through hashing and upload. On Windows FileShare.Read disallows
-        // simultaneous writers and deletion; if a writer is already active, open fails instead.
+        // Hash and upload the same verified private snapshot; an editor may keep the saved source open.
         string longSource = PathHelper.EnsureLongPathPrefix(sourceFile);
-        await using var input = new FileStream(longSource, FileMode.Open, FileAccess.Read, FileShare.Read,
-            128 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var input = await StableFileSnapshot.OpenAsync(longSource, token).ConfigureAwait(false);
         long size = input.Length;
         DateTime modified = File.GetLastWriteTimeUtc(longSource);
         string hash = Convert.ToHexString(await SHA256.HashDataAsync(input, token).ConfigureAwait(false)).ToLowerInvariant();

@@ -5,6 +5,7 @@ Release_Build/
 Release_WinUI/
 [Dd]ebug/
 [Rr]elease/
+!tools/release/
 
 # Visual Studio / IDE
 .vs/
@@ -36,3 +37,12 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+
+# Acceptance harness output (build/install evidence, never committed)
+.acceptance/
+pilot-acceptance/
+pilot-acceptance.zip
+
+# Generated Python bytecode
+__pycache__/
+*.py[cod]

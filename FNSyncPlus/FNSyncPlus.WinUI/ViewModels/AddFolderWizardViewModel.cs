@@ -33,13 +33,24 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _finalTargetUnc = string.Empty;
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(CleanStatusText))]
         private string _statusText = string.Empty;
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(StatusTone))]
         private bool _isConflict;
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(StatusTone))]
         private bool _isFailed;
+
+        public string StatusTone => IsFailed ? "Error" : (IsConflict ? "Warning" : "Success");
+
+        public string CleanStatusText => StatusText
+            .Replace("✔ ", string.Empty)
+            .Replace("▲ ", string.Empty)
+            .Replace("❌ ", string.Empty)
+            .Trim();
 
         [ObservableProperty]
         private string _errorMessage = string.Empty;
@@ -88,11 +99,13 @@ namespace FNSyncPlus.WinUI.ViewModels
         private bool _isStep3 = false;
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(StorageSpaceBadgeText))]
+        [NotifyPropertyChangedFor(nameof(StorageSpaceBadgeTone))]
         private string _nasDestinationRoot = string.Empty;
 
         public bool ShowExperimentalReuse => _taskManager.UseExperimentalVersionedBackup;
         public string ReuseHeading => _settings.IsVersionedBetaProfile && !_settings.IsVersionedBetaTestProfile
-            ? "复用飞牛已有文件（一次选择一个本地文件夹）" : "隔离试验：复用飞牛已有文件（仅支持一个本地文件夹）";
+            ? "复用飞牛已有文件（可选，一次选择一个本地文件夹）" : "隔离试验：复用飞牛已有文件（仅支持一个本地文件夹）";
 
         [ObservableProperty]
         private string _experimentalExistingRoot = string.Empty;
@@ -110,7 +123,28 @@ namespace FNSyncPlus.WinUI.ViewModels
         private string _securityBadgeColor = "#475569";
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(StorageSpaceBadgeText))]
+        [NotifyPropertyChangedFor(nameof(StorageSpaceBadgeTone))]
         private bool _isTeamShareWarning = false;
+
+        public string StorageSpaceBadgeText => IsTeamShareWarning
+            ? "团队文件（SMB 共享）"
+            : (!string.IsNullOrWhiteSpace(NasDestinationRoot) ? "个人文件（我的文件）" : "未选择位置");
+
+        public string StorageSpaceBadgeTone => IsTeamShareWarning
+            ? "Warning"
+            : (!string.IsNullOrWhiteSpace(NasDestinationRoot) ? "Success" : "Neutral");
+
+        [ObservableProperty]
+        private bool _isCreationComplete = false;
+
+        [ObservableProperty]
+        private string _creationResultTitle = string.Empty;
+
+        [ObservableProperty]
+        private string _creationResultDetail = string.Empty;
+
+        public ObservableCollection<string> CreatedTaskSummaries { get; } = new();
 
         [ObservableProperty]
         private bool _canCreate = false;
@@ -191,6 +225,10 @@ namespace FNSyncPlus.WinUI.ViewModels
             {
                 SelectedLocalFolders.Clear();
                 PlannedTasks.Clear();
+                CreatedTaskSummaries.Clear();
+                IsCreationComplete = false;
+                CreationResultTitle = string.Empty;
+                CreationResultDetail = string.Empty;
                 CurrentStep = 1;
                 StepIndicatorText = "步骤 1 / 2：选择本地待备份文件夹";
                 DuplicateWarningMessage = null;
@@ -465,13 +503,13 @@ namespace FNSyncPlus.WinUI.ViewModels
 
         private void UpdateStepState()
         {
-            IsStep1 = CurrentStep == 1;
-            IsStep2 = CurrentStep == 2;
-            IsStep3 = false;
+            IsStep1 = CurrentStep == 1 && !IsCreationComplete;
+            IsStep2 = CurrentStep == 2 && !IsCreationComplete;
+            IsStep3 = IsCreationComplete;
 
-            CanGoBack = CurrentStep > 1;
-            CanGoNext = CurrentStep == 1 && SelectedLocalFolders.Count > 0;
-            CanCreate = CurrentStep == 2 && PlannedTasks.Count > 0 && !string.IsNullOrWhiteSpace(NasDestinationRoot);
+            CanGoBack = CurrentStep > 1 && !IsCreationComplete;
+            CanGoNext = CurrentStep == 1 && !IsCreationComplete && SelectedLocalFolders.Count > 0;
+            CanCreate = CurrentStep == 2 && !IsCreationComplete && PlannedTasks.Count > 0 && !string.IsNullOrWhiteSpace(NasDestinationRoot);
 
             if (IsNasDisconnectedWarning)
             {
@@ -519,7 +557,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                 }
 
                 // 1. 飞牛官方「我的文件」同名规划通道
-                if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
+                if (!NasDestinationRoot.StartsWith(@"\\") && _connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider)
                 {
                     var allocatedFn = new List<string>();
 
@@ -686,7 +724,7 @@ namespace FNSyncPlus.WinUI.ViewModels
             int createdCount = 0;
 
             // 1. 飞牛官方「我的文件」原生任务创建
-            if (_connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
+            if (!NasDestinationRoot.StartsWith(@"\\") && _connectionService.CurrentStorageProvider is FnOsPersonalStorageProvider fnProvider)
             {
                 if (!fnProvider.IsAuthenticated)
                 {
@@ -802,15 +840,18 @@ namespace FNSyncPlus.WinUI.ViewModels
                     ? $"{createdCount} 个个人空间同步任务已建立并启动。"
                     : $"已建立 {createdCount} 个任务，{fnFailedCount} 个未建立；请查看各项原因。";
                 
-                // 全部创建成功后，重置会话，杜绝残留旧文件夹记录
+                // 全部创建成功后，重置草稿选择并展示创建成功反馈
                 if (createdCount == PlannedTasks.Count)
                 {
+                    var summaries = PlannedTasks.Select(p => $"{p.SourcePath}  →  {p.FinalTargetUnc}").ToList();
                     ResetSession();
+                    ShowCreationSuccess(createdCount, summaries);
                 }
                 return createdCount;
             }
 
             // 2. 传统 SMB 共享校验与创建通道
+            await _connectionService.ConnectTeamShareAsync(NasDestinationRoot);
             var rootValidation = await _smbService.ValidateDirectoryAccessStateAsync(NasDestinationRoot, _settings.NasServer);
             if (!rootValidation.DoesShareExist || !rootValidation.IsDirectoryWritable)
             {
@@ -828,25 +869,15 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             foreach (var item in PlannedTasks)
             {
-                var (ensureOk, ensuredPath, ensureMsg) = await _fnOsService.EnsureSameNameBackupFolderAsync(
-                    NasDestinationRoot, 
-                    item.SourcePath, 
-                    item.TargetSubFolder
-                );
-
-                if (!ensureOk)
+                string ensuredPath = item.FullTargetUnc;
+                if (Directory.Exists(ensuredPath) || File.Exists(ensuredPath))
                 {
                     item.IsFailed = true;
-                    item.StatusText = $"❌ 创建目标失败: {ensureMsg}";
-                    item.ErrorMessage = ensureMsg;
+                    item.ErrorMessage = "目标已经存在，请为新备份选择独立目录。";
                     failedCount++;
                     continue;
                 }
-
                 item.FinalTargetUnc = ensuredPath;
-                item.StatusText = "✔ 目标就绪，任务已建立";
-                item.IsFailed = false;
-
                 var task = new SyncTask
                 {
                     TaskId = Guid.NewGuid().ToString("N"),
@@ -855,6 +886,7 @@ namespace FNSyncPlus.WinUI.ViewModels
                     DestinationRoot = NasDestinationRoot,
                     DestinationFolder = ensuredPath,
                     ProviderType = StorageProviderType.SmbShare,
+                    NasAccountUid = _connectionService.CurrentUid,
                     NasUsername = _connectionService.Username,
                     NasDeviceId = _connectionService.ServerAddress,
                     Mode = SyncMode.OneWayBackup,
@@ -881,10 +913,70 @@ namespace FNSyncPlus.WinUI.ViewModels
 
             if (createdCount > 0 && failedCount == 0)
             {
+                var summaries = PlannedTasks.Select(p => $"{p.SourcePath}  →  {p.FinalTargetUnc}").ToList();
                 ResetSession();
+                ShowCreationSuccess(createdCount, summaries);
             }
 
             return createdCount;
+        }
+
+        private void ShowCreationSuccess(int createdCount, List<string> summaries)
+        {
+            UIThreadHelper.RunOnUIThread(() =>
+            {
+                CreatedTaskSummaries.Clear();
+                foreach (var s in summaries) CreatedTaskSummaries.Add(s);
+                CreationResultTitle = $"已成功创建 {createdCount} 个自动备份任务";
+                CreationResultDetail = "首次自动备份已在后台启动。你可以返回「同步任务」查看实时同步进度，或继续添加其他需要保护的文件夹。";
+                IsCreationComplete = true;
+                UpdateStepState();
+            });
+        }
+
+        public void LoadVisualFixture(int step)
+        {
+            if (!Services.AppServices.IsUiVisualAcceptance) return;
+            UIThreadHelper.RunOnUIThread(() =>
+            {
+                IsNasDisconnectedWarning = false;
+                SelectedLocalFolders.Clear();
+                SelectedLocalFolders.Add(@"D:\Work\2026\Project_Alpha");
+                SelectedLocalFolders.Add(@"D:\Documents\家庭照片与年度归档");
+                NasDestinationRoot = "我的文件";
+                PlannedTasks.Clear();
+                PlannedTasks.Add(new PlannedTaskItem
+                {
+                    SourcePath = @"D:\Work\2026\Project_Alpha",
+                    SourceFolderName = "Project_Alpha",
+                    TargetSubFolder = "Project_Alpha",
+                    FullTargetUnc = "我的文件/Project_Alpha",
+                    FinalTargetUnc = "我的文件/Project_Alpha",
+                    StatusText = "✔ 自动规划同名备份"
+                });
+                PlannedTasks.Add(new PlannedTaskItem
+                {
+                    SourcePath = @"D:\Documents\家庭照片与年度归档",
+                    SourceFolderName = "家庭照片与年度归档",
+                    TargetSubFolder = "家庭照片与年度归档",
+                    FullTargetUnc = "我的文件/家庭照片与年度归档",
+                    FinalTargetUnc = "我的文件/家庭照片与年度归档",
+                    StatusText = "✔ 自动规划同名备份"
+                });
+                SecurityTitle = "飞牛官方个人空间 [我的文件]";
+                SecurityDescription = "已直连当前账号的「我的文件」，将自动为所选文件夹建立独立的同名备份目录。";
+                IsTeamShareWarning = false;
+                CurrentStep = step >= 2 ? 2 : 1;
+                IsCreationComplete = step >= 3;
+                if (IsCreationComplete)
+                {
+                    ShowCreationSuccess(2, PlannedTasks.Select(p => $"{p.SourcePath}  →  {p.FinalTargetUnc}").ToList());
+                }
+                else
+                {
+                    UpdateStepState();
+                }
+            });
         }
     }
 }

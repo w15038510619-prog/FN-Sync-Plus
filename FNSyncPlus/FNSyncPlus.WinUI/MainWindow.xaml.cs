@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using FNSyncPlus.Core.Models;
@@ -18,6 +19,7 @@ namespace FNSyncPlus.WinUI
     public sealed partial class MainWindow : Window
     {
         public MainViewModel ViewModel { get; }
+        public SettingsViewModel Updates { get; }
         private readonly AppSettings _settings;
         private readonly AppWindow _appWindow;
         private readonly LogService _logService;
@@ -29,30 +31,54 @@ namespace FNSyncPlus.WinUI
         public MainWindow(string initialView = "Tasks", int wizardStep = 0)
         {
             ViewModel = AppServices.GetService<MainViewModel>();
+            Updates = AppServices.GetService<SettingsViewModel>();
             _settings = AppServices.GetService<AppSettings>();
             _logService = AppServices.GetService<LogService>();
             InitializeComponent();
 
+            // The version used to be a hard-coded string, so an upgraded install kept claiming the
+            // old version. It now comes from the assembly that is actually running.
+            string displayVer = FNSyncPlus.Core.Updates.UpdateService.DisplayVersion;
+            string product = $"飞牛同步增强版 v{displayVer}";
             string title = AppServices.IsIsolatedTestSession
-                ? (_settings.IsVersionedBetaTestProfile ? "飞牛同步增强版 v0.4.0-beta [隔离测试会话·新版配置]" : "飞牛同步增强版 v0.4.0-beta [隔离测试会话]")
-                : AppServices.IsVersionedBetaSession ? "飞牛同步增强版 v0.4.0-beta [新版备份试用]" : "飞牛同步增强版 v0.4.0-beta [旧版引擎·仅供诊断]";
+                ? (_settings.IsVersionedBetaTestProfile ? product + " [隔离测试会话·新版配置]" : product + " [隔离测试会话]")
+                : AppServices.IsVersionedBetaSession ? product : product + " [旧版引擎·仅供诊断]";
             WindowHelper.ConfigureWindow(this, title, 1200, 780);
-            AppTitleText.Text = title;
+            AppTitleText.Text = "飞牛同步增强版";
+            ToolTipService.SetToolTip(AppTitleText, title);
+            AppVersionTag.Text = $"v{displayVer}";
+            if (AppServices.IsIsolatedTestSession)
+            {
+                SessionTagText.Text = _settings.IsVersionedBetaTestProfile ? "隔离测试·新版" : "隔离测试";
+                SessionTagPill.Visibility = Visibility.Visible;
+            }
+            else if (!AppServices.IsVersionedBetaSession)
+            {
+                SessionTagText.Text = "旧版诊断";
+                SessionTagPill.Visibility = Visibility.Visible;
+            }
+            ViewModel.AppTitle = title;
             _logService.TaskLogWriteFailed += OnTaskLogWriteFailed;
             _appWindow = AppWindow.GetFromWindowId(Microsoft.UI.Win32Interop.GetWindowIdFromWindow(WindowHelper.GetHandle(this)));
+            _appWindow.SetIcon(System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
             InitializeTrayIcon();
             _appWindow.Closing += OnAppWindowClosing;
             Closed += OnWindowClosed;
+            SizeChanged += (_, _) => UpdateTitleBarPadding();
             WindowHelper.SetMicaBackdrop(this);
             SetTitleBar(AppTitleBarDragArea);
+            UpdateTitleBarPadding();
+            ApplyStoredTheme();
 
             ViewModel.RequestNavigate += NavigateToTag;
             ViewModel.RequestToggleTheme += ToggleAppTheme;
+            Updates.ThemeChangedRequested += ApplyThemeExplicit;
             ViewModel.PropertyChanged += (s, e) =>
             {
                 Helpers.UIThreadHelper.RunOnUIThread(() =>
                 {
-                    if (e.PropertyName == nameof(MainViewModel.IsNasConnected))
+                    if (e.PropertyName == nameof(MainViewModel.IsNasConnected) ||
+                        e.PropertyName == nameof(MainViewModel.ConnectionState))
                     {
                         UpdateNasDot();
                     }
@@ -78,9 +104,6 @@ namespace FNSyncPlus.WinUI
                 ka4.Invoked += Accelerator_Settings_Invoked;
                 root.KeyboardAccelerators.Add(ka4);
 
-                var ka5 = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.Number5, Modifiers = Windows.System.VirtualKeyModifiers.Control };
-                ka5.Invoked += Accelerator_TestLab_Invoked;
-                root.KeyboardAccelerators.Add(ka5);
 
                 var kaN = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.N, Modifiers = Windows.System.VirtualKeyModifiers.Control };
                 kaN.Invoked += Accelerator_AddWizard_Invoked;
@@ -118,6 +141,11 @@ namespace FNSyncPlus.WinUI
                         stepApplied = true;
                         await System.Threading.Tasks.Task.Delay(300);
                         var wizardVm = AppServices.GetService<AddFolderWizardViewModel>();
+                        if (AppServices.IsUiVisualAcceptance)
+                        {
+                            wizardVm.LoadVisualFixture(wizardStep);
+                            return;
+                        }
                         if (wizardVm.SelectedLocalFolders.Count == 0)
                         {
                             wizardVm.AddLocalFolder(@"D:\FNSync_GUI_Test_Folders\Project_Alpha");
@@ -148,7 +176,7 @@ namespace FNSyncPlus.WinUI
                     await deviceVm.LoginAsync();
                 };
             }
-            else if (initialView == "RestorePreview" || initialView == "RestoreCompleted")
+            else if (initialView == "RestorePreview")
             {
                 NavigateToTag("Restore");
                 bool ran = false;
@@ -159,15 +187,7 @@ namespace FNSyncPlus.WinUI
                     await System.Threading.Tasks.Task.Delay(500);
                     var restoreVm = AppServices.GetService<RestoreViewModel>();
                     await restoreVm.ScanPackagesAsync();
-                    if (initialView == "RestoreCompleted")
-                    {
-                        await System.Threading.Tasks.Task.Delay(500);
-                        if (restoreVm.SelectedPackage == null && restoreVm.DiscoveredPackages.Count > 0)
-                        {
-                            restoreVm.SelectedPackage = restoreVm.DiscoveredPackages[0];
-                        }
-                        await restoreVm.ExecuteRestoreAsync();
-                    }
+
                 };
             }
             else if (initialView == "TestLabReport")
@@ -195,7 +215,7 @@ namespace FNSyncPlus.WinUI
             {
                 _trayIcon = new TrayIcon(
                     () => DispatcherQueue.TryEnqueue(ShowFromTray),
-                    () => DispatcherQueue.TryEnqueue(async () => await RequestShutdownAsync()));
+                    () => DispatcherQueue.TryEnqueue(async () => await RequestShutdownAsync()), ViewModel.AppTitle);
             }
             catch (Exception ex)
             {
@@ -215,6 +235,19 @@ namespace FNSyncPlus.WinUI
                 catch (Exception ex) { App.LogCrashException(ex, "MainWindow.HideToTray"); }
                 return;
             }
+            _ = RequestShutdownAsync();
+        }
+
+        /// <summary>
+        /// Safe-exit entry point for an update handoff. Runs the same sequence as the exit menu —
+        /// stop new work, wait for running tasks, flush logs, then really close — and can never be
+        /// intercepted by hide-to-tray, because it does not go through AppWindow.Closing.
+        /// </summary>
+        internal void BeginUpdateShutdown(string reason)
+        {
+            if (_shutdownComplete) return;
+            try { AppTitleText.Text = reason; }
+            catch (Exception ex) { App.LogCrashException(ex, "MainWindow.BeginUpdateShutdown"); }
             _ = RequestShutdownAsync();
         }
 
@@ -300,6 +333,7 @@ namespace FNSyncPlus.WinUI
         private void OnWindowClosed(object sender, WindowEventArgs args)
         {
             _logService.TaskLogWriteFailed -= OnTaskLogWriteFailed;
+            Updates.ThemeChangedRequested -= ApplyThemeExplicit;
             try
             {
                 _trayIcon?.Dispose();
@@ -316,8 +350,30 @@ namespace FNSyncPlus.WinUI
             }
         }
 
+        private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
+        {
+            UpdateButton.Flyout.Hide();
+            await Updates.PrepareUpdateAsync(async (version, notes) =>
+            {
+                var dialog = new ContentDialog
+                {
+                    XamlRoot = Content.XamlRoot, Title = $"安装 v{version} 并重启？",
+                    Content = $"{notes}\n\n已排队的同步和正在恢复的文件会先完成。等待期间暂缓开始新任务，可在顶部「更新」中取消等待。",
+                    PrimaryButtonText = "确认，任务结束后安装", CloseButtonText = "稍后再说",
+                    DefaultButton = ContentDialogButton.Close
+                };
+                return await dialog.ShowAsync() == ContentDialogResult.Primary;
+            });
+        }
+
+        private async void Help_Click(object sender, RoutedEventArgs e)
+        {
+            if (ContentFrame.Content is Page page) await PageHelp.For(page).ShowAsync();
+        }
+
         public void NavigateToTag(string tag)
         {
+            if (tag.StartsWith("TestLab", StringComparison.Ordinal) && !AppServices.IsIsolatedTestSession) tag = "Tasks";
             Type targetPageType = tag switch
             {
                 "Tasks" => typeof(TasksPage),
@@ -337,15 +393,116 @@ namespace FNSyncPlus.WinUI
             {
                 addPage.CheckAndTriggerAutoFolderPicker();
             }
+
+            // Visual acceptance only: report this page as ready once its content has actually
+            // loaded and one layout pass has run, so the harness screenshots a rendered page
+            // instead of a white frame or the previous view.
+            if (AppServices.IsUiVisualAcceptance) HookVisualPageReady(tag);
+        }
+
+        private void HookVisualPageReady(string tag)
+        {
+            if (ContentFrame.Content is not FrameworkElement page) return;
+            void Report() => DispatcherQueue.TryEnqueue(() => DispatcherQueue.TryEnqueue(() =>
+            {
+                try
+                {
+                    var manager = AppServices.GetService<TaskManager>();
+                    var metrics = page is Pages.RestorePage restore ? restore.VisualLayoutMetrics()
+                        : page is Pages.DevicePage device ? device.VisualLayoutMetrics() : new Dictionary<string, object?>();
+                    metrics["task_count"] = manager.Tasks.Count;
+                    metrics["nas_online"] = manager.IsNasOnline;
+                    metrics["tray_tooltip"] = _trayIcon?.DisplayText;
+                    var caption = _appWindow.TitleBar.ButtonForegroundColor;
+                    var inactive = _appWindow.TitleBar.ButtonInactiveForegroundColor;
+                    metrics["caption_foreground"] = caption.HasValue ? $"{caption.Value.R:X2}{caption.Value.G:X2}{caption.Value.B:X2}" : "default";
+                    metrics["caption_inactive_foreground"] = inactive.HasValue ? $"{inactive.Value.R:X2}{inactive.Value.G:X2}{inactive.Value.B:X2}" : "default";
+                    UiVisualSignal.ReportPageReady(tag, metrics);
+                    if (Array.IndexOf(Environment.GetCommandLineArgs(), "--show-help-fixture") >= 0 && page is Page helpPage)
+                    {
+                        _ = PageHelp.For(helpPage).ShowAsync();
+                    }
+                }
+                catch (Exception ex) { App.LogCrashException(ex, "MainWindow.VisualPageReady"); }
+            }));
+            page.SizeChanged += (_, _) => Report();
+            if (page.IsLoaded)
+            {
+                Report();
+                return;
+            }
+            RoutedEventHandler? once = null;
+            once = (s, e) =>
+            {
+                page.Loaded -= once!;
+                Report();
+            };
+            page.Loaded += once;
+        }
+
+        private void UpdateTitleBarPadding()
+        {
+            try
+            {
+                double scale = Content?.XamlRoot?.RasterizationScale ?? 1.0;
+                double rightInset = _appWindow.TitleBar.RightInset > 0
+                    ? _appWindow.TitleBar.RightInset / Math.Max(1.0, scale)
+                    : 144.0;
+                AppTitleBar.Padding = new Thickness(14, 0, Math.Max(144.0, rightInset + 8), 0);
+            }
+            catch
+            {
+                AppTitleBar.Padding = new Thickness(14, 0, 148, 0);
+            }
+        }
+
+        /// <summary>
+        /// Applies the theme the user saved last time. The setting used to be written but never read,
+        /// so a dark-mode user got a light window on every launch until they toggled it again.
+        /// </summary>
+        private void ApplyStoredTheme()
+        {
+            try
+            {
+                bool dark = string.Equals(_settings.AppTheme, "Dark", StringComparison.OrdinalIgnoreCase);
+                ApplyThemeVisuals(dark);
+                Updates.SyncThemeFromShell(dark);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"应用主题失败: {ex.Message}");
+            }
+        }
+
+        private void ApplyThemeVisuals(bool dark)
+        {
+            if (Content is FrameworkElement root) root.RequestedTheme = dark ? ElementTheme.Dark : ElementTheme.Light;
+            WindowHelper.ApplyCaptionTheme(this, dark);
+            IconThemeToggle.Glyph = dark ? "\uE706" : "\uE708";
+            ToolTipService.SetToolTip(BtnThemeToggle, dark ? "切换为浅色主题" : "切换为深色主题");
+        }
+
+        private void ApplyThemeExplicit(bool dark)
+        {
+            ApplyThemeVisuals(dark);
+            try
+            {
+                _settings.AppTheme = dark ? "Dark" : "Light";
+                _settings.Save();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"保存主题失败: {ex.Message}");
+            }
         }
 
         private void ToggleAppTheme()
         {
             if (Content is FrameworkElement rootElement)
             {
-                bool isDark = rootElement.ActualTheme == ElementTheme.Dark;
-                rootElement.RequestedTheme = isDark ? ElementTheme.Light : ElementTheme.Dark;
-                IconThemeToggle.Glyph = isDark ? "\uE706" : "\uE708"; // Sun / Moon
+                bool nextDark = rootElement.ActualTheme != ElementTheme.Dark;
+                ApplyThemeExplicit(nextDark);
+                Updates.SyncThemeFromShell(nextDark);
             }
         }
 
@@ -367,9 +524,14 @@ namespace FNSyncPlus.WinUI
         {
             Helpers.UIThreadHelper.RunOnUIThread(() =>
             {
-                DotNasStatus.Fill = ViewModel.IsNasConnected
-                    ? new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 16, 185, 129))
-                    : new Microsoft.UI.Xaml.Media.SolidColorBrush(Windows.UI.Color.FromArgb(255, 148, 163, 184));
+                var color = ViewModel.ConnectionState switch
+                {
+                    NasConnectionState.Connected => Windows.UI.Color.FromArgb(255, 16, 185, 129),
+                    NasConnectionState.Connecting => Windows.UI.Color.FromArgb(255, 245, 158, 11),
+                    NasConnectionState.AuthenticationFailed or NasConnectionState.ConnectionLost => Windows.UI.Color.FromArgb(255, 239, 68, 68),
+                    _ => Windows.UI.Color.FromArgb(255, 148, 163, 184)
+                };
+                DotNasStatus.Fill = new Microsoft.UI.Xaml.Media.SolidColorBrush(color);
             });
         }
 
@@ -401,15 +563,6 @@ namespace FNSyncPlus.WinUI
             args.Handled = true;
         }
 
-        private void Accelerator_TestLab_Invoked(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
-        {
-            NavigateToTag("TestLab");
-            if (NavView.MenuItems.Count >= 4)
-            {
-                NavView.SelectedItem = NavView.MenuItems[3];
-            }
-            args.Handled = true;
-        }
 
         private async void Accelerator_AddWizard_Invoked(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
         {

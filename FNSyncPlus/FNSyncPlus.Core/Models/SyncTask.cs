@@ -140,6 +140,14 @@ namespace FNSyncPlus.Core.Models
         [JsonPropertyName("last_error")]
         public string? LastError { get; set; }
 
+        /// <summary>
+        /// 上一次因模糊改名停止时的结构化差异（JSON），用于任务详情中显示原/候选路径、大小、
+        /// SHA-256 并允许用户显式确认配对。成功提交后清除。
+        /// </summary>
+        [JsonPropertyName("pending_rename_details")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? PendingRenameDetails { get; set; }
+
         [JsonPropertyName("task_manifest_id")]
         public string TaskManifestId { get; set; } = Guid.NewGuid().ToString("N");
 

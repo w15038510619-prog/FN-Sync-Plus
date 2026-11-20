@@ -377,7 +377,11 @@ namespace FNSyncPlus.Core.Storage
                 return _rootUncPath;
             }
 
-            string cleanRel = relativePath.TrimStart('/', '\\').Replace('/', '\\');
+            // Windows uses backslash separators under the UNC root; POSIX builds (tests, CI on Linux)
+            // must keep forward slashes or Path.Combine would produce a literal backslash in the name.
+            string cleanRel = OperatingSystem.IsWindows()
+                ? relativePath.TrimStart('/', '\\').Replace('/', '\\')
+                : relativePath.TrimStart('/', '\\').Replace('\\', '/');
             return Path.Combine(_rootUncPath, cleanRel);
         }
 

@@ -6,98 +6,111 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:vm="using:FNSyncPlus.WinUI.ViewModels"
-    Title="任务详情与诊断中心"
+    xmlns:controls="using:FNSyncPlus.WinUI.Controls"
+    Title="任务详情与诊断"
     CloseButtonText="关闭"
     DefaultButton="Close"
     mc:Ignorable="d">
 
-    <Grid MaxWidth="1050" MinHeight="440" MaxHeight="720" RowSpacing="10" Padding="0,4,0,0">
+    <Grid MaxWidth="920" MinHeight="420" MaxHeight="560" RowSpacing="12" Padding="0,4,0,0">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
         <!-- 1. TOP SUMMARY CARD -->
-        <Border Grid.Row="0" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14,10">
-            <StackPanel Spacing="6">
+        <Border Grid.Row="0" Style="{StaticResource CompactCardStyle}" Padding="14,12">
+            <StackPanel Spacing="8">
                 <!-- Task Name & Storage Provider Header -->
-                <Grid>
+                <Grid ColumnSpacing="10">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <Grid Grid.Column="0" ColumnSpacing="8" VerticalAlignment="Center">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                        <TextBlock Text="{x:Bind ViewModel.TaskName, Mode=OneWay}" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind ViewModel.TaskName, Mode=OneWay}" />
-                        <Border Grid.Column="1" Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="6,2" VerticalAlignment="Center">
-                            <TextBlock Text="{x:Bind ViewModel.StorageTypeDisplay, Mode=OneWay}" FontSize="10" MaxWidth="150" TextTrimming="CharacterEllipsis" ToolTipService.ToolTip="{x:Bind ViewModel.StorageTypeDisplay, Mode=OneWay}" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
-                        </Border>
-                    </Grid>
-                    <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.TransferredSummaryText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <TextBlock Text="{x:Bind ViewModel.TaskName, Mode=OneWay}" FontSize="15" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorPrimaryBrush}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" MaxWidth="360" ToolTipService.ToolTip="{x:Bind ViewModel.TaskName, Mode=OneWay}" />
+                        <controls:StatusBadge Text="{x:Bind ViewModel.StorageTypeDisplay, Mode=OneWay}" Tone="Accent" MaxTextWidth="150" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.TransferredSummaryText, Mode=OneWay}" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
                 </Grid>
 
-                <!-- Source Path Row with Copy -->
-                <Grid ColumnSpacing="8">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="65" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="源文件夹:" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
-                    <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.SourceFolder, Mode=OneWay}" FontSize="11" FontFamily="Consolas" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind ViewModel.SourceFolder, Mode=OneWay}" />
-                    <Button Grid.Column="2" Click="BtnCopySourcePath_Click" Style="{ThemeResource SubtleButtonStyle}" Padding="6,2" ToolTipService.ToolTip="复制源路径">
-                        <FontIcon Glyph="&#xE8C8;" FontSize="11" />
-                    </Button>
-                </Grid>
+                <!-- Source & Destination Inset Paths -->
+                <Border Style="{StaticResource InsetSurfaceStyle}" Padding="10,7">
+                    <StackPanel Spacing="4">
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="64" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="本地源目录" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.SourceFolder, Mode=OneWay}" Style="{StaticResource MonoPathTextStyle}" Foreground="{ThemeResource TextFillColorPrimaryBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind ViewModel.SourceFolder, Mode=OneWay}" />
+                            <Button Grid.Column="2" Click="BtnCopySourcePath_Click" Style="{StaticResource SubtleIconButtonStyle}" Padding="5,2" ToolTipService.ToolTip="复制源路径">
+                                <FontIcon Glyph="&#xE8C8;" FontSize="11" />
+                            </Button>
+                        </Grid>
 
-                <!-- NAS Target Path Row with Copy -->
-                <Grid ColumnSpacing="8">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="65" />
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="NAS 目标:" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" />
-                    <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.DestinationFolder, Mode=OneWay}" FontSize="11" FontFamily="Consolas" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind ViewModel.DestinationFolder, Mode=OneWay}" />
-                    <Button Grid.Column="2" Click="BtnCopyDestPath_Click" Style="{ThemeResource SubtleButtonStyle}" Padding="6,2" ToolTipService.ToolTip="复制目标路径">
-                        <FontIcon Glyph="&#xE8C8;" FontSize="11" />
-                    </Button>
-                </Grid>
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="64" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="NAS 备份" Style="{StaticResource CaptionTextStyle}" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1" Text="{x:Bind ViewModel.DestinationFolder, Mode=OneWay}" Style="{StaticResource MonoPathTextStyle}" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind ViewModel.DestinationFolder, Mode=OneWay}" />
+                            <Button Grid.Column="2" Click="BtnCopyDestPath_Click" Style="{StaticResource SubtleIconButtonStyle}" Padding="5,2" ToolTipService.ToolTip="复制目标路径">
+                                <FontIcon Glyph="&#xE8C8;" FontSize="11" />
+                            </Button>
+                        </Grid>
+                    </StackPanel>
+                </Border>
 
                 <!-- Metrics Capsules -->
-                <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,2,0,0">
-                    <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="7,2">
-                        <TextBlock Text="{x:Bind ViewModel.ScannedFilesText, Mode=OneWay}" FontSize="11" />
-                    </Border>
-                    <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="7,2">
-                        <TextBlock Text="{x:Bind ViewModel.UploadedFilesText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource SystemFillColorSuccessBrush}" FontWeight="SemiBold" />
-                    </Border>
-                    <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="7,2">
-                        <TextBlock Text="{x:Bind ViewModel.UnchangedFilesText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    </Border>
-                    <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="7,2">
-                        <TextBlock Text="{x:Bind ViewModel.LongNameFilesText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" FontWeight="SemiBold" />
-                    </Border>
-                    <Border Background="{ThemeResource SubtleFillColorSecondaryBrush}" CornerRadius="4" Padding="7,2">
-                        <TextBlock Text="{x:Bind ViewModel.FailedFilesText, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource SystemFillColorCriticalBrush}" FontWeight="Bold" />
-                    </Border>
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <controls:StatusBadge Text="{x:Bind ViewModel.ScannedFilesText, Mode=OneWay}" Tone="Neutral" />
+                    <controls:StatusBadge Text="{x:Bind ViewModel.UploadedFilesText, Mode=OneWay}" Tone="Success" />
+                    <controls:StatusBadge Text="{x:Bind ViewModel.UnchangedFilesText, Mode=OneWay}" Tone="Neutral" />
+                    <controls:StatusBadge Text="{x:Bind ViewModel.LongNameFilesText, Mode=OneWay}" Tone="Info" />
+                    <controls:StatusBadge Text="{x:Bind ViewModel.FailedFilesText, Mode=OneWay}" Tone="Error" />
                 </StackPanel>
 
-                <!-- 无法唯一确认的改名差异：上一份备份保留，等待用户检查 -->
+                <!-- Ambiguous Rename Differences Notice -->
                 <InfoBar IsOpen="True" Severity="Warning" IsClosable="False"
                          Visibility="{x:Bind GetPendingDifferencesVisibility(ViewModel.HasPendingDifferences), Mode=OneWay}"
                          Message="{x:Bind ViewModel.PendingDifferenceNotice, Mode=OneWay}" />
+
+                <!-- Confirmable Rename Candidates -->
+                <StackPanel Spacing="6" Visibility="{x:Bind GetPendingDifferencesVisibility(ViewModel.HasRenameCandidates), Mode=OneWay}">
+                    <TextBlock Text="如果确认这是重命名，可为每组旧文件选择当前接替的文件；提交前会重新校验内容。" Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.PendingRenameGroups, Mode=OneWay}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="vm:AmbiguousRenameGroupDisplay">
+                                <Border Style="{StaticResource InsetSurfaceStyle}" Padding="10,8" Margin="0,0,0,6">
+                                    <StackPanel Spacing="4">
+                                        <TextBlock FontSize="12" TextWrapping="Wrap">
+                                            <Run Text="原备份文件：" FontWeight="SemiBold" />
+                                            <Run Text="{x:Bind OldPath}" />
+                                        </TextBlock>
+                                        <TextBlock Style="{StaticResource CaptionTextStyle}" TextWrapping="Wrap">
+                                            <Run Text="{x:Bind SizeText}" /> <Run Text="字节 · SHA-256 " /><Run Text="{x:Bind Sha256Short}" />
+                                        </TextBlock>
+                                        <TextBlock Text="{x:Bind Reason}" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource SystemFillColorCautionBrush}" />
+                                        <ComboBox ItemsSource="{x:Bind Candidates}" SelectedItem="{x:Bind SelectedCandidate, Mode=TwoWay}" PlaceholderText="选择接替该内容的新文件" HorizontalAlignment="Stretch" />
+                                        <Button Content="确认这一组配对" Click="BtnConfirmSingleRenamePair_Click" Tag="{Binding}" HorizontalAlignment="Right" Style="{StaticResource CompactSecondaryButtonStyle}" />
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <TextBlock Text="{x:Bind ViewModel.RenameConfirmationMessage, Mode=OneWay}" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                </StackPanel>
             </StackPanel>
         </Border>
 
         <!-- 2. TABS: LONG NAME MAPPINGS & LOGS -->
-        <TabView Grid.Row="1" CanDragTabs="False" CanReorderTabs="False">
-            <TabView.TabStripFooter>
-                <Border />
-            </TabView.TabStripFooter>
-
+        <TabView Grid.Row="1" CanDragTabs="False" CanReorderTabs="False" IsAddTabButtonVisible="False">
             <!-- Tab 1: Long Name Mapping Table -->
-            <TabViewItem Header="超长文件名别名映射清单" IsClosable="False">
+            <TabViewItem Header="超长文件名映射" IsClosable="False">
                 <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="0,0,8,8" Padding="12">
                     <Grid RowSpacing="8">
                         <Grid.RowDefinitions>
@@ -106,21 +119,19 @@
                             <RowDefinition Height="*" />
                         </Grid.RowDefinitions>
 
-                        <!-- Status Notice Banner -->
                         <InfoBar Grid.Row="0" IsOpen="True" Severity="Informational" Message="{x:Bind ViewModel.ManifestStatusNotice, Mode=OneWay}" IsClosable="False" />
 
-                        <TextBlock Grid.Row="1" Text="超长名称、备份位置与校验值" FontSize="11" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBlock Grid.Row="1" Text="超长名称、备份位置与校验值" Style="{StaticResource CaptionTextStyle}" FontWeight="SemiBold" />
 
-                        <!-- Empty State Notice -->
-                        <Grid Grid.Row="2" Visibility="{x:Bind GetEmptyMappingsVisibility(ViewModel.HasLongNameMappings, ViewModel.HasManifestResult), Mode=OneWay}" MinHeight="160">
-                            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8">
-                                <FontIcon Glyph="&#xE73E;" FontSize="32" Foreground="{ThemeResource SystemFillColorSuccessBrush}" HorizontalAlignment="Center" />
-                                <TextBlock Text="当前备份任务暂无超长文件名映射" FontSize="13" FontWeight="Medium" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
-                                <TextBlock Text="已读取清单，没有需要显示的超长名称。" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
+                        <!-- Empty State -->
+                        <Grid Grid.Row="2" Visibility="{x:Bind GetEmptyMappingsVisibility(ViewModel.HasLongNameMappings, ViewModel.HasManifestResult), Mode=OneWay}" MinHeight="140">
+                            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="6">
+                                <FontIcon Glyph="&#xE73E;" FontSize="28" Foreground="{ThemeResource SystemFillColorSuccessBrush}" HorizontalAlignment="Center" />
+                                <TextBlock Text="当前任务暂无超长文件名映射" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
+                                <TextBlock Text="已读取清单，所有文件均采用原始文件名存储。" Style="{StaticResource CaptionTextStyle}" HorizontalAlignment="Center" />
                             </StackPanel>
                         </Grid>
 
-                        <!-- Wrap long paths within the dialog instead of clipping the remaining fields. -->
                         <ListView Grid.Row="2" Visibility="{x:Bind GetHasMappingsVisibility(ViewModel.HasLongNameMappings), Mode=OneWay}"
                                   ItemsSource="{x:Bind ViewModel.LongNameMappings, Mode=OneWay}" SelectionMode="None"
                                   ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled"
@@ -132,20 +143,20 @@
                             </ListView.ItemContainerStyle>
                             <ListView.ItemTemplate>
                                 <DataTemplate x:DataType="vm:LongNameMappingDisplayItem">
-                                    <Grid Padding="6,7" RowSpacing="4" ColumnSpacing="6" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
+                                    <Grid Padding="6,7" RowSpacing="4" ColumnSpacing="6" BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}" BorderThickness="0,0,0,1">
                                         <Grid.RowDefinitions>
                                             <RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" />
                                         </Grid.RowDefinitions>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
-                                        <TextBlock Text="{x:Bind EntryType}" FontSize="10" VerticalAlignment="Top" />
+                                        <TextBlock Text="{x:Bind EntryType}" FontSize="10" VerticalAlignment="Top" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                         <TextBlock Grid.Column="1" Text="{x:Bind OriginalRel}" FontSize="11" TextWrapping="Wrap" ToolTipService.ToolTip="{x:Bind OriginalRel}" />
                                         <TextBlock Grid.Column="2" Text="{x:Bind Utf8BytesFormatted}" FontSize="11" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
-                                        <Button Grid.Column="3" Click="BtnCopyMappingItem_Click" Tag="{x:Bind OriginalRel}" Style="{ThemeResource SubtleButtonStyle}" Padding="6,2" ToolTipService.ToolTip="复制原始路径">
+                                        <Button Grid.Column="3" Click="BtnCopyMappingItem_Click" Tag="{x:Bind OriginalRel}" Style="{StaticResource SubtleIconButtonStyle}" Padding="5,2" ToolTipService.ToolTip="复制原始路径">
                                             <FontIcon Glyph="&#xE8C8;" FontSize="10" />
                                         </Button>
-                                        <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3" Text="{x:Bind StorageText}" FontSize="11" FontFamily="Consolas" TextWrapping="Wrap" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" ToolTipService.ToolTip="{x:Bind StoredRel}" />
+                                        <TextBlock Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3" Text="{x:Bind StorageText}" Style="{StaticResource MonoPathTextStyle}" TextWrapping="Wrap" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" ToolTipService.ToolTip="{x:Bind StoredRel}" />
                                         <TextBlock Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3" Text="{x:Bind HashText}" FontSize="10" FontFamily="Consolas" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorTertiaryBrush}" ToolTipService.ToolTip="{x:Bind Sha256}" />
                                     </Grid>
                                 </DataTemplate>
@@ -156,11 +167,10 @@
             </TabViewItem>
 
             <!-- Tab 2: Diagnostic Logs -->
-            <TabViewItem Header="实时诊断与历史排障日志" IsClosable="False">
+            <TabViewItem Header="诊断日志" IsClosable="False">
                 <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="0,0,8,8" Padding="12">
                     <Grid RowSpacing="8">
                         <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
                         </Grid.RowDefinitions>
@@ -173,76 +183,76 @@
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBox Grid.Column="0" PlaceholderText="搜索关键字或批次号..." Text="{x:Bind ViewModel.LogSearchQuery, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                                <Button Grid.Column="1" Content="搜索全部" Click="BtnSearchAllLogs_Click" />
-                                <ComboBox Grid.Column="2" SelectedIndex="{x:Bind ViewModel.SelectedLogLevelIndex, Mode=TwoWay}" Width="110">
+                                <TextBox Grid.Column="0" PlaceholderText="搜索关键字或批次号…" Text="{x:Bind ViewModel.LogSearchQuery, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                <Button Grid.Column="1" Content="搜索全部" Click="BtnSearchAllLogs_Click" Style="{StaticResource SecondaryActionButtonStyle}" />
+                                <ComboBox Grid.Column="2" SelectedIndex="{x:Bind ViewModel.SelectedLogLevelIndex, Mode=TwoWay}" Width="116">
                                     <ComboBoxItem Content="全部日志" />
                                     <ComboBoxItem Content="仅看错误" />
                                     <ComboBoxItem Content="错误与警告" />
                                 </ComboBox>
                             </Grid>
                             <StackPanel Orientation="Horizontal" Spacing="6">
-                                <Button Click="BtnRefreshLogs_Click" Style="{ThemeResource SubtleButtonStyle}" Padding="8,4" ToolTipService.ToolTip="刷新日志">
+                                <Button Click="BtnRefreshLogs_Click" Style="{StaticResource CompactSecondaryButtonStyle}" ToolTipService.ToolTip="刷新日志">
                                     <StackPanel Orientation="Horizontal" Spacing="4">
                                         <FontIcon Glyph="&#xE72C;" FontSize="11" />
                                         <TextBlock Text="刷新" FontSize="11" />
                                     </StackPanel>
                                 </Button>
-                                <Button Click="BtnCopyErrors_Click" Style="{ThemeResource SubtleButtonStyle}" Padding="8,4" ToolTipService.ToolTip="复制所有错误日志">
+                                <Button Click="BtnCopyErrors_Click" Style="{StaticResource CompactSecondaryButtonStyle}" ToolTipService.ToolTip="复制所有错误日志">
                                     <StackPanel Orientation="Horizontal" Spacing="4">
                                         <FontIcon Glyph="&#xE8C8;" FontSize="11" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
                                         <TextBlock Text="复制错误" FontSize="11" Foreground="{ThemeResource SystemFillColorCriticalBrush}" />
                                     </StackPanel>
                                 </Button>
-                                <Button Click="BtnOpenLogDir_Click" Style="{ThemeResource SubtleButtonStyle}" Padding="8,4" ToolTipService.ToolTip="在文件资源管理器中打开日志目录">
+                                <Button Click="BtnOpenLogDir_Click" Style="{StaticResource CompactSecondaryButtonStyle}" ToolTipService.ToolTip="在文件资源管理器中打开日志目录">
                                     <StackPanel Orientation="Horizontal" Spacing="4">
                                         <FontIcon Glyph="&#xE838;" FontSize="11" />
                                         <TextBlock Text="打开目录" FontSize="11" />
                                     </StackPanel>
                                 </Button>
-                                <Button Click="BtnExportDiag_Click" Style="{ThemeResource SubtleButtonStyle}" Padding="8,4" ToolTipService.ToolTip="导出单任务完整诊断包 (.zip)">
+                                <Button Click="BtnExportDiag_Click" Style="{StaticResource CompactSecondaryButtonStyle}" ToolTipService.ToolTip="导出单任务完整诊断包 (.zip)">
                                     <StackPanel Orientation="Horizontal" Spacing="4">
                                         <FontIcon Glyph="&#xEDE1;" FontSize="11" />
                                         <TextBlock Text="导出诊断包" FontSize="11" />
                                     </StackPanel>
                                 </Button>
                             </StackPanel>
-                            <TextBlock Text="{x:Bind ViewModel.StatusFeedbackMessage, Mode=OneWay}" FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextWrapping="Wrap" />
-                            <TextBlock Text="输入后筛选最近日志；点击“搜索全部”可检索该任务已保存的历史日志，最多显示最近 500 条结果。" FontSize="11" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock Text="{x:Bind ViewModel.StatusFeedbackMessage, Mode=OneWay}"
+                                       Visibility="{x:Bind ViewModel.StatusFeedbackMessage, Mode=OneWay, Converter={StaticResource StringNotEmptyToVisibilityConverter}}"
+                                       FontSize="11" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" TextWrapping="Wrap" />
                         </StackPanel>
 
                         <!-- Empty Logs State -->
-                        <Grid Grid.Row="2" Visibility="{x:Bind GetEmptyLogsVisibility(ViewModel.HasLogs), Mode=OneWay}" MinHeight="160">
+                        <Grid Grid.Row="1" Visibility="{x:Bind GetEmptyLogsVisibility(ViewModel.HasLogs), Mode=OneWay}" MinHeight="140">
                             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="6">
-                                <FontIcon Glyph="&#xE9CE;" FontSize="32" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
-                                <TextBlock Text="暂无诊断日志或搜索结果" FontSize="13" FontWeight="Medium" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
-                                <TextBlock Text="任务在扫描、上传与校验过程中产生的详细日志将自动持久化至本地硬盘。" FontSize="11" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
+                                <FontIcon Glyph="&#xE9CE;" FontSize="28" Foreground="{ThemeResource TextFillColorTertiaryBrush}" HorizontalAlignment="Center" />
+                                <TextBlock Text="暂无匹配的诊断日志" FontSize="13" FontWeight="SemiBold" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center" />
+                                <TextBlock Text="任务扫描、上传与校验日志会自动保存在本地。" Style="{StaticResource CaptionTextStyle}" HorizontalAlignment="Center" />
                             </StackPanel>
                         </Grid>
 
-                        <!-- Wrap log entries within the available width. -->
-                        <ListView Grid.Row="2" Visibility="{x:Bind GetHasLogsVisibility(ViewModel.HasLogs), Mode=OneWay}"
+                        <ListView Grid.Row="1" Visibility="{x:Bind GetHasLogsVisibility(ViewModel.HasLogs), Mode=OneWay}"
                                   ItemsSource="{x:Bind ViewModel.FilteredLogs, Mode=OneWay}" SelectionMode="None"
                                   ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
-                                <ListView.ItemContainerStyle>
-                                    <Style TargetType="ListViewItem">
-                                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                                    </Style>
-                                </ListView.ItemContainerStyle>
-                                <ListView.ItemTemplate>
-                                    <DataTemplate x:DataType="vm:TaskLogDisplayItem">
-                                        <Grid Padding="4,3">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*" />
-                                                <ColumnDefinition Width="Auto" />
-                                            </Grid.ColumnDefinitions>
-                                            <TextBlock Grid.Column="0" Text="{x:Bind FullFormattedText}" FontSize="11" FontFamily="Consolas, Segoe UI" TextWrapping="Wrap" IsTextSelectionEnabled="True" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                                            <Button Grid.Column="1" Click="BtnCopySingleLog_Click" Tag="{x:Bind FullFormattedText}" Style="{ThemeResource SubtleButtonStyle}" Padding="4,2" VerticalAlignment="Top" ToolTipService.ToolTip="复制此条日志">
-                                                <FontIcon Glyph="&#xE8C8;" FontSize="9" />
-                                            </Button>
-                                        </Grid>
-                                    </DataTemplate>
-                                </ListView.ItemTemplate>
+                            <ListView.ItemContainerStyle>
+                                <Style TargetType="ListViewItem">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                </Style>
+                            </ListView.ItemContainerStyle>
+                            <ListView.ItemTemplate>
+                                <DataTemplate x:DataType="vm:TaskLogDisplayItem">
+                                    <Grid Padding="4,3" ColumnSpacing="6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{x:Bind FullFormattedText}" Style="{StaticResource MonoPathTextStyle}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                                        <Button Grid.Column="1" Click="BtnCopySingleLog_Click" Tag="{x:Bind FullFormattedText}" Style="{StaticResource SubtleIconButtonStyle}" Padding="4,2" VerticalAlignment="Top" ToolTipService.ToolTip="复制此条日志">
+                                            <FontIcon Glyph="&#xE8C8;" FontSize="9" />
+                                        </Button>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
                         </ListView>
                     </Grid>
                 </Border>
